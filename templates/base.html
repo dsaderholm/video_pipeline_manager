@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Pipeline Pro</title>
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Icons -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" rel="stylesheet">
+	<!-- React Scripts -->
+	<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+	<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        primary: {
+                            50: '#fff1f1',
+                            100: '#ffdfdf',
+                            200: '#ffc5c5',
+                            300: '#ff9d9d',
+                            400: '#ff6464',
+                            500: '#fc4828',
+                            600: '#ed1d1d',
+                            700: '#c71d0f',
+                            800: '#a11b13',
+                            900: '#851c15',
+                        },
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    },
+                },
+            },
+        }
+    </script>
+    <style>
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        
+        ::-webkit-scrollbar-track {
+            background: #1a1a1a;
+        }
+        
+        ::-webkit-scrollbar-thumb {
+            background: #333;
+            border-radius: 4px;
+        }
+        
+        ::-webkit-scrollbar-thumb:hover {
+            background: #444;
+        }
+
+        /* Animations */
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .fade-in {
+            animation: fadeIn 0.3s ease-out forwards;
+        }
+
+        /* Glass Effect */
+        .glass {
+            background: rgba(30, 30, 30, 0.7);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+        }
+
+        /* Gradient Text */
+        .gradient-text {
+            background: linear-gradient(135deg, #fc4828, #ff6b54);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        /* Custom Focus Styles */
+        .focus-ring {
+            @apply focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 focus:ring-offset-gray-900;
+        }
+		/* Form Controls */
+		input:not([type="checkbox"]):not([type="radio"]), 
+		select, 
+		textarea {
+			background-color: rgb(17, 24, 39) !important;
+			border-color: rgb(55, 65, 81) !important;
+			border-width: 1px !important;
+			border-radius: 0.5rem !important;
+			padding: 0.5rem 1rem !important;
+			color: rgb(243, 244, 246) !important;
+			-webkit-appearance: none !important;
+			-moz-appearance: none !important;
+			appearance: none !important;
+		}
+
+		/* Style the select arrow */
+		select {
+			background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3E%3Cpath stroke='%23999' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3E%3C/svg%3E");
+			background-position: right 0.5rem center;
+			background-repeat: no-repeat;
+			background-size: 1.5em 1.5em;
+			padding-right: 2.5rem;
+		}
+
+		/* Fix checkbox and radio backgrounds */
+		input[type="checkbox"],
+		input[type="radio"] {
+			background-color: rgb(17, 24, 39) !important;
+			border-color: rgb(55, 65, 81) !important;
+			color: #fc4828 !important;
+		}
+
+		/* Ensure placeholder text is visible but slightly dimmed */
+		input::placeholder,
+		textarea::placeholder,
+		select::placeholder {
+			color: rgb(156, 163, 175) !important;
+		}
+
+        /* Loading Shimmer Effect */
+        @keyframes shimmer {
+            0% { background-position: -1000px 0; }
+            100% { background-position: 1000px 0; }
+        }
+
+        .shimmer {
+            animation: shimmer 2s infinite linear;
+            background: linear-gradient(to right, #1a1a1a 4%, #333 25%, #1a1a1a 36%);
+            background-size: 1000px 100%;
+        }
+
+        /* Tooltips */
+        [data-tooltip] {
+            position: relative;
+        }
+
+        [data-tooltip]:before {
+            content: attr(data-tooltip);
+            position: absolute;
+            bottom: 100%;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 4px 8px;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            font-size: 12px;
+            border-radius: 4px;
+            white-space: nowrap;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.2s ease;
+        }
+
+        [data-tooltip]:hover:before {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        /* Toast Notifications */
+        .toast {
+            position: fixed;
+            top: 1rem;
+            right: 1rem;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            background: rgba(30, 30, 30, 0.9);
+            color: white;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            z-index: 50;
+            opacity: 0;
+            transform: translateX(100%);
+            transition: all 0.3s ease;
+        }
+
+        .toast.show {
+            opacity: 1;
+            transform: translateX(0);
+        }
+
+        /* Status Indicators */
+        .status-dot {
+            @apply w-2.5 h-2.5 rounded-full;
+        }
+
+        .status-dot.active {
+            @apply bg-green-500;
+            box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.2);
+        }
+
+        .status-dot.warning {
+            @apply bg-yellow-500;
+            box-shadow: 0 0 0 2px rgba(234, 179, 8, 0.2);
+        }
+
+        .status-dot.error {
+            @apply bg-red-500;
+            box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.2);
+        }
+    </style>
+    {% block head %}{% endblock %}
+</head>
+<body class="min-h-screen bg-gray-900 text-gray-100">
+    <!-- Navigation -->
+    <nav class="glass border-b border-gray-800 sticky top-0 z-10">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-16">
+                <div class="flex items-center">
+                    <a href="/" class="flex items-center">
+                        <i class="fas fa-video text-primary-500 text-2xl mr-2"></i>
+                        <span class="font-bold text-xl">Video Pipeline Pro</span>
+                    </a>
+                </div>
+				<div class="flex items-center space-x-4">
+					<a href="/" class="hover:text-primary-500 transition-colors">
+						<i class="fas fa-home mr-1"></i> Home
+					</a>
+					<a href="/manage" class="hover:text-primary-500 transition-colors">
+						<i class="fas fa-cog mr-1"></i> Manage
+					</a>
+					<a href="/logs" class="hover:text-primary-500 transition-colors">
+						<i class="fas fa-clipboard-list mr-1"></i> Logs
+					</a>
+				</div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- Toast Container -->
+    <div id="toast-container"></div>
+
+    <!-- Base Scripts -->
+    <script>
+        // Enhanced Toast Notification System
+		function showToast(message, type = 'info') {
+			let container = document.getElementById('toast-container');
+			if (!container) {
+				container = document.createElement('div');
+				container.id = 'toast-container';
+				container.className = 'fixed bottom-4 right-4 z-50';
+				document.body.appendChild(container);
+			}
+
+			const toast = document.createElement('div');
+			const baseClass = 'mb-2 p-4 rounded-lg shadow-lg text-white';
+			const typeClass = type === 'error' ? 'bg-red-600' : 
+							 type === 'success' ? 'bg-green-600' : 
+							 'bg-blue-600';
+			
+			toast.className = `${baseClass} ${typeClass}`;
+			toast.textContent = message;
+			container.appendChild(toast);
+
+			setTimeout(() => {
+				toast.style.opacity = '0';
+				setTimeout(() => container.removeChild(toast), 300);
+			}, 3000);
+		}
+
+        // Form validation helper
+        function validateForm(formElement) {
+            const requiredFields = formElement.querySelectorAll('[required]');
+            let isValid = true;
+
+            requiredFields.forEach(field => {
+                if (!field.value.trim()) {
+                    field.classList.add('border-red-500');
+                    showToast(`${field.name || 'Field'} is required`, 'error');
+                    isValid = false;
+                } else {
+                    field.classList.remove('border-red-500');
+                }
+            });
+
+            return isValid;
+        }
+
+        // Add loading state to buttons
+        function setButtonLoading(button, isLoading) {
+            if (isLoading) {
+                button.disabled = true;
+                const originalContent = button.innerHTML;
+                button.setAttribute('data-original-content', originalContent);
+                button.innerHTML = `
+                    <svg class="animate-spin h-5 w-5 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Loading...
+                `;
+            } else {
+                button.disabled = false;
+                const originalContent = button.getAttribute('data-original-content');
+                if (originalContent) {
+                    button.innerHTML = originalContent;
+                }
+            }
+        }
+    </script>
+	<script type="text/javascript">
+		// Schedule Picker Component
+		function SchedulePicker() {
+			const [times, setTimes] = React.useState([{ hour: '12', minute: '00', period: 'AM' }]);
+			
+			const hours = Array.from({ length: 12 }, (_, i) => (i + 1).toString().padStart(2, '0'));
+			const minutes = Array.from({ length: 60 }, (_, i) => i.toString().padStart(2, '0'));
+			
+			const addTime = () => {
+				setTimes([...times, { hour: '12', minute: '00', period: 'AM' }]);
+			};
+			
+			const removeTime = (index) => {
+				if (times.length > 1) {
+					setTimes(times.filter((_, i) => i !== index));
+				}
+			};
+			
+			const updateTime = (index, field, value) => {
+				const newTimes = [...times];
+				newTimes[index] = { ...newTimes[index], [field]: value };
+				setTimes(newTimes);
+				
+				// Convert to 24-hour format and update hidden input
+				const formattedTimes = newTimes.map(time => {
+					let hour = parseInt(time.hour);
+					if (time.period === 'PM' && hour !== 12) hour += 12;
+					if (time.period === 'AM' && hour === 12) hour = 0;
+					return `${hour.toString().padStart(2, '0')}:${time.minute}`;
+				});
+				
+				const input = document.getElementById('schedule');
+				if (input) input.value = formattedTimes.join(', ');
+			};
+			
+			return React.createElement('div', { className: 'space-y-4' },
+				times.map((time, index) => 
+					React.createElement('div', { key: index, className: 'flex items-center space-x-2' },
+						React.createElement('select', {
+							value: time.hour,
+							onChange: (e) => updateTime(index, 'hour', e.target.value),
+							className: 'bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-gray-100 w-20'
+						}, hours.map(h => 
+							React.createElement('option', { key: h, value: h }, h)
+						)),
+						React.createElement('span', { className: 'text-gray-300' }, ':'),
+						React.createElement('select', {
+							value: time.minute,
+							onChange: (e) => updateTime(index, 'minute', e.target.value),
+							className: 'bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-gray-100 w-20'
+						}, minutes.map(m => 
+							React.createElement('option', { key: m, value: m }, m)
+						)),
+						React.createElement('select', {
+							value: time.period,
+							onChange: (e) => updateTime(index, 'period', e.target.value),
+							className: 'bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-gray-100 w-20'
+						}, [
+							React.createElement('option', { key: 'AM', value: 'AM' }, 'AM'),
+							React.createElement('option', { key: 'PM', value: 'PM' }, 'PM')
+						]),
+						React.createElement('button', {
+							type: 'button',
+							onClick: () => removeTime(index),
+							className: 'p-2 text-red-400 hover:text-red-300 transition-colors',
+							disabled: times.length === 1
+						}, React.createElement('i', { className: 'fas fa-times' }))
+					)
+				),
+				React.createElement('button', {
+					type: 'button',
+					onClick: addTime,
+					className: 'inline-flex items-center px-3 py-2 text-sm bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors'
+				}, [
+					React.createElement('i', { className: 'fas fa-plus mr-2' }),
+					'Add Time'
+				]),
+				React.createElement('input', {
+					type: 'hidden',
+					id: 'schedule',
+					name: 'schedule',
+					required: true
+				})
+			);
+		}
+
+		// Initialize when the page loads
+		document.addEventListener('DOMContentLoaded', () => {
+			const container = document.getElementById('schedule-picker-root');
+			if (container) {
+				ReactDOM.render(React.createElement(SchedulePicker), container);
+			}
+		});
+		</script>
+</body>
+</html>

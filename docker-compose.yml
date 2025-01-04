@@ -1,0 +1,25 @@
+version: '3.8'
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5898:5000"
+    volumes:
+      - .:/app
+    env_file:
+      - stack.env
+    environment:
+      - FLASK_ENV=development
+      - PYTHONPATH=/app
+      - PYTHONDONTWRITEBYTECODE=1  # Prevents writing .pyc files
+    restart: unless-stopped
+    networks:
+      video_generation:
+        ipv4_address: 10.20.0.14
+
+networks:
+  video_generation:
+    external: true
+    name: "Video Generation"
