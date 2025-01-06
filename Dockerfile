@@ -20,4 +20,5 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 5000
 
-CMD ["python", "webapp/main.py"]
+# Debug commands to see what's going on
+CMD ["sh", "-c", "pwd && ls -la && ls -la webapp && python webapp/main.py"]
