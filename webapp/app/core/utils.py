@@ -31,12 +31,28 @@ def execute_curl(curl_command, retries=3):
             
     return False, "", f"Failed after {retries} attempts"
 
-def get_latest_video():
-    """Get the most recently created MP4 file in the current directory"""
-    video_files = glob.glob("*.mp4")
-    if not video_files:
-        return None
-    return max(video_files, key=os.path.getctime)
+def get_latest_video(max_retries=10, delay=2):
+    """
+    Get the most recently created MP4 file in the current directory.
+    Retries multiple times with delays to handle download timing issues.
+    
+    Args:
+        max_retries (int): Maximum number of attempts to find the video file
+        delay (int): Delay in seconds between attempts
+    """
+    for attempt in range(max_retries):
+        video_files = glob.glob("*.mp4")
+        if video_files:
+            latest_video = max(video_files, key=os.path.getctime)
+            # Check if file is fully written
+            if os.path.getsize(latest_video) > 0:
+                logger.info(f"Found video file: {latest_video} after {attempt + 1} attempts")
+                return latest_video
+                
+        logger.info(f"No video file found yet, attempt {attempt + 1} of {max_retries}")
+        time.sleep(delay)  # Wait before next attempt
+        
+    return None
 
 def cleanup_video(video_file):
     """Clean up a video file if it exists"""
