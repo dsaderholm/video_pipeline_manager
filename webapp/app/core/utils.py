@@ -71,10 +71,6 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False):
 
     for attempt in range(retries):
         try:
-            # Add timeout to curl command if not already present
-            if '-m' not in curl_command and '--max-time' not in curl_command:
-                curl_command = f"{curl_command} --max-time 300"  # 5-minute timeout
-
             logger.info(f"Attempt {attempt + 1}/{retries}: Executing command: {curl_command}")
             
             # Use shell=False for better security and parameter handling
