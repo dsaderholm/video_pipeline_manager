@@ -69,25 +69,17 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False):
     if clean_before:
         cleanup_existing_mp4s()
 
+    # Always use shell=True for complex curl commands
     for attempt in range(retries):
         try:
             logger.info(f"Attempt {attempt + 1}/{retries}: Executing command: {curl_command}")
             
-            # Use shell=False for better security and parameter handling
-            if os.name == 'nt':  # Windows
-                process = subprocess.Popen(
-                    curl_command,
-                    shell=True,  # Required for Windows
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
-            else:  # Linux/Unix
-                process = subprocess.Popen(
-                    curl_command.split(),
-                    shell=False,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
-                )
+            process = subprocess.Popen(
+                curl_command,
+                shell=True,  # Always use shell=True for curl commands
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
 
             # Communicate with timeout
             try:
