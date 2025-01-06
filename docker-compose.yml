@@ -7,7 +7,7 @@ services:
     ports:
       - "5898:5000"
     volumes:
-      - .:/app
+      - ${PWD:-.}:/app
     env_file:
       - stack.env
     environment:

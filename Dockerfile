@@ -6,12 +6,15 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Install Python dependencies
+# First, explicitly create the webapp directory
+RUN mkdir -p webapp
+
+# Only copy and install requirements.txt from root
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code
-COPY . .
+# Copy only the webapp directory
+COPY webapp/ webapp/
 
 ENV PYTHONPATH=/app
 ENV FLASK_APP=webapp.main:app
