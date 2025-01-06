@@ -6,8 +6,6 @@ services:
       dockerfile: Dockerfile
     ports:
       - "5898:5000"
-    volumes:
-      - ${PWD:-.}:/app
     env_file:
       - stack.env
     environment:
