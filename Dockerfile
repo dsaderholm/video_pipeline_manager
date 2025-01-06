@@ -6,15 +6,17 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# First, explicitly create the webapp directory
-RUN mkdir -p webapp
+# Debug: Show initial state
+RUN echo "Initial directory state:" && ls -la
 
-# Only copy and install requirements.txt from root
+# Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy only the webapp directory
-COPY webapp/ webapp/
+# Copy application code and show what was copied
+COPY . .
+RUN echo "After COPY . .:" && ls -la && \
+    echo "\nContents of current directory:" && ls -R
 
 ENV PYTHONPATH=/app
 ENV FLASK_APP=webapp.main:app
@@ -23,5 +25,5 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 5000
 
-# Debug commands to see what's going on
-CMD ["sh", "-c", "pwd && ls -la && ls -la webapp && python webapp/main.py"]
+# Final debug command
+CMD ["sh", "-c", "echo 'Final container state:' && ls -la && echo '\nRecursive listing:' && ls -R && python webapp/main.py"]
