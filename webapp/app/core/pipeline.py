@@ -85,7 +85,7 @@ def process_video_pipeline(task_id):
             video_file = None
             try:
                 # Generate initial video
-                success, stdout, stderr = execute_curl(task_data[12])  # generator_curl
+                success, stdout, stderr = execute_curl(task_data[-1])  # generator_curl is the last column
                 if not success:
                     raise Exception(f"Generator failed: {stderr}")
 
