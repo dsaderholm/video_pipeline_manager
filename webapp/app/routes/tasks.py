@@ -1,19 +1,15 @@
-from flask import jsonify, request, render_template
+from flask import jsonify, request, Blueprint, current_app
 import sqlite3
 import json
 from datetime import datetime, timedelta
-from app import app, scheduler
-from app.core.pipeline import process_video_pipeline
+import logging
+from app.timezone import localize_timestamp
 
-@app.route('/')
-def index():
-    return render_template('index.html')
+# Create blueprint and logger
+tasks_bp = Blueprint('tasks', __name__)
+logger = logging.getLogger(__name__)
 
-@app.route('/manage')
-def manage():
-    return render_template('manage.html')
-
-@app.route('/api/tasks', methods=['GET'])
+@tasks_bp.route('/api/tasks', methods=['GET'])
 def get_tasks():
     with sqlite3.connect('pipeline.db') as conn:
         c = conn.cursor()
@@ -49,13 +45,15 @@ def get_tasks():
                 'sound_volume': t[8],
                 'status': t[9],
                 'email_notify': t[10],
-                'created_at': t[11]
+                'created_at': localize_timestamp(t[11])  # Convert timestamp to local time
             })
         
         return jsonify(task_list)
 
 def retry_with_backoff(task_id):
     """Retry task with exponential backoff"""
+    scheduler = current_app.scheduler
+    
     # Get current retry count
     with sqlite3.connect('pipeline.db') as conn:
         c = conn.cursor()
@@ -78,9 +76,10 @@ def retry_with_backoff(task_id):
         
         # Schedule retry
         next_run = datetime.now() + timedelta(seconds=delay)
+        from app.core.pipeline import process_video_pipeline
         scheduler.add_job(
-            process_video_pipeline,
-            'date',
+            func=process_video_pipeline,
+            trigger='date',
             run_date=next_run,
             args=[task_id],
             id=f'retry_task_{task_id}_{next_run.timestamp()}'
@@ -95,19 +94,23 @@ def retry_with_backoff(task_id):
         """, (retry_count + 1, task_id))
         conn.commit()
 
-@app.route('/api/tasks', methods=['POST'])
+@tasks_bp.route('/api/tasks', methods=['POST'])
 def create_task():
     data = request.json
+    scheduler = current_app.scheduler
+    
     with sqlite3.connect('pipeline.db') as conn:
         c = conn.cursor()
         
-        # Add retry_count column if it doesn't exist
-        c.execute("""
-            SELECT name FROM sqlite_master 
-            WHERE type='table' AND name='tasks'
-        """)
-        if 'retry_count' not in [col[1] for col in c.description]:
-            c.execute("ALTER TABLE tasks ADD COLUMN retry_count INTEGER DEFAULT 0")
+        # Check if retry_count column exists
+        try:
+            c.execute("SELECT retry_count FROM tasks LIMIT 1")
+        except sqlite3.OperationalError:
+            try:
+                c.execute("ALTER TABLE tasks ADD COLUMN retry_count INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                # Column might have been added by another concurrent request
+                pass
         
         # Convert lists to JSON strings
         utilities_json = json.dumps(data.get('utilities', []))
@@ -125,22 +128,26 @@ def create_task():
         
         # Schedule multiple times if needed
         schedule_times = data['schedule'].split(',')
+        from app.core.pipeline import process_video_pipeline
         for schedule_time in schedule_times:
             hour, minute = map(int, schedule_time.strip().split(':'))
+            job_id = f'task_{task_id}_{hour}_{minute}'
             scheduler.add_job(
-                process_video_pipeline,
-                'cron',
+                func=process_video_pipeline,
+                trigger='cron',
                 hour=hour,
                 minute=minute,
                 args=[task_id],
-                id=f'task_{task_id}_{hour}_{minute}',
+                id=job_id,
                 misfire_grace_time=45  # Allow 45 seconds grace time for misfires
             )
         
         return jsonify({'id': task_id, 'status': 'scheduled'})
 
-@app.route('/api/tasks/<int:id>', methods=['DELETE'])
+@tasks_bp.route('/api/tasks/<int:id>', methods=['DELETE'])
 def delete_task(id):
+    scheduler = current_app.scheduler
+    
     with sqlite3.connect('pipeline.db') as conn:
         c = conn.cursor()
         # Remove any scheduled jobs first
@@ -165,16 +172,48 @@ def delete_task(id):
         c.execute('DELETE FROM tasks WHERE id = ?', (id,))
         return jsonify({'success': True})
 
-@app.route('/api/tasks/<int:id>/run', methods=['POST'])
+@tasks_bp.route('/api/tasks/<int:id>/run', methods=['POST'])
 def run_task(id):
     try:
+        # First verify task exists and is not already running
+        with sqlite3.connect('pipeline.db') as conn:
+            c = conn.cursor()
+            c.execute("SELECT id, status FROM tasks WHERE id = ?", (id,))
+            task = c.fetchone()
+            if not task:
+                return jsonify({
+                    'success': False,
+                    'message': f'Task {id} not found'
+                }), 404
+            if task[1] == 'running':
+                return jsonify({
+                    'success': False,
+                    'message': f'Task {id} is already running'
+                }), 409
+
+            # Clear any stuck locks before running
+            c.execute("""
+                UPDATE task_lock 
+                SET locked = 0, 
+                    task_id = NULL, 
+                    locked_at = NULL 
+                WHERE id = 1 
+                AND datetime(locked_at, '+30 minutes') < datetime('now')
+            """)
+            conn.commit()
+                
+        from app.core.pipeline import process_video_pipeline
         process_video_pipeline(id)
-        return jsonify({'success': True, 'message': 'Task started successfully'})
+        return jsonify({
+            'success': True,
+            'message': 'Task started successfully'
+        })
     except Exception as e:
+        logger.error(f"Error running task {id}: {str(e)}")
         # If task fails due to lock, trigger retry mechanism
         retry_with_backoff(id)
         return jsonify({
-            'success': False, 
-            'message': 'Task is queued for retry due to lock',
+            'success': False,
+            'message': 'Task is queued for retry',
             'error': str(e)
         }), 503

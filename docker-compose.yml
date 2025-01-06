@@ -13,6 +13,7 @@ services:
     environment:
       - FLASK_ENV=development
       - PYTHONPATH=/app
+      - FLASK_APP=webapp.main:app
       - PYTHONDONTWRITEBYTECODE=1  # Prevents writing .pyc files
     restart: unless-stopped
     networks:

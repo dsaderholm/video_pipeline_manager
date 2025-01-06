@@ -1,17 +1,21 @@
-from flask import jsonify, request, render_template
+from flask import Blueprint, jsonify, request, render_template
 import json
 from datetime import datetime, timedelta
-from app import app
 from app.core.log_manager import get_logs, clear_old_logs
+from app.timezone import localize_timestamp, get_timezone
+import pytz
 
-@app.route('/logs')
+# Create blueprint
+logs_bp = Blueprint('logs', __name__, url_prefix='')
+
+@logs_bp.route('/logs')
 def logs_page():
     """Render the logs viewer page"""
     return render_template('logs.html', 
                          title='Logs Viewer',
                          active_page='logs')
 
-@app.route('/api/logs', methods=['GET'])
+@logs_bp.route('/api/logs', methods=['GET'])
 def get_log_entries():
     """Get filtered log entries"""
     try:
@@ -25,7 +29,9 @@ def get_log_entries():
         since_dt = None
         if since:
             try:
+                local_tz = pytz.timezone(get_timezone())
                 since_dt = datetime.strptime(since, '%Y-%m-%d %H:%M:%S')
+                since_dt = local_tz.localize(since_dt)
             except ValueError:
                 return jsonify({
                     'error': 'Invalid date format. Expected YYYY-MM-DD HH:MM:SS'
@@ -39,27 +45,9 @@ def get_log_entries():
             since=since_dt
         )
         
-        # Format timestamps and ensure JSON serialization
-        formatted_logs = []
-        for log in logs:
-            log_entry = {
-                'id': log['id'],
-                'timestamp': log['timestamp'],
-                'level': log['level'],
-                'message': log['message'],
-                'task_id': log['task_id'],
-                'source': log['source']
-            }
-            
-            # Format details if present
-            if log['details']:
-                log_entry['details'] = log['details']
-            
-            formatted_logs.append(log_entry)
-        
         return jsonify({
-            'logs': formatted_logs,
-            'count': len(formatted_logs)
+            'logs': logs,
+            'count': len(logs)
         })
         
     except Exception as e:
@@ -67,7 +55,7 @@ def get_log_entries():
             'error': str(e)
         }), 500
 
-@app.route('/api/logs/clear', methods=['POST'])
+@logs_bp.route('/api/logs/clear', methods=['POST'])
 def clear_logs():
     """Clear old logs based on age"""
     try:
@@ -88,7 +76,7 @@ def clear_logs():
             'error': str(e)
         }), 500
 
-@app.route('/api/logs/task/<int:task_id>', methods=['GET'])
+@logs_bp.route('/api/logs/task/<int:task_id>', methods=['GET'])
 def get_task_logs(task_id):
     """Get all logs for a specific task"""
     try:
@@ -108,7 +96,7 @@ def get_task_logs(task_id):
             'error': str(e)
         }), 500
 
-@app.route('/api/logs/stats', methods=['GET'])
+@logs_bp.route('/api/logs/stats', methods=['GET'])
 def get_log_stats():
     """Get log statistics for the dashboard"""
     try:
@@ -123,7 +111,9 @@ def get_log_stats():
             'recent_errors': []
         }
         
-        now = datetime.now()
+        # Use configured timezone
+        local_tz = pytz.timezone(get_timezone())
+        now = datetime.now(local_tz)
         hour_ago = now - timedelta(hours=1)
         
         for log in recent_logs:
@@ -133,7 +123,10 @@ def get_log_stats():
             
             # Count by hour for recent logs
             try:
+                # Parse the timestamp (already localized by get_logs)
                 log_time = datetime.strptime(log['timestamp'], '%Y-%m-%d %H:%M:%S')
+                log_time = local_tz.localize(log_time)
+                
                 hour_key = log_time.strftime('%Y-%m-%d %H:00')
                 stats['by_hour'][hour_key] = stats['by_hour'].get(hour_key, 0) + 1
                 

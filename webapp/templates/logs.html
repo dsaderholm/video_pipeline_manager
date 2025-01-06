@@ -8,7 +8,7 @@
         const [loading, setLoading] = React.useState(true);
         const [filter, setFilter] = React.useState({
             level: '',
-            taskId: '',
+            task_id: '',
             since: ''
         });
         const [autoRefresh, setAutoRefresh] = React.useState(true);
@@ -37,7 +37,9 @@
             try {
                 const params = new URLSearchParams({
                     limit: 100,
-                    ...filter
+                    level: filter.level,
+                    task_id: filter.task_id,
+                    since: filter.since
                 });
                 const response = await fetch(`/api/logs?${params}`);
                 const data = await response.json();
@@ -104,8 +106,8 @@
                 React.createElement('input', {
                     type: 'text',
                     placeholder: 'Task ID',
-                    value: filter.taskId,
-                    onChange: (e) => setFilter({ ...filter, taskId: e.target.value }),
+                    value: filter.task_id,
+                    onChange: (e) => setFilter({ ...filter, task_id: e.target.value }),
                     className: 'bg-gray-800 text-white px-3 py-2 rounded-lg border border-gray-700'
                 }),
                 React.createElement('label', { className: 'flex items-center space-x-2 text-gray-300' },

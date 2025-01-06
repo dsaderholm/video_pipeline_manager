@@ -5,10 +5,6 @@ from app import logger
 
 def init_db():
     try:
-        if os.path.exists('pipeline.db'):
-            os.remove('pipeline.db')
-            logger.info("Removed existing database")
-            
         with sqlite3.connect('pipeline.db') as conn:
             c = conn.cursor()
             
@@ -76,11 +72,11 @@ def init_db():
                 )
             ''')
             
-            # Initialize task_lock with default record
-            c.execute("INSERT INTO task_lock (id, locked) VALUES (1, 0)")
+            # Initialize task_lock with default record if it doesn't exist
+            c.execute("INSERT OR IGNORE INTO task_lock (id, locked) VALUES (1, 0)")
             
             conn.commit()
-            logger.info("Database initialized successfully")
+            logger.info("Database tables verified/initialized successfully")
             
     except Exception as e:
         logger.error(f"Database initialization error: {str(e)}")

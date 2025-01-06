@@ -1,0 +1,605 @@
+{% extends "base.html" %}
+
+{% block head %}
+<script>
+// Load and render functions
+    async function loadAllData() {
+        try {
+            setLoading(true);
+            const [generatorsRes, utilitiesRes, platformsRes] = await Promise.all([
+                fetch('/api/generators'),
+                fetch('/api/utilities'),
+                fetch('/api/platforms')
+            ]);
+
+            const generators = await generatorsRes.json();
+            const utilities = await utilitiesRes.json();
+            const platforms = await platformsRes.json();
+
+            renderGenerators(generators);
+            renderUtilities(utilities);
+            renderPlatforms(platforms);
+        } catch (error) {
+            showToast('Error loading data', 'error');
+        } finally {
+            setLoading(false);
+        }
+    }
+
+    function setLoading(isLoading) {
+        const loadingOverlay = document.getElementById('loading-overlay');
+        if (isLoading) {
+            loadingOverlay.classList.remove('hidden');
+        } else {
+            loadingOverlay.classList.add('hidden');
+        }
+    }
+
+    function copyToClipboard(text) {
+        navigator.clipboard.writeText(text).then(() => {
+            showToast('Copied to clipboard!', 'success');
+        }).catch(() => {
+            showToast('Failed to copy to clipboard', 'error');
+        });
+    }
+
+    // Helper functions for rendering
+    function getEmptyState(title, message) {
+        return `
+            <tr>
+                <td colspan="5" class="px-6 py-12 text-center text-gray-500">
+                    <div class="flex flex-col items-center">
+                        <i class="fas fa-inbox text-4xl mb-3"></i>
+                        <p class="text-lg font-medium">${title}</p>
+                        <p class="text-sm">${message}</p>
+                    </div>
+                </td>
+            </tr>
+        `;
+    }
+
+    async function deleteItem(type, id) {
+        const itemType = type.slice(0, -1);
+        if (!confirm(`Are you sure you want to delete this ${itemType}?`)) return;
+        
+        try {
+            const response = await fetch(`/api/${type}/${id}`, {
+                method: 'DELETE'
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to delete ${itemType}`);
+            }
+
+            showToast(`${itemType.charAt(0).toUpperCase() + itemType.slice(1)} deleted successfully`, 'success');
+            await loadAllData();
+        } catch (error) {
+            showToast(`Error deleting ${itemType}: ${error.message}`, 'error');
+        }
+    }
+
+    // Form validation helpers
+    function validateForm(form) {
+        let isValid = true;
+        const requiredFields = form.querySelectorAll('[required]');
+        
+        requiredFields.forEach(field => {
+            if (!field.value.trim()) {
+                field.classList.add('border-red-500');
+                const label = field.previousElementSibling?.textContent || 'This field';
+                showToast(`${label} is required`, 'error');
+                isValid = false;
+            } else {
+                field.classList.remove('border-red-500');
+            }
+        });
+
+        return isValid;
+    }
+
+// Render Functions
+    function renderGenerators(generators) {
+        const tbody = document.getElementById('generators');
+        if (generators.length === 0) {
+            tbody.innerHTML = getEmptyState('No generators found', 'Add your first generator using the form above');
+            return;
+        }
+        
+        tbody.innerHTML = generators.map(g => `
+            <tr class="bg-gray-800 border-b border-gray-700 hover:bg-gray-700 transition-colors">
+                <td class="px-6 py-4">
+                    <div class="flex items-center">
+                        <i class="fas fa-robot text-primary-500 mr-2"></i>
+                        ${g.name}
+                    </div>
+                </td>
+                <td class="px-6 py-4">
+                    <div class="relative group">
+                        <pre class="code-snippet bg-gray-900 rounded-lg p-3 text-sm font-mono overflow-x-auto">${g.generator_curl}</pre>
+                        <button onclick="copyToClipboard('${g.generator_curl}')" 
+                            class="absolute top-2 right-2 p-2 bg-gray-800 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity"
+                            data-tooltip="Copy to clipboard">
+                            <i class="fas fa-copy text-primary-500"></i>
+                        </button>
+                    </div>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap text-gray-400 text-sm">
+                    ${new Date(g.created_at).toLocaleString()}
+                </td>
+                <td class="px-6 py-4">
+                    <button onclick="deleteItem('generators', ${g.id})"
+                        class="inline-flex items-center px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded-md text-xs transition-colors"
+                        data-tooltip="Delete generator">
+                        <i class="fas fa-trash mr-1"></i>
+                        Delete
+                    </button>
+                </td>
+            </tr>
+        `).join('');
+    }
+
+    function renderUtilities(utilities) {
+        const tbody = document.getElementById('utilities');
+        if (utilities.length === 0) {
+            tbody.innerHTML = getEmptyState('No utilities found', 'Add your first utility using the form above');
+            return;
+        }
+        
+        tbody.innerHTML = utilities.map(u => `
+            <tr class="bg-gray-800 border-b border-gray-700 hover:bg-gray-700 transition-colors">
+                <td class="px-6 py-4">
+                    <div class="flex items-center">
+                        <i class="fas fa-puzzle-piece text-primary-500 mr-2"></i>
+                        ${u.name}
+                    </div>
+                </td>
+                <td class="px-6 py-4">
+                    <div class="relative group">
+                        <pre class="code-snippet bg-gray-900 rounded-lg p-3 text-sm font-mono overflow-x-auto">${u.utility_curl}</pre>
+                        <button onclick="copyToClipboard('${u.utility_curl}')" 
+                            class="absolute top-2 right-2 p-2 bg-gray-800 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity"
+                            data-tooltip="Copy to clipboard">
+                            <i class="fas fa-copy text-primary-500"></i>
+                        </button>
+                    </div>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap text-gray-400 text-sm">
+                    ${new Date(u.created_at).toLocaleString()}
+                </td>
+                <td class="px-6 py-4">
+                    <button onclick="deleteItem('utilities', ${u.id})"
+                        class="inline-flex items-center px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded-md text-xs transition-colors"
+                        data-tooltip="Delete utility">
+                        <i class="fas fa-trash mr-1"></i>
+                        Delete
+                    </button>
+                </td>
+            </tr>
+        `).join('');
+    }
+
+    function renderPlatforms(platforms) {
+        const tbody = document.getElementById('platforms');
+        if (platforms.length === 0) {
+            tbody.innerHTML = getEmptyState('No platforms found', 'Add your first platform using the form above');
+            return;
+        }
+        
+        tbody.innerHTML = platforms.map(p => `
+            <tr class="bg-gray-800 border-b border-gray-700 hover:bg-gray-700 transition-colors">
+                <td class="px-6 py-4">
+                    <div class="flex flex-col">
+                        <div class="flex items-center font-medium">
+                            <i class="fas fa-share-alt text-primary-500 mr-2"></i>
+                            ${p.platform}
+                        </div>
+                        <span class="text-sm text-gray-400 mt-1">${p.account_name}</span>
+                    </div>
+                </td>
+                <td class="px-6 py-4">
+                    <div class="relative group">
+                        <div class="text-xs text-gray-400 mb-1">Primary Upload Command:</div>
+                        <pre class="code-snippet bg-gray-900 rounded-lg p-3 text-sm font-mono overflow-x-auto">${p.uploader_curl}</pre>
+                        <button onclick="copyToClipboard('${p.uploader_curl}')" 
+                            class="absolute top-2 right-2 p-2 bg-gray-800 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity"
+                            data-tooltip="Copy to clipboard">
+                            <i class="fas fa-copy text-primary-500"></i>
+                        </button>
+                    </div>
+                    ${p.fallback_curl ? `
+                        <div class="relative group mt-2">
+                            <div class="text-xs text-gray-400 mb-1">Primary Fallback Command:</div>
+                            <pre class="code-snippet bg-gray-900 rounded-lg p-3 text-sm font-mono overflow-x-auto">${p.fallback_curl}</pre>
+                            <button onclick="copyToClipboard('${p.fallback_curl}')" 
+                                class="absolute top-2 right-2 p-2 bg-gray-800 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity"
+                                data-tooltip="Copy to clipboard">
+                                <i class="fas fa-copy text-primary-500"></i>
+                            </button>
+                        </div>
+                    ` : ''}
+                    ${p.fallback_curl_2 ? `
+                        <div class="relative group mt-2">
+                            <div class="text-xs text-gray-400 mb-1">Secondary Fallback Command:</div>
+                            <pre class="code-snippet bg-gray-900 rounded-lg p-3 text-sm font-mono overflow-x-auto">${p.fallback_curl_2}</pre>
+                            <button onclick="copyToClipboard('${p.fallback_curl_2}')" 
+                                class="absolute top-2 right-2 p-2 bg-gray-800 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity"
+                                data-tooltip="Copy to clipboard">
+                                <i class="fas fa-copy text-primary-500"></i>
+                            </button>
+                        </div>
+                    ` : ''}
+                </td>
+                <td class="px-6 py-4">
+                    <div class="flex flex-wrap gap-1">
+                        ${(p.default_hashtags || '').split(',').map(tag => `
+                            <span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-gray-700">
+                                <i class="fas fa-hashtag text-primary-500 mr-1"></i>
+                                ${tag.trim()}
+                            </span>
+                        `).join('')}
+                    </div>
+                </td>
+                <td class="px-6 py-4 whitespace-nowrap text-gray-400 text-sm">
+                    ${new Date(p.created_at).toLocaleString()}
+                </td>
+                <td class="px-6 py-4">
+                    <button onclick="deleteItem('platforms', ${p.id})"
+                        class="inline-flex items-center px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded-md text-xs transition-colors"
+                        data-tooltip="Delete platform">
+                        <i class="fas fa-trash mr-1"></i>
+                        Delete
+                    </button>
+                </td>
+            </tr>
+        `).join('');
+    }
+	
+    // Form handling functions
+    async function createGenerator(event) {
+        event.preventDefault();
+        if (!validateForm(event.target)) return;
+
+        const submitButton = event.target.querySelector('button[type="submit"]');
+        setButtonLoading(submitButton, true);
+
+        const formData = {
+            name: document.getElementById('generator_name').value,
+            generator_curl: document.getElementById('generator_curl').value
+        };
+
+        try {
+            const response = await fetch('/api/generators', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(formData)
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to create generator');
+            }
+
+            showToast('Generator created successfully!', 'success');
+            document.getElementById('generatorForm').reset();
+            await loadAllData();
+        } catch (error) {
+            showToast('Error creating generator: ' + error.message, 'error');
+        } finally {
+            setButtonLoading(submitButton, false);
+        }
+    }
+
+    async function createUtility(event) {
+        event.preventDefault();
+        if (!validateForm(event.target)) return;
+
+        const submitButton = event.target.querySelector('button[type="submit"]');
+        setButtonLoading(submitButton, true);
+
+        const formData = {
+            name: document.getElementById('utility_name').value,
+            utility_curl: document.getElementById('utility_curl').value
+        };
+
+        try {
+            const response = await fetch('/api/utilities', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(formData)
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to create utility');
+            }
+
+            showToast('Utility created successfully!', 'success');
+            document.getElementById('utilityForm').reset();
+            await loadAllData();
+        } catch (error) {
+            showToast('Error creating utility: ' + error.message, 'error');
+        } finally {
+            setButtonLoading(submitButton, false);
+        }
+    }
+
+    async function createPlatform(event) {
+        event.preventDefault();
+        if (!validateForm(event.target)) return;
+
+        const submitButton = event.target.querySelector('button[type="submit"]');
+        setButtonLoading(submitButton, true);
+
+        const formData = {
+            platform: document.getElementById('platform_name').value,
+            account_name: document.getElementById('account_name').value,
+            uploader_curl: document.getElementById('platform_uploader_curl').value,
+            fallback_curl: document.getElementById('platform_fallback_curl').value,
+            fallback_curl_2: document.getElementById('platform_fallback_curl_2').value,
+            default_hashtags: document.getElementById('platform_hashtags').value
+        };
+
+        try {
+            const response = await fetch('/api/platforms', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(formData)
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to create platform');
+            }
+
+            showToast('Platform created successfully!', 'success');
+            document.getElementById('platformForm').reset();
+            await loadAllData();
+        } catch (error) {
+            showToast('Error creating platform: ' + error.message, 'error');
+        } finally {
+            setButtonLoading(submitButton, false);
+        }
+    }
+
+    function setButtonLoading(button, isLoading) {
+        if (!button) return;
+        
+        if (isLoading) {
+            button.disabled = true;
+            const originalContent = button.innerHTML;
+            button.setAttribute('data-original-content', originalContent);
+            button.innerHTML = `
+                <svg class="animate-spin h-4 w-4 mr-2" viewBox="0 0 24 24">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                Processing...
+            `;
+        } else {
+            button.disabled = false;
+            const originalContent = button.getAttribute('data-original-content');
+            if (originalContent) {
+                button.innerHTML = originalContent;
+            }
+        }
+    }
+
+    // Initialize event handlers
+    document.addEventListener('DOMContentLoaded', () => {
+        loadAllData();
+        
+        // Add real-time validation for required fields
+        document.querySelectorAll('input[required], textarea[required]').forEach(field => {
+            field.addEventListener('input', () => {
+                if (field.value.trim()) {
+                    field.classList.remove('border-red-500');
+                }
+            });
+        });
+    });
+</script>
+{% endblock %}
+
+{% block content %}
+<!-- Loading Overlay -->
+<div id="loading-overlay" class="hidden fixed inset-0 bg-gray-900 bg-opacity-50 backdrop-blur-sm z-50 flex items-center justify-center">
+    <div class="text-center">
+        <div class="inline-block animate-spin rounded-full h-12 w-12 border-4 border-primary-500 border-t-transparent"></div>
+        <p class="mt-2 text-gray-300">Loading...</p>
+    </div>
+</div>
+
+<!-- Generator Form -->
+<div class="bg-gray-800 rounded-xl border border-gray-700 p-6 mb-8 shadow-xl">
+    <div class="flex items-center gap-3 mb-6">
+        <div class="w-10 h-10 flex items-center justify-center rounded-lg bg-gradient-to-r from-primary-500 to-primary-600">
+            <i class="fas fa-robot text-white"></i>
+        </div>
+        <h2 class="text-2xl font-bold text-white">Add Generator</h2>
+    </div>
+
+    <form id="generatorForm" onsubmit="createGenerator(event)" class="space-y-6">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+                <label for="generator_name" class="block text-sm font-medium text-gray-300 mb-1">Name</label>
+                <input type="text" id="generator_name" required placeholder="Enter generator name"
+                    class="w-full">
+            </div>
+            <div>
+                <label for="generator_curl" class="block text-sm font-medium text-gray-300 mb-1">Generator CURL Command</label>
+                <textarea id="generator_curl" required rows="3" 
+                    placeholder="Enter CURL command for video generation"
+                    class="w-full font-mono text-sm"></textarea>
+                <p class="mt-1 text-xs text-gray-400">Example: curl -X POST -J -O http://192.168.1.8:8354/generate</p>
+            </div>
+        </div>
+        
+        <button type="submit" class="inline-flex items-center px-4 py-2 bg-gradient-to-r from-primary-500 to-primary-600 text-white rounded-lg font-semibold hover:from-primary-600 hover:to-primary-700 focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 focus:ring-offset-gray-900 transition-all">
+            <i class="fas fa-plus mr-2"></i>
+            Add Generator
+        </button>
+    </form>
+</div>
+
+<!-- Utility Form -->
+<div class="bg-gray-800 rounded-xl border border-gray-700 p-6 mb-8 shadow-xl">
+    <div class="flex items-center gap-3 mb-6">
+        <div class="w-10 h-10 flex items-center justify-center rounded-lg bg-gradient-to-r from-primary-500 to-primary-600">
+            <i class="fas fa-tools text-white"></i>
+        </div>
+        <h2 class="text-2xl font-bold text-white">Add Utility</h2>
+    </div>
+
+    <form id="utilityForm" onsubmit="createUtility(event)" class="space-y-6">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+                <label for="utility_name" class="block text-sm font-medium text-gray-300 mb-1">Name</label>
+                <input type="text" id="utility_name" required placeholder="Enter utility name"
+                    class="w-full">
+            </div>
+            <div>
+                <label for="utility_curl" class="block text-sm font-medium text-gray-300 mb-1">Utility CURL Command</label>
+                <textarea id="utility_curl" required rows="3" 
+                    placeholder="Enter CURL command for utility"
+                    class="w-full font-mono text-sm"></textarea>
+                <p class="mt-1 text-xs text-gray-400">Use {input} as placeholder for input file</p>
+            </div>
+        </div>
+        
+        <button type="submit" class="inline-flex items-center px-4 py-2 bg-gradient-to-r from-primary-500 to-primary-600 text-white rounded-lg font-semibold hover:from-primary-600 hover:to-primary-700 focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 focus:ring-offset-gray-900 transition-all">
+            <i class="fas fa-plus mr-2"></i>
+            Add Utility
+        </button>
+    </form>
+</div>
+
+<!-- Platform Form -->
+<div class="bg-gray-800 rounded-xl border border-gray-700 p-6 mb-8 shadow-xl">
+    <div class="flex items-center gap-3 mb-6">
+        <div class="w-10 h-10 flex items-center justify-center rounded-lg bg-gradient-to-r from-primary-500 to-primary-600">
+            <i class="fas fa-share-alt text-white"></i>
+        </div>
+        <h2 class="text-2xl font-bold text-white">Add Platform</h2>
+    </div>
+
+    <form id="platformForm" onsubmit="createPlatform(event)" class="space-y-6">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div>
+                <label for="platform_name" class="block text-sm font-medium text-gray-300 mb-1">Platform Name</label>
+                <input type="text" id="platform_name" required placeholder="Enter platform name"
+                    class="w-full">
+            </div>
+            <div>
+                <label for="account_name" class="block text-sm font-medium text-gray-300 mb-1">Account Name</label>
+                <input type="text" id="account_name" required placeholder="Enter account name"
+                    class="w-full">
+            </div>
+            <div class="md:col-span-2">
+                <label for="platform_uploader_curl" class="block text-sm font-medium text-gray-300 mb-1">Upload CURL Command</label>
+                <textarea id="platform_uploader_curl" required rows="3" 
+                    placeholder="Enter upload CURL command"
+                    class="w-full font-mono text-sm"></textarea>
+                <p class="mt-1 text-xs text-gray-400">Use placeholders: {video}, {description}, {account}, {sound}, {volume}, {hashtags}</p>
+            </div>
+            <div class="md:col-span-2">
+                <label for="platform_fallback_curl" class="block text-sm font-medium text-gray-300 mb-1">Primary Fallback CURL Command (Optional)</label>
+                <textarea id="platform_fallback_curl" rows="3" 
+                    placeholder="Enter primary fallback upload command"
+                    class="w-full font-mono text-sm"></textarea>
+            </div>
+            <div class="md:col-span-2">
+                <label for="platform_fallback_curl_2" class="block text-sm font-medium text-gray-300 mb-1">Secondary Fallback CURL Command (Optional)</label>
+                <textarea id="platform_fallback_curl_2" rows="3" 
+                    placeholder="Enter secondary fallback upload command"
+                    class="w-full font-mono text-sm"></textarea>
+            </div>
+            <div>
+                <label for="platform_hashtags" class="block text-sm font-medium text-gray-300 mb-1">Default Platform Hashtags</label>
+                <input type="text" id="platform_hashtags" placeholder="#example,#tags"
+                    class="w-full">
+            </div>
+        </div>
+        
+        <button type="submit" class="inline-flex items-center px-4 py-2 bg-gradient-to-r from-primary-500 to-primary-600 text-white rounded-lg font-semibold hover:from-primary-600 hover:to-primary-700 focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 focus:ring-offset-gray-900 transition-all">
+            <i class="fas fa-plus mr-2"></i>
+            Add Platform
+        </button>
+    </form>
+</div>
+
+<!-- Generators Table -->
+<div class="bg-gray-800 rounded-xl border border-gray-700 p-6 mb-8 shadow-xl">
+    <div class="flex items-center gap-3 mb-6">
+        <div class="w-10 h-10 flex items-center justify-center rounded-lg bg-gradient-to-r from-primary-500 to-primary-600">
+            <i class="fas fa-robot text-white"></i>
+        </div>
+        <h2 class="text-2xl font-bold text-white">Generators</h2>
+    </div>
+
+    <div class="overflow-x-auto">
+        <table class="w-full">
+            <thead class="bg-gray-900">
+                <tr>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-primary-500 uppercase tracking-wider">Name</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-primary-500 uppercase tracking-wider">CURL Command</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-primary-500 uppercase tracking-wider">Created</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-primary-500 uppercase tracking-wider">Actions</th>
+                </tr>
+            </thead>
+            <tbody id="generators" class="divide-y divide-gray-700">
+                <!-- Dynamically populated -->
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Utilities Table -->
+<div class="bg-gray-800 rounded-xl border border-gray-700 p-6 mb-8 shadow-xl">
+    <div class="flex items-center gap-3 mb-6">
+        <div class="w-10 h-10 flex items-center justify-center rounded-lg bg-gradient-to-r from-primary-500 to-primary-600">
+            <i class="fas fa-tools text-white"></i>
+        </div>
+        <h2 class="text-2xl font-bold text-white">Utilities</h2>
+    </div>
+
+    <div class="overflow-x-auto">
+        <table class="w-full">
+            <thead class="bg-gray-900">
+                <tr>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-primary-500 uppercase tracking-wider">Name</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-primary-500 uppercase tracking-wider">CURL Command</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-primary-500 uppercase tracking-wider">Created</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-primary-500 uppercase tracking-wider">Actions</th>
+                </tr>
+            </thead>
+            <tbody id="utilities" class="divide-y divide-gray-700">
+                <!-- Dynamically populated -->
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Platforms Table -->
+<div class="bg-gray-800 rounded-xl border border-gray-700 p-6 shadow-xl">
+    <div class="flex items-center gap-3 mb-6">
+        <div class="w-10 h-10 flex items-center justify-center rounded-lg bg-gradient-to-r from-primary-500 to-primary-600">
+            <i class="fas fa-share-alt text-white"></i>
+        </div>
+        <h2 class="text-2xl font-bold text-white">Platforms</h2>
+    </div>
+
+    <div class="overflow-x-auto">
+        <table class="w-full">
+            <thead class="bg-gray-900">
+                <tr>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-primary-500 uppercase tracking-wider">Name</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-primary-500 uppercase tracking-wider">CURL Commands</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-primary-500 uppercase tracking-wider">Default Hashtags</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-primary-500 uppercase tracking-wider">Created</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-primary-500 uppercase tracking-wider">Actions</th>
+                </tr>
+            </thead>
+            <tbody id="platforms" class="divide-y divide-gray-700">
+                <!-- Dynamically populated -->
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

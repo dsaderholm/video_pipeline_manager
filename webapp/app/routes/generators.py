@@ -1,8 +1,12 @@
-from flask import jsonify, request
+from flask import jsonify, request, Blueprint
 import sqlite3
-from app import app
+from flask import current_app
+from app.timezone import localize_timestamp
 
-@app.route('/api/generators', methods=['GET'])
+# Create blueprint
+generators_bp = Blueprint('generators', __name__)
+
+@generators_bp.route('/api/generators', methods=['GET'])
 def get_generators():
     with sqlite3.connect('pipeline.db') as conn:
         c = conn.cursor()
@@ -12,10 +16,10 @@ def get_generators():
             'id': g[0],
             'name': g[1],
             'generator_curl': g[2],
-            'created_at': g[3]
+            'created_at': localize_timestamp(g[3])
         } for g in generators])
 
-@app.route('/api/generators', methods=['POST'])
+@generators_bp.route('/api/generators', methods=['POST'])
 def create_generator():
     data = request.json
     with sqlite3.connect('pipeline.db') as conn:
@@ -25,7 +29,7 @@ def create_generator():
         generator_id = c.lastrowid
         return jsonify({'id': generator_id})
 
-@app.route('/api/generators/<int:id>', methods=['DELETE'])
+@generators_bp.route('/api/generators/<int:id>', methods=['DELETE'])
 def delete_generator(id):
     with sqlite3.connect('pipeline.db') as conn:
         c = conn.cursor()

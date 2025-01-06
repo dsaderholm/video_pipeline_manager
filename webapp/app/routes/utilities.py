@@ -1,8 +1,13 @@
-from flask import jsonify, request
+from flask import jsonify, request, Blueprint
 import sqlite3
-from app import app
+import logging
+from app.timezone import localize_timestamp
 
-@app.route('/api/utilities', methods=['GET'])
+# Create blueprint and logger
+utilities_bp = Blueprint('utilities', __name__)
+logger = logging.getLogger(__name__)
+
+@utilities_bp.route('/api/utilities', methods=['GET'])
 def get_utilities():
     with sqlite3.connect('pipeline.db') as conn:
         c = conn.cursor()
@@ -12,10 +17,10 @@ def get_utilities():
             'id': u[0],
             'name': u[1],
             'utility_curl': u[2],
-            'created_at': u[3]
+            'created_at': localize_timestamp(u[3])
         } for u in utilities])
 
-@app.route('/api/utilities', methods=['POST'])
+@utilities_bp.route('/api/utilities', methods=['POST'])
 def create_utility():
     data = request.json
     with sqlite3.connect('pipeline.db') as conn:
@@ -25,7 +30,7 @@ def create_utility():
         utility_id = c.lastrowid
         return jsonify({'id': utility_id})
 
-@app.route('/api/utilities/<int:id>', methods=['DELETE'])
+@utilities_bp.route('/api/utilities/<int:id>', methods=['DELETE'])
 def delete_utility(id):
     with sqlite3.connect('pipeline.db') as conn:
         c = conn.cursor()

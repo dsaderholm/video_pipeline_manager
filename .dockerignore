@@ -4,7 +4,6 @@ __pycache__/
 *$py.class
 *.so
 .Python
-env/
 build/
 develop-eggs/
 dist/
@@ -24,28 +23,26 @@ wheels/
 # Virtual Environment
 venv/
 ENV/
-
-# Database
-*.db
-*.sqlite3
-
-# Environment variables
+env/
 .env
-stack.env
 
-# IDE specific files
+# IDE
 .idea/
 .vscode/
 *.swp
 *.swo
-
-# Operating System
+*.swn
 .DS_Store
-Thumbs.db
 
-# Application specific
+# Version Control
+.git
+.gitignore
+
+# Project specific
+*.db
+*.db-journal
 *.log
-*.video
-download/
-uploads/
-temp/
+Dockerfile
+.dockerignore
+README.md
+LICENSE

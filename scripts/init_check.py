@@ -1,5 +1,9 @@
 import sqlite3
 import os
+import sys
+
+# Add parent directory to Python path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def verify_database():
     try:
@@ -13,7 +17,7 @@ def verify_database():
             c = conn.cursor()
             
             # Check tables
-            tables = ['video_styles', 'platform_accounts', 'tasks']
+            tables = ['video_styles', 'platform_accounts', 'tasks', 'logs']
             for table in tables:
                 c.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name='{table}'")
                 if not c.fetchone():
