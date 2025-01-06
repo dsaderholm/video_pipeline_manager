@@ -8,13 +8,27 @@ def execute_curl(curl_command, retries=3):
     """Execute a CURL command with retries"""
     for attempt in range(retries):
         try:
+            logger.info(f"Attempt {attempt + 1}: Executing command: {curl_command}")
             process = subprocess.Popen(curl_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             stdout, stderr = process.communicate()
+            stdout_str = stdout.decode()
+            stderr_str = stderr.decode()
+            
+            logger.info(f"Stdout: {stdout_str}")
+            if stderr_str:
+                logger.error(f"Stderr: {stderr_str}")
+            
             if process.returncode == 0:
-                return True, stdout.decode(), stderr.decode()
+                return True, stdout_str, stderr_str
+                
+            logger.error(f"Command failed with return code {process.returncode}")
             time.sleep(attempt + 1)  # Exponential backoff
+            
         except Exception as e:
             logger.error(f"Error executing CURL command (attempt {attempt+1}): {str(e)}")
+            logger.exception(e)  # This logs the full stack trace
+            time.sleep(attempt + 1)
+            
     return False, "", f"Failed after {retries} attempts"
 
 def get_latest_video():
