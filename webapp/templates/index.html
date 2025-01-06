@@ -6,6 +6,16 @@
     let utilities = [];
     let platforms = [];
     let tasks = [];
+	let filteredTasks = [];
+	const filterState = {
+		search: '',
+		status: [],
+		platform: [],
+		dateRange: {
+			start: '',
+			end: ''
+		}
+	};
 
     async function loadData() {
         try {
@@ -21,15 +31,107 @@
             utilities = await utilitiesRes.json();
             platforms = await platformsRes.json();
             tasks = await tasksRes.json();
+            filteredTasks = [...tasks]; // Initialize filtered tasks
 
             updateGeneratorSelect();
             updateUtilitiesCheckboxes();
             updatePlatformsCheckboxes();
             renderTasks();
+            initializeFilters(); // Initialize the filter UI
         } catch (error) {
             showToast('Error loading data', 'error');
         } finally {
             setLoading(false);
+        }
+    }
+
+    function initializeFilters() {
+        // Add status filters
+        const statuses = ['PENDING', 'RUNNING', 'COMPLETED', 'FAILED'];
+        const statusFilters = document.getElementById('status-filters');
+        statusFilters.innerHTML = statuses.map(status => `
+            <label class="inline-flex items-center p-2 bg-gray-800 rounded-lg border border-gray-700 hover:border-primary-500 transition-colors cursor-pointer">
+                <input type="checkbox" value="${status}" 
+                    class="w-4 h-4 text-primary-500 focus:ring-primary-500 rounded"
+                    onchange="updateFilters()">
+                <span class="ml-2 text-sm">${status}</span>
+            </label>
+        `).join('');
+
+        // Add platform filters
+        const platformFilters = document.getElementById('platform-filters');
+        platformFilters.innerHTML = platforms.map(platform => `
+            <label class="inline-flex items-center p-2 bg-gray-800 rounded-lg border border-gray-700 hover:border-primary-500 transition-colors cursor-pointer">
+                <input type="checkbox" value="${platform.id}" 
+                    class="w-4 h-4 text-primary-500 focus:ring-primary-500 rounded"
+                    onchange="updateFilters()">
+                <span class="ml-2 text-sm">${platform.platform}</span>
+            </label>
+        `).join('');
+    }
+	
+	function updateFilters() {
+        // Update filter state
+        filterState.search = document.getElementById('task-search').value.toLowerCase();
+        filterState.status = Array.from(document.querySelectorAll('#status-filters input:checked')).map(cb => cb.value);
+        filterState.platform = Array.from(document.querySelectorAll('#platform-filters input:checked')).map(cb => cb.value);
+        filterState.dateRange.start = document.getElementById('date-start').value;
+        filterState.dateRange.end = document.getElementById('date-end').value;
+
+        // Apply filters
+        filteredTasks = tasks.filter(task => {
+            const matchesSearch = task.name.toLowerCase().includes(filterState.search);
+            const matchesStatus = filterState.status.length === 0 || filterState.status.includes(task.status);
+            const matchesPlatform = filterState.platform.length === 0 || 
+                task.platforms.some(p => filterState.platform.includes(p.toString()));
+            
+            // Date filtering
+            let matchesDate = true;
+            if (filterState.dateRange.start || filterState.dateRange.end) {
+                const taskDate = new Date(task.created_at);
+                if (filterState.dateRange.start) {
+                    matchesDate = matchesDate && taskDate >= new Date(filterState.dateRange.start);
+                }
+                if (filterState.dateRange.end) {
+                    matchesDate = matchesDate && taskDate <= new Date(filterState.dateRange.end);
+                }
+            }
+
+            return matchesSearch && matchesStatus && matchesPlatform && matchesDate;
+        });
+
+        renderTasks();
+    }
+	
+	async function duplicateTask(id) {
+        try {
+            const task = tasks.find(t => t.id === id);
+            if (!task) {
+                throw new Error('Task not found');
+            }
+
+            // Create a copy of the task with a new name
+            const newTask = {
+                ...task,
+                name: `${task.name} (Copy)`,
+                status: 'PENDING'
+            };
+            delete newTask.id; // Remove the ID so a new one will be generated
+
+            const response = await fetch('/api/tasks', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(newTask)
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to duplicate task');
+            }
+
+            showToast('Task duplicated successfully!', 'success');
+            await loadData();
+        } catch (error) {
+            showToast('Error duplicating task: ' + error.message, 'error');
         }
     }
 
@@ -80,20 +182,20 @@
 
     function renderTasks() {
         const tbody = document.getElementById('tasksBody');
-        if (tasks.length === 0) {
+        if (filteredTasks.length === 0) {
             tbody.innerHTML = `
                 <tr>
-                    <td colspan=\"7\" class=\"px-6 py-12 text-center text-gray-500\">
-                        <i class=\"fas fa-tasks text-4xl mb-3\"></i>
-                        <p class=\"text-lg font-medium\">No tasks found</p>
-                        <p class=\"text-sm\">Create your first task using the form above.</p>
+                    <td colspan="8" class="px-6 py-12 text-center text-gray-500">
+                        <i class="fas fa-tasks text-4xl mb-3"></i>
+                        <p class="text-lg font-medium">No tasks found</p>
+                        <p class="text-sm">Try adjusting your filters or create a new task.</p>
                     </td>
                 </tr>
             `;
             return;
         }
 
-        tbody.innerHTML = tasks.map(task => {
+        tbody.innerHTML = filteredTasks.map(task => {
             const platformNames = task.platforms
                 .map(id => platforms.find(p => p.id === id)?.platform || 'Unknown')
                 .join(', ');
@@ -106,68 +208,74 @@
             };
             
             return `
-                <tr class=\"bg-gray-800 border-b border-gray-700 hover:bg-gray-700 transition-colors\">
-                    <td class=\"px-6 py-4 whitespace-nowrap font-medium\">
+                <tr class="bg-gray-800 border-b border-gray-700 hover:bg-gray-700 transition-colors">
+                    <td class="px-6 py-4 whitespace-nowrap font-medium">
                         ${task.name}
                     </td>
-					 <td class="px-6 py-4 whitespace-nowrap text-gray-300">
-						${task.id}
-					</td>
-                    <td class=\"px-6 py-4 whitespace-nowrap\">
-                        <div class=\"flex items-center\">
-                            <i class=\"fas fa-robot text-primary-500 mr-2\"></i>
+                    <td class="px-6 py-4 whitespace-nowrap text-gray-300">
+                        ${task.id}
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <div class="flex items-center">
+                            <i class="fas fa-robot text-primary-500 mr-2"></i>
                             ${task.generator_name}
                         </div>
                     </td>
-                    <td class=\"px-6 py-4\">
-                        <div class=\"flex flex-wrap gap-1\">
+                    <td class="px-6 py-4">
+                        <div class="flex flex-wrap gap-1">
                             ${task.utilities.map(u => `
-                                <span class=\"inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-gray-700\">
-                                    <i class=\"fas fa-puzzle-piece text-primary-500 mr-1\"></i>
+                                <span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-gray-700">
+                                    <i class="fas fa-puzzle-piece text-primary-500 mr-1"></i>
                                     ${u.name}
                                 </span>
                             `).join('')}
                         </div>
                     </td>
-                    <td class=\"px-6 py-4 whitespace-nowrap\">
-                        <div class=\"flex items-center\">
-                            <i class=\"fas fa-clock text-primary-500 mr-2\"></i>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <div class="flex items-center">
+                            <i class="fas fa-clock text-primary-500 mr-2"></i>
                             ${task.schedule}
                         </div>
                     </td>
-                    <td class=\"px-6 py-4\">
-                        <div class=\"flex flex-wrap gap-1\">
+                    <td class="px-6 py-4">
+                        <div class="flex flex-wrap gap-1">
                             ${platformNames.split(', ').map(platform => `
-                                <span class=\"inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-gray-700\">
-                                    <i class=\"fas fa-share-alt text-primary-500 mr-1\"></i>
+                                <span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-gray-700">
+                                    <i class="fas fa-share-alt text-primary-500 mr-1"></i>
                                     ${platform}
                                 </span>
                             `).join('')}
                         </div>
                     </td>
-                    <td class=\"px-6 py-4 whitespace-nowrap\">
-                        <span class=\"inline-flex items-center px-3 py-1 rounded-full text-xs font-medium ${statusColors[task.status]}\">
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium ${statusColors[task.status]}">
                             ${task.status === 'RUNNING' ? `
-                                <svg class=\"animate-spin h-3 w-3 mr-1\" viewBox=\"0 0 24 24\">
-                                    <circle class=\"opacity-25\" cx=\"12\" cy=\"12\" r=\"10\" stroke=\"currentColor\" stroke-width=\"4\"></circle>
-                                    <path class=\"opacity-75\" fill=\"currentColor\" d=\"M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z\"></path>
+                                <svg class="animate-spin h-3 w-3 mr-1" viewBox="0 0 24 24">
+                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                                 </svg>
                             ` : ''}
                             ${task.status}
                         </span>
                     </td>
-                    <td class=\"px-6 py-4 whitespace-nowrap\">
-                        <div class=\"flex gap-2\">
-                            <button onclick=\"runTask(${task.id})\" 
-                                class=\"inline-flex items-center px-3 py-1 bg-green-600 hover:bg-green-700 text-white rounded-md text-xs transition-colors\"
-                                data-tooltip=\"Run task now\">
-                                <i class=\"fas fa-play mr-1\"></i>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <div class="flex gap-2">
+                            <button onclick="runTask(${task.id})" 
+                                class="inline-flex items-center px-3 py-1 bg-green-600 hover:bg-green-700 text-white rounded-md text-xs transition-colors"
+                                data-tooltip="Run task now">
+                                <i class="fas fa-play mr-1"></i>
                                 Run
                             </button>
-                            <button onclick=\"deleteTask(${task.id})\"
-                                class=\"inline-flex items-center px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded-md text-xs transition-colors\"
-                                data-tooltip=\"Delete task\">
-                                <i class=\"fas fa-trash mr-1\"></i>
+                            <button onclick="duplicateTask(${task.id})"
+                                class="inline-flex items-center px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-xs transition-colors"
+                                data-tooltip="Create a copy of this task">
+                                <i class="fas fa-copy mr-1"></i>
+                                Copy
+                            </button>
+                            <button onclick="deleteTask(${task.id})"
+                                class="inline-flex items-center px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded-md text-xs transition-colors"
+                                data-tooltip="Delete task">
+                                <i class="fas fa-trash mr-1"></i>
                                 Delete
                             </button>
                         </div>
@@ -366,6 +474,62 @@
             Create Task
         </button>
     </form>
+</div>
+
+<div class="bg-gray-800 rounded-xl border border-gray-700 p-6 mb-8 shadow-xl">
+    <div class="flex items-center gap-3 mb-6">
+        <div class="w-10 h-10 flex items-center justify-center rounded-lg bg-gradient-to-r from-primary-500 to-primary-600">
+            <i class="fas fa-filter text-white"></i>
+        </div>
+        <h2 class="text-2xl font-bold text-white">Filter Tasks</h2>
+    </div>
+
+    <div class="space-y-6">
+        <!-- Search -->
+        <div class="flex gap-4">
+            <div class="flex-1">
+                <input type="text" 
+                    id="task-search" 
+                    placeholder="Search tasks..." 
+                    class="w-full"
+                    oninput="updateFilters()">
+            </div>
+        </div>
+
+        <!-- Status Filters -->
+        <div>
+            <label class="block text-sm font-medium text-gray-300 mb-2">Status</label>
+            <div id="status-filters" class="flex flex-wrap gap-2">
+                <!-- Dynamically populated -->
+            </div>
+        </div>
+
+        <!-- Platform Filters -->
+        <div>
+            <label class="block text-sm font-medium text-gray-300 mb-2">Platforms</label>
+            <div id="platform-filters" class="flex flex-wrap gap-2">
+                <!-- Dynamically populated -->
+            </div>
+        </div>
+
+        <!-- Date Range -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+                <label for="date-start" class="block text-sm font-medium text-gray-300 mb-2">Start Date</label>
+                <input type="date" 
+                    id="date-start" 
+                    class="w-full"
+                    onchange="updateFilters()">
+            </div>
+            <div>
+                <label for="date-end" class="block text-sm font-medium text-gray-300 mb-2">End Date</label>
+                <input type="date" 
+                    id="date-end" 
+                    class="w-full"
+                    onchange="updateFilters()">
+            </div>
+        </div>
+    </div>
 </div>
 
 <!-- Tasks Table -->

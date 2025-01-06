@@ -14,7 +14,8 @@ def load_smtp_config():
         'SMTP_PORT',
         'SMTP_USERNAME',
         'SMTP_PASSWORD',
-        'SMTP_FROM_EMAIL'
+        'SMTP_FROM_EMAIL',
+        'APP_URL'  # Add this for UI links
     ]
     
     config = {}
@@ -86,11 +87,30 @@ def get_task_details(task_id):
             'created_at': task[11]
         }
 
-def format_task_info_html(task_info, success):
+def format_task_info_html(task_info, success, base_url):
     """Format task information as HTML matching web UI style"""
     status_color = "#22c55e" if success else "#ef4444"  # green-500 or red-500
     utilities_html = "".join([f"<li class='mb-1'><i class='fas fa-wrench mr-2'></i>{u}</li>" for u in task_info['utilities']]) if task_info['utilities'] else "None"
     platforms_html = "".join([f"<li class='mb-1'><i class='fas fa-share-alt mr-2'></i>{p}</li>" for p in task_info['platforms']]) if task_info['platforms'] else "None"
+    
+    # Add action buttons
+    action_buttons = f"""
+    <div style="display: flex; gap: 1rem; justify-content: center; margin-top: 1.5rem;">
+        <a href="{base_url}/manage?task={task_info['id']}" 
+           style="background-color: #3b82f6; color: white; padding: 0.5rem 1rem; border-radius: 0.375rem; text-decoration: none; font-weight: 500;">
+            <i class="fas fa-external-link-alt mr-2"></i>View Task
+        </a>
+    """
+    
+    if not success:
+        action_buttons += f"""
+        <a href="{base_url}/logs?task={task_info['id']}" 
+           style="background-color: #ef4444; color: white; padding: 0.5rem 1rem; border-radius: 0.375rem; text-decoration: none; font-weight: 500;">
+            <i class="fas fa-exclamation-circle mr-2"></i>View Logs
+        </a>
+        """
+    
+    action_buttons += "</div>"
     
     return f"""
     <html>
@@ -169,6 +189,22 @@ def format_task_info_html(task_info, success):
                 color: #9ca3af;
                 font-size: 0.875rem;
             }}
+            .action-button {{
+                display: inline-block;
+                padding: 0.5rem 1rem;
+                border-radius: 0.375rem;
+                text-decoration: none;
+                font-weight: 500;
+                margin: 0 0.5rem;
+            }}
+            .action-button.primary {{
+                background-color: #3b82f6;
+                color: white;
+            }}
+            .action-button.danger {{
+                background-color: #ef4444;
+                color: white;
+            }}
         </style>
     </head>
     <body>
@@ -225,8 +261,10 @@ def format_task_info_html(task_info, success):
                 </div>
             </div>
 
+            {action_buttons}
+            
             <div class="footer">
-                This is an automated notification from your Video Pipeline Manager.
+                This is an automated notification from your Video Pipeline Manager.<br>
                 {' Check the application logs for error details.' if not success else ''}
             </div>
         </div>
@@ -234,40 +272,62 @@ def format_task_info_html(task_info, success):
     </html>
     """
 
-def send_notification(to_email, subject, message_html):
-    """Send an HTML email notification"""
-    if not to_email:
-        logger.warning("No recipient email provided, skipping notification")
+def send_notification(to_emails, subject, message_html):
+    """Send an HTML email notification to one or multiple recipients"""
+    if not to_emails:
+        logger.warning("No recipient emails provided, skipping notification")
+        return False
+    
+    # Convert single email to list
+    if isinstance(to_emails, str):
+        to_emails = [to_emails]
+    
+    # Remove any empty strings or None values
+    to_emails = [email.strip() for email in to_emails if email and email.strip()]
+    
+    if not to_emails:
+        logger.warning("No valid recipient emails after cleaning, skipping notification")
         return False
         
     try:
         config = load_smtp_config()
         
+        # Create the base message
         msg = MIMEMultipart('alternative')
         msg['From'] = config['SMTP_FROM_EMAIL']
-        msg['To'] = to_email
         msg['Subject'] = subject
         
         # Create HTML part
         html_part = MIMEText(message_html, 'html')
         msg.attach(html_part)
         
+        # Send to all recipients (BCC)
         with smtplib.SMTP(config['SMTP_SERVER'], int(config['SMTP_PORT'])) as server:
             server.starttls()
             server.login(config['SMTP_USERNAME'], config['SMTP_PASSWORD'])
-            server.send_message(msg)
             
-        logger.info(f"Successfully sent email notification to {to_email}")
+            # Send individual emails to prevent recipients from seeing each other's addresses
+            for email in to_emails:
+                msg['To'] = email
+                try:
+                    server.send_message(msg)
+                    logger.info(f"Successfully sent email notification to {email}")
+                except Exception as e:
+                    logger.error(f"Failed to send email to {email}: {str(e)}")
+            
         return True
         
     except Exception as e:
-        logger.error(f"Failed to send email notification: {str(e)}")
+        logger.error(f"Failed to send email notifications: {str(e)}")
         return False
 
 def send_task_completion_notification(task_id, task_name, to_email, success=True):
     """Send a notification about task completion status with detailed information"""
     status = "Completed Successfully" if success else "Failed"
     subject = f"Video Pipeline Task {status}: {task_name}"
+    
+    # Handle multiple email recipients
+    to_emails = [email.strip() for email in to_email.split(',') if email.strip()] if to_email else []
     
     task_info = get_task_details(task_id)
     if not task_info:
@@ -276,7 +336,9 @@ def send_task_completion_notification(task_id, task_name, to_email, success=True
             Task {task_id} ({task_name}) {status.lower()}, but details are not available.
         </div>
         """
-        return send_notification(to_email, subject, message_html)
+        return send_notification(to_emails, subject, message_html)
     
-    message_html = format_task_info_html(task_info, success)
-    return send_notification(to_email, subject, message_html)
+    config = load_smtp_config()
+    base_url = config['APP_URL'].rstrip('/')
+    message_html = format_task_info_html(task_info, success, base_url)
+    return send_notification(to_emails, subject, message_html)
