@@ -11,33 +11,65 @@
 	<!-- React Scripts -->
 	<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 	<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+	
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
-        tailwind.config = {
-            darkMode: 'class',
-            theme: {
-                extend: {
-                    colors: {
-                        primary: {
-                            50: '#fff1f1',
-                            100: '#ffdfdf',
-                            200: '#ffc5c5',
-                            300: '#ff9d9d',
-                            400: '#ff6464',
-                            500: '#fc4828',
-                            600: '#ed1d1d',
-                            700: '#c71d0f',
-                            800: '#a11b13',
-                            900: '#851c15',
-                        },
-                    },
-                    fontFamily: {
-                        sans: ['Inter', 'sans-serif'],
-                    },
-                },
-            },
-        }
+		tailwind.config = {
+			darkMode: 'class',
+			theme: {
+				extend: {
+					colors: {
+						primary: {
+							50: '#fff1f1',
+							100: '#ffdfdf',
+							200: '#ffc5c5',
+							300: '#ff9d9d',
+							400: '#ff6464',
+							500: '#fc4828',
+							600: '#ed1d1d',
+							700: '#c71d0f',
+							800: '#a11b13',
+							900: '#851c15',
+						},
+						debug: {
+							light: '#93C5FD',  // blue-300
+							DEFAULT: '#3B82F6', // blue-500
+							dark: '#1E3A8A'     // blue-900
+						},
+						info: {
+							light: '#86EFAC',   // green-300
+							DEFAULT: '#22C55E', // green-500
+							dark: '#14532D'     // green-900
+						},
+						warning: {
+							light: '#FCD34D',   // yellow-300
+							DEFAULT: '#F59E0B', // yellow-500
+							dark: '#78350F'     // yellow-900
+						},
+						error: {
+							light: '#FCA5A5',   // red-300
+							DEFAULT: '#EF4444', // red-500
+							dark: '#7F1D1D'     // red-900
+						}
+					},
+					fontFamily: {
+						sans: ['Inter', 'sans-serif'],
+					},
+				},
+			},
+			safelist: [
+				// Colors for log levels
+				'bg-debug-dark',
+				'text-debug-light',
+				'bg-info-dark',
+				'text-info-light',
+				'bg-warning-dark',
+				'text-warning-light',
+				'bg-error-dark',
+				'text-error-light'
+			]
+		}
     </script>
     <style>
 		/* Custom Scrollbar */
@@ -289,6 +321,80 @@
             @apply bg-red-500;
             box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.2);
         }
+		/* Log Viewer Styles */
+		.log-row {
+			@apply transition-colors hover:bg-gray-800;
+		}
+
+		.log-level {
+			@apply px-2 py-1 rounded-full text-xs font-medium;
+		}
+
+		.log-level-DEBUG {
+			@apply bg-blue-900/30 text-blue-400;
+		}
+
+		.log-level-INFO {
+			@apply bg-green-900/30 text-green-400;
+		}
+
+		.log-level-WARNING {
+			@apply bg-yellow-900/30 text-yellow-400;
+		}
+
+		.log-level-ERROR {
+			@apply bg-red-900/30 text-red-400;
+		}
+
+		.log-level-CRITICAL {
+			@apply bg-red-900/50 text-red-400;
+		}
+
+		.log-details {
+			@apply mt-2 p-4 bg-gray-900/50 rounded-lg overflow-x-auto;
+			max-height: 300px;
+		}
+
+		.log-timestamp {
+			@apply text-gray-400 text-sm;
+		}
+
+		.log-source {
+			@apply text-gray-500 text-sm;
+		}
+
+		/* Improved Table Styles */
+		.log-table {
+			@apply min-w-full divide-y divide-gray-700;
+		}
+
+		.log-table thead {
+			@apply bg-gray-900;
+		}
+
+		.log-table th {
+			@apply px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider;
+		}
+
+		.log-table td {
+			@apply px-6 py-4 whitespace-nowrap text-sm text-gray-300;
+		}
+		/* Filter Controls */
+		.filter-controls {
+			@apply flex flex-wrap gap-4 mb-6;
+		}
+
+		.filter-select {
+			@apply bg-gray-800 text-white px-3 py-2 rounded-lg border border-gray-700 min-w-[120px];
+		}
+
+		.filter-input {
+			@apply bg-gray-800 text-white px-3 py-2 rounded-lg border border-gray-700;
+		}
+
+		.filter-checkbox {
+			@apply form-checkbox h-4 w-4 text-primary-500 rounded border-gray-700 bg-gray-800;
+		}
     </style>
     {% block head %}{% endblock %}
 </head>
@@ -516,6 +622,36 @@
 				ReactDOM.render(React.createElement(SchedulePicker), container);
 			}
 		});
+		</script>
+		<script type="text/javascript">
+			function formatJSON(json) {
+				if (typeof json === 'string') {
+					try {
+						json = JSON.parse(json);
+					} catch (e) {
+						return json;
+					}
+				}
+				return JSON.stringify(json, null, 2)
+					.replace(/&/g, '&amp;')
+					.replace(/</g, '&lt;')
+					.replace(/>/g, '&gt;')
+					.replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g, function (match) {
+						let cls = 'text-blue-400';
+						if (/^"/.test(match)) {
+							if (/:$/.test(match)) {
+								cls = 'text-gray-300';
+							} else {
+								cls = 'text-green-400';
+							}
+						} else if (/true|false/.test(match)) {
+							cls = 'text-yellow-400';
+						} else if (/null/.test(match)) {
+							cls = 'text-red-400';
+						}
+						return '<span class="' + cls + '">' + match + '</span>';
+					});
+			}
 		</script>
 </body>
 </html>
