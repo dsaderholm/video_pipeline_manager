@@ -20,4 +20,4 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 5000
 
-CMD ["python", "app/webapp/main.py"]
+CMD ["python", "webapp/main.py"]
