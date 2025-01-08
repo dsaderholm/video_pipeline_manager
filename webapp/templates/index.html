@@ -424,39 +424,52 @@
         }
     }
 	
-	async function previewTask(id) {
-	try {
-		const response = await fetch(`/api/tasks/${id}/preview`, {
-			method: 'POST'
-		});
-		
-		if (response.ok) {
-			// Get the video as a blob and create a temporary URL
-			const blob = await response.blob();
-			const url = window.URL.createObjectURL(blob);
-			
-			// Open the video in a new tab
-			window.open(url, '_blank');
-		} else {
-			const error = await response.json();
-			throw new Error(error.message || 'Preview failed');
-		}
-	} catch (error) {
-		showToast('Error previewing task: ' + error.message, 'error');
-	}
-}
+    async function previewTask(id) {
+        try {
+            showToast('Generating preview...', 'info');
+            
+            const response = await fetch(`/api/tasks/${id}/preview`, {
+                method: 'POST'
+            });
+            
+            if (response.ok) {
+                // Get the video as a blob
+                const blob = await response.blob();
+                
+                // Create a temporary download link
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.style.display = 'none';
+                a.href = url;
+                a.download = `preview_task_${id}.mp4`;
+                
+                // Add to document, click it, and remove it
+                document.body.appendChild(a);
+                a.click();
+                window.URL.revokeObjectURL(url);
+                document.body.removeChild(a);
+                
+                showToast('Preview downloaded successfully', 'success');
+            } else {
+                const error = await response.json();
+                throw new Error(error.message || 'Preview failed');
+            }
+        } catch (error) {
+            showToast('Error previewing task: ' + error.message, 'error');
+        }
+    }
 
-async function dryRunTask(id) {
-	try {
-		const response = await fetch(`/api/tasks/${id}/dry-run`, {
-			method: 'POST'
-		});
-		const result = await response.json();
-		showToast(result.message, result.success ? 'success' : 'error');
-	} catch (error) {
-		showToast('Error during dry run: ' + error.message, 'error');
+	async function dryRunTask(id) {
+		try {
+			const response = await fetch(`/api/tasks/${id}/dry-run`, {
+				method: 'POST'
+			});
+			const result = await response.json();
+			showToast(result.message, result.success ? 'success' : 'error');
+		} catch (error) {
+			showToast('Error during dry run: ' + error.message, 'error');
+		}
 	}
-}
 
     // =====================================
     // Data Loading
