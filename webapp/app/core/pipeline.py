@@ -68,8 +68,8 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
         - If dry_run: bool indicating success
         - Otherwise: None
     """
-    # For dry runs, we don't need to acquire a lock
-    if not dry_run and not check_and_set_lock():
+    # For dry runs or previews, we don't need to acquire a lock
+    if not (dry_run or preview_mode) and not check_and_set_lock():
         logger.info(f"Another task is currently running. Task {task_id} will retry later.")
         return False if dry_run else None
     
@@ -77,7 +77,7 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
         with sqlite3.connect('pipeline.db') as conn:
             c = conn.cursor()
             
-            if not dry_run:
+            if not (dry_run or preview_mode):
                 # Update lock with current task_id
                 c.execute("UPDATE task_lock SET task_id = ? WHERE id = 1", (task_id,))
                 conn.commit()
@@ -140,8 +140,9 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
 
                 # For preview mode, save the processed video and return its path
                 if preview_mode and video_file:
-                    preview_dir = '/app/webapp/app/previews'  # Fixed absolute path for previews
-                    os.makedirs(preview_dir, exist_ok=True)  # Create if doesn't exist
+                    # Change to use a relative path for previews
+                    preview_dir = os.path.join(os.getcwd(), 'previews')
+                    os.makedirs(preview_dir, exist_ok=True)
                     preview_path = os.path.join(preview_dir, f'preview_task_{task_id}.mp4')
                     os.rename(video_file, preview_path)
                     return preview_path
@@ -238,5 +239,5 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                     
     finally:
         # Always release the lock for real runs
-        if not dry_run:
+        if not (dry_run or preview_mode):
             release_lock()
