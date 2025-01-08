@@ -128,6 +128,7 @@ def create_app():
             
             # Add database handler to both root logger and Flask logger
             logging.getLogger().addHandler(db_log_handler)
+            app.logger.propagate = False
             app.logger.addHandler(db_log_handler)
             
             logger.info("Database logging system initialized successfully")
