@@ -2,139 +2,139 @@
 
 {% block head %}
 <script>
+    // Global state
     let generators = [];
     let utilities = [];
     let platforms = [];
     let tasks = [];
-	let filteredTasks = [];
-	const filterState = {
-		search: '',
-		status: [],
-		platform: [],
-		dateRange: {
-			start: '',
-			end: ''
-		}
-	};
+    let filteredTasks = [];
+    const filterState = {
+        search: '',
+        status: [],
+        platform: [],
+        dateRange: {
+            start: '',
+            end: ''
+        }
+    };
 
-    async function loadData() {
-        try {
-            setLoading(true);
-            const [generatorsRes, utilitiesRes, platformsRes, tasksRes] = await Promise.all([
-                fetch('/api/generators'),
-                fetch('/api/utilities'),
-                fetch('/api/platforms'),
-                fetch('/api/tasks')
-            ]);
+    // =========================================
+    // Utility Functions for Drag & Drop Ordering
+    // =========================================
+    function getClosestItem(container, y) {
+        const items = [...container.querySelectorAll('.selected-utility')];
+        return items.reduce((closest, item) => {
+            const box = item.getBoundingClientRect();
+            const offset = y - box.top - box.height / 2;
+            if (closest === null || Math.abs(offset) < Math.abs(closest.offset)) {
+                return { offset, element: item };
+            } else {
+                return closest;
+            }
+        }, null)?.element;
+    }
 
-            generators = await generatorsRes.json();
-            utilities = await utilitiesRes.json();
-            platforms = await platformsRes.json();
-            tasks = await tasksRes.json();
-            filteredTasks = [...tasks]; // Initialize filtered tasks
+    function updateOrderNumbers() {
+        const selectedItems = document.querySelectorAll('#selected-utilities .selected-utility');
+        selectedItems.forEach((item, index) => {
+            const orderSpan = item.querySelector('.text-gray-400');
+            if (orderSpan) {
+                orderSpan.textContent = `Order: ${index + 1}`;
+            }
+        });
+    }
 
-            updateGeneratorSelect();
-            updateUtilitiesCheckboxes();
-            updatePlatformsCheckboxes();
-            renderTasks();
-            initializeFilters(); // Initialize the filter UI
-        } catch (error) {
-            showToast('Error loading data', 'error');
-        } finally {
-            setLoading(false);
+    function handleUtilitySelection(checkbox, utilId, utilName) {
+        const selectedDiv = document.getElementById('selected-utilities');
+        
+        if (checkbox.checked) {
+            // Add to selected utilities
+            const selectedItem = document.createElement('div');
+            selectedItem.className = 'selected-utility';
+            selectedItem.setAttribute('data-id', utilId);
+            selectedItem.draggable = true;
+            selectedItem.innerHTML = `
+                <div class="flex items-center p-3 bg-gray-700 rounded-lg border border-primary-500">
+                    <span class="ml-2 text-sm flex-1">
+                        <i class="fas fa-puzzle-piece text-primary-500 mr-2"></i>
+                        ${utilName}
+                    </span>
+                    <span class="text-xs text-gray-400 mr-2">Order: ${selectedDiv.children.length + 1}</span>
+                    <i class="fas fa-grip-vertical text-gray-500 cursor-move"></i>
+                </div>
+            `;
+            selectedDiv.appendChild(selectedItem);
+        } else {
+            // Remove from selected utilities
+            const selectedItem = selectedDiv.querySelector(`[data-id="${utilId}"]`);
+            if (selectedItem) {
+                selectedItem.remove();
+            }
+            updateOrderNumbers();
         }
     }
 
-    function initializeFilters() {
-        // Add status filters
-        const statuses = ['PENDING', 'RUNNING', 'COMPLETED', 'FAILED'];
-        const statusFilters = document.getElementById('status-filters');
-        statusFilters.innerHTML = statuses.map(status => `
-            <label class="inline-flex items-center p-2 bg-gray-800 rounded-lg border border-gray-700 hover:border-primary-500 transition-colors cursor-pointer">
-                <input type="checkbox" value="${status}" 
-                    class="w-4 h-4 text-primary-500 focus:ring-primary-500 rounded"
-                    onchange="updateFilters()">
-                <span class="ml-2 text-sm">${status}</span>
-            </label>
-        `).join('');
+    function initializeDragAndDrop() {
+        const selectedDiv = document.getElementById('selected-utilities');
+        let draggedItem = null;
 
-        // Add platform filters
-        const platformFilters = document.getElementById('platform-filters');
-        platformFilters.innerHTML = platforms.map(platform => `
-            <label class="inline-flex items-center p-2 bg-gray-800 rounded-lg border border-gray-700 hover:border-primary-500 transition-colors cursor-pointer">
-                <input type="checkbox" value="${platform.id}" 
-                    class="w-4 h-4 text-primary-500 focus:ring-primary-500 rounded"
-                    onchange="updateFilters()">
-                <span class="ml-2 text-sm">${platform.platform}</span>
-            </label>
-        `).join('');
-    }
-	
-	function updateFilters() {
-        // Update filter state
-        filterState.search = document.getElementById('task-search').value.toLowerCase();
-        filterState.status = Array.from(document.querySelectorAll('#status-filters input:checked')).map(cb => cb.value);
-        filterState.platform = Array.from(document.querySelectorAll('#platform-filters input:checked')).map(cb => cb.value);
-        filterState.dateRange.start = document.getElementById('date-start').value;
-        filterState.dateRange.end = document.getElementById('date-end').value;
-
-        // Apply filters
-        filteredTasks = tasks.filter(task => {
-            const matchesSearch = task.name.toLowerCase().includes(filterState.search);
-            const matchesStatus = filterState.status.length === 0 || filterState.status.includes(task.status);
-            const matchesPlatform = filterState.platform.length === 0 || 
-                task.platforms.some(p => filterState.platform.includes(p.toString()));
-            
-            // Date filtering
-            let matchesDate = true;
-            if (filterState.dateRange.start || filterState.dateRange.end) {
-                const taskDate = new Date(task.created_at);
-                if (filterState.dateRange.start) {
-                    matchesDate = matchesDate && taskDate >= new Date(filterState.dateRange.start);
-                }
-                if (filterState.dateRange.end) {
-                    matchesDate = matchesDate && taskDate <= new Date(filterState.dateRange.end);
-                }
+        document.addEventListener('dragstart', (e) => {
+            if (e.target.classList.contains('selected-utility')) {
+                draggedItem = e.target;
+                e.target.classList.add('dragging');
             }
-
-            return matchesSearch && matchesStatus && matchesPlatform && matchesDate;
         });
 
-        renderTasks();
-    }
-	
-	async function duplicateTask(id) {
-        try {
-            const task = tasks.find(t => t.id === id);
-            if (!task) {
-                throw new Error('Task not found');
+        document.addEventListener('dragend', (e) => {
+            if (e.target.classList.contains('selected-utility')) {
+                e.target.classList.remove('dragging');
+                // Remove any leftover drag-over classes
+                document.querySelectorAll('.drag-over').forEach(el => {
+                    el.classList.remove('drag-over');
+                });
             }
+        });
 
-            // Create a copy of the task with a new name
-            const newTask = {
-                ...task,
-                name: `${task.name} (Copy)`,
-                status: 'PENDING'
-            };
-            delete newTask.id; // Remove the ID so a new one will be generated
+        document.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            if (draggedItem) {
+                // Remove drag-over class from all items
+                document.querySelectorAll('.drag-over').forEach(el => {
+                    el.classList.remove('drag-over');
+                });
 
-            const response = await fetch('/api/tasks', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(newTask)
-            });
-
-            if (!response.ok) {
-                throw new Error('Failed to duplicate task');
+                const closestItem = getClosestItem(selectedDiv, e.clientY);
+                if (closestItem && closestItem !== draggedItem) {
+                    closestItem.classList.add('drag-over');
+                }
             }
+        });
 
-            showToast('Task duplicated successfully!', 'success');
-            await loadData();
-        } catch (error) {
-            showToast('Error duplicating task: ' + error.message, 'error');
-        }
+        selectedDiv.addEventListener('drop', (e) => {
+            e.preventDefault();
+            if (draggedItem) {
+                const closestItem = getClosestItem(selectedDiv, e.clientY);
+                if (closestItem) {
+                    const rect = closestItem.getBoundingClientRect();
+                    const midpoint = rect.top + rect.height / 2;
+                    if (e.clientY < midpoint) {
+                        selectedDiv.insertBefore(draggedItem, closestItem);
+                    } else {
+                        selectedDiv.insertBefore(draggedItem, closestItem.nextSibling);
+                    }
+                }
+                updateOrderNumbers();
+                // Remove any leftover drag-over classes
+                document.querySelectorAll('.drag-over').forEach(el => {
+                    el.classList.remove('drag-over');
+                });
+            }
+        });
     }
 
+    // =====================================
+    // UI Update Functions
+    // =====================================
     function setLoading(isLoading) {
         const loadingOverlay = document.getElementById('loading-overlay');
         if (isLoading) {
@@ -146,34 +146,40 @@
 
     function updateGeneratorSelect() {
         const select = document.getElementById('generator_id');
-        select.innerHTML = '<option value=\"\">Select a Generator...</option>' + 
+        select.innerHTML = '<option value="">Select a Generator...</option>' + 
             generators.map(gen => 
-                `<option value=\"${gen.id}\">${gen.name}</option>`
+                `<option value="${gen.id}">${gen.name}</option>`
             ).join('');
     }
 
     function updateUtilitiesCheckboxes() {
         const utilDiv = document.getElementById('utilities');
         utilDiv.innerHTML = utilities.map(util => `
-            <label class=\"flex items-center p-3 bg-gray-800 rounded-lg border border-gray-700 hover:border-primary-500 transition-colors cursor-pointer\">
-                <input type=\"checkbox\" id=\"utility_${util.id}\" name=\"utilities\" value=\"${util.id}\"
-                    class=\"w-4 h-4 text-primary-500 focus:ring-primary-500 rounded\">
-                <span class=\"ml-2 text-sm\">
-                    <i class=\"fas fa-puzzle-piece text-primary-500 mr-2\"></i>
-                    ${util.name}
-                </span>
-            </label>
+            <div class="utility-item" draggable="true" data-id="${util.id}">
+                <label class="flex items-center p-3 bg-gray-800 rounded-lg border border-gray-700 hover:border-primary-500 transition-colors cursor-pointer">
+                    <input type="checkbox" id="utility_${util.id}" name="utilities" value="${util.id}"
+                        class="w-4 h-4 text-primary-500 focus:ring-primary-500 rounded"
+                        onchange="handleUtilitySelection(this, ${util.id}, '${util.name}')">
+                    <span class="ml-2 text-sm flex-1">
+                        <i class="fas fa-puzzle-piece text-primary-500 mr-2"></i>
+                        ${util.name}
+                    </span>
+                    <i class="fas fa-grip-vertical text-gray-500 ml-2 cursor-move"></i>
+                </label>
+            </div>
         `).join('');
+
+        initializeDragAndDrop();
     }
 
     function updatePlatformsCheckboxes() {
         const platDiv = document.getElementById('platforms');
         platDiv.innerHTML = platforms.map(plat => `
-            <label class=\"flex items-center p-3 bg-gray-800 rounded-lg border border-gray-700 hover:border-primary-500 transition-colors cursor-pointer\">
-                <input type=\"checkbox\" id=\"platform_${plat.id}\" name=\"platforms\" value=\"${plat.id}\"
-                    class=\"w-4 h-4 text-primary-500 focus:ring-primary-500 rounded\">
-                <span class=\"ml-2 text-sm\">
-                    <i class=\"fas fa-share-alt text-primary-500 mr-2\"></i>
+            <label class="flex items-center p-3 bg-gray-800 rounded-lg border border-gray-700 hover:border-primary-500 transition-colors cursor-pointer">
+                <input type="checkbox" id="platform_${plat.id}" name="platforms" value="${plat.id}"
+                    class="w-4 h-4 text-primary-500 focus:ring-primary-500 rounded">
+                <span class="ml-2 text-sm">
+                    <i class="fas fa-share-alt text-primary-500 mr-2"></i>
                     ${plat.platform} - ${plat.account_name}
                 </span>
             </label>
@@ -209,12 +215,8 @@
             
             return `
                 <tr class="bg-gray-800 border-b border-gray-700 hover:bg-gray-700 transition-colors">
-                    <td class="px-6 py-4 whitespace-nowrap font-medium">
-                        ${task.name}
-                    </td>
-                    <td class="px-6 py-4 whitespace-nowrap text-gray-300">
-                        ${task.id}
-                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap font-medium">${task.name}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-gray-300">${task.id}</td>
                     <td class="px-6 py-4 whitespace-nowrap">
                         <div class="flex items-center">
                             <i class="fas fa-robot text-primary-500 mr-2"></i>
@@ -285,24 +287,83 @@
         }).join('');
     }
 
+    // =====================================
+    // Filter Functions
+    // =====================================
+    function initializeFilters() {
+        // Add status filters
+        const statuses = ['PENDING', 'RUNNING', 'COMPLETED', 'FAILED'];
+        const statusFilters = document.getElementById('status-filters');
+        statusFilters.innerHTML = statuses.map(status => `
+            <label class="inline-flex items-center p-2 bg-gray-800 rounded-lg border border-gray-700 hover:border-primary-500 transition-colors cursor-pointer">
+                <input type="checkbox" value="${status}" 
+                    class="w-4 h-4 text-primary-500 focus:ring-primary-500 rounded"
+                    onchange="updateFilters()">
+                <span class="ml-2 text-sm">${status}</span>
+            </label>
+        `).join('');
+
+        // Add platform filters
+        const platformFilters = document.getElementById('platform-filters');
+        platformFilters.innerHTML = platforms.map(platform => `
+            <label class="inline-flex items-center p-2 bg-gray-800 rounded-lg border border-gray-700 hover:border-primary-500 transition-colors cursor-pointer">
+                <input type="checkbox" value="${platform.id}" 
+                    class="w-4 h-4 text-primary-500 focus:ring-primary-500 rounded"
+                    onchange="updateFilters()">
+                <span class="ml-2 text-sm">${platform.platform}</span>
+            </label>
+        `).join('');
+    }
+	function updateFilters() {
+		filterState.search = document.getElementById('task-search').value.toLowerCase();
+		filterState.status = Array.from(document.querySelectorAll('#status-filters input:checked')).map(cb => cb.value);
+		filterState.platform = Array.from(document.querySelectorAll('#platform-filters input:checked')).map(cb => cb.value);
+		filterState.dateRange.start = document.getElementById('date-start').value;
+		filterState.dateRange.end = document.getElementById('date-end').value;
+		filteredTasks = tasks.filter(task => {
+            const matchesSearch = task.name.toLowerCase().includes(filterState.search);
+            const matchesStatus = filterState.status.length === 0 || filterState.status.includes(task.status);
+            const matchesPlatform = filterState.platform.length === 0 || 
+                task.platforms.some(p => filterState.platform.includes(p.toString()));
+            
+            let matchesDate = true;
+            if (filterState.dateRange.start || filterState.dateRange.end) {
+                const taskDate = new Date(task.created_at);
+                if (filterState.dateRange.start) {
+                    matchesDate = matchesDate && taskDate >= new Date(filterState.dateRange.start);
+                }
+                if (filterState.dateRange.end) {
+                    matchesDate = matchesDate && taskDate <= new Date(filterState.dateRange.end);
+                }
+            }
+
+            return matchesSearch && matchesStatus && matchesPlatform && matchesDate;
+        });
+
+        renderTasks();
+    }
+
+    // =====================================
+    // Task Action Functions
+    // =====================================
     async function createTask(event) {
         event.preventDefault();
         if (!validateForm(event.target)) return;
 
-        const submitButton = event.target.querySelector('button[type=\"submit\"]');
+        const submitButton = event.target.querySelector('button[type="submit"]');
         setButtonLoading(submitButton, true);
 
-        const selectedUtilities = Array.from(document.querySelectorAll('input[name=\"utilities\"]:checked'))
-            .map(checkbox => parseInt(checkbox.value));
-        const selectedPlatforms = Array.from(document.querySelectorAll('input[name=\"platforms\"]:checked'))
-            .map(checkbox => parseInt(checkbox.value));
+        // Get utilities in their displayed order
+        const selectedUtilities = Array.from(document.querySelectorAll('#selected-utilities .selected-utility'))
+            .map(item => parseInt(item.dataset.id));
 
         const formData = {
             name: document.getElementById('task_name').value,
             generator_id: parseInt(document.getElementById('generator_id').value),
-            utilities: selectedUtilities,
+            utilities: selectedUtilities, // This will now be in the correct order
             schedule: document.getElementById('schedule').value,
-            platforms: selectedPlatforms,
+            platforms: Array.from(document.querySelectorAll('input[name="platforms"]:checked'))
+                .map(checkbox => parseInt(checkbox.value)),
             hashtags: document.getElementById('hashtags').value,
             sound_name: document.getElementById('sound_name').value,
             sound_volume: document.getElementById('sound_volume').value,
@@ -327,6 +388,38 @@
             showToast('Error creating task: ' + error.message, 'error');
         } finally {
             setButtonLoading(submitButton, false);
+        }
+    }
+
+    async function duplicateTask(id) {
+        try {
+            const task = tasks.find(t => t.id === id);
+            if (!task) {
+                throw new Error('Task not found');
+            }
+
+            // Create a copy of the task with a new name
+            const newTask = {
+                ...task,
+                name: `${task.name} (Copy)`,
+                status: 'PENDING'
+            };
+            delete newTask.id; // Remove the ID so a new one will be generated
+
+            const response = await fetch('/api/tasks', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(newTask)
+            });
+
+            if (!response.ok) {
+                throw new Error('Failed to duplicate task');
+            }
+
+            showToast('Task duplicated successfully!', 'success');
+            await loadData();
+        } catch (error) {
+            showToast('Error duplicating task: ' + error.message, 'error');
         }
     }
 
@@ -357,12 +450,44 @@
         }
     }
 
+    // =====================================
+    // Data Loading
+    // =====================================
+    async function loadData() {
+        try {
+            setLoading(true);
+            const [generatorsRes, utilitiesRes, platformsRes, tasksRes] = await Promise.all([
+                fetch('/api/generators'),
+                fetch('/api/utilities'),
+                fetch('/api/platforms'),
+                fetch('/api/tasks')
+            ]);
+
+            generators = await generatorsRes.json();
+            utilities = await utilitiesRes.json();
+            platforms = await platformsRes.json();
+            tasks = await tasksRes.json();
+            filteredTasks = [...tasks]; // Initialize filtered tasks
+
+            updateGeneratorSelect();
+            updateUtilitiesCheckboxes();
+            updatePlatformsCheckboxes();
+            renderTasks();
+            initializeFilters(); // Initialize the filter UI
+        } catch (error) {
+            showToast('Error loading data', 'error');
+        } finally {
+            setLoading(false);
+        }
+    }
+
     // Initialize on page load
     document.addEventListener('DOMContentLoaded', loadData);
 
-    // Refresh tasks every 30 seconds
-    setInterval(loadData, 30000);
+    // Refresh tasks every 60 seconds
+    setInterval(loadData, 60000);
 </script>
+
 {% endblock %}`
 }
 
@@ -414,15 +539,18 @@
         </div>
 
         <!-- Utilities -->
-        <div class="glass rounded-lg p-6 border border-gray-700">
-            <h3 class="text-lg font-semibold mb-4 text-white">
-                <i class="fas fa-tools text-primary-500 mr-2"></i>
-                Utilities
-            </h3>
-            <div id="utilities" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                <!-- Dynamically populated -->
-            </div>
-        </div>
+		<div class="glass rounded-lg p-6 border border-gray-700">
+			<h3 class="text-lg font-semibold mb-4 text-white">
+				<i class="fas fa-tools text-primary-500 mr-2"></i>
+				Utilities (Drag to Reorder)
+			</h3>
+			<div id="utilities" class="space-y-2">
+				<!-- Each utility will be added here dynamically -->
+			</div>
+			<div id="selected-utilities" class="mt-4 space-y-2">
+				<!-- Selected utilities will move here -->
+			</div>
+		</div>
 
         <!-- Platforms -->
         <div class="glass rounded-lg p-6 border border-gray-700">

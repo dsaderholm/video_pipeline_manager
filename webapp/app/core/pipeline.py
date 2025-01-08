@@ -96,17 +96,26 @@ def process_video_pipeline(task_id):
                 # Apply utilities in sequence
                 if task_data[3]:  # utilities JSON string
                     utilities = json.loads(task_data[3])
-                    for util_id in utilities:
-                        c.execute("SELECT utility_curl FROM utilities WHERE id=?", (util_id,))
+                    logger.info(f"Task {task_id}: Processing {len(utilities)} utilities in order: {utilities}")
+                    
+                    for index, util_id in enumerate(utilities, 1):
+                        c.execute("SELECT id, name, utility_curl FROM utilities WHERE id=?", (util_id,))
                         util = c.fetchone()
                         if not util:
+                            logger.warning(f"Task {task_id}: Utility {util_id} not found, skipping")
                             continue
                             
+                        logger.info(f"Task {task_id}: Running utility {index}/{len(utilities)} - {util[1]}")
+                        
                         # The utility will overwrite the input file
-                        util_cmd = util[0].format(input=video_file)
+                        util_cmd = util[2].format(input=video_file)
                         success, stdout, stderr = execute_curl(util_cmd)
                         if not success:
-                            raise Exception(f"Utility {util_id} failed: {stderr}")
+                            error_msg = f"Utility {util[1]} ({index}/{len(utilities)}) failed: {stderr}"
+                            logger.error(f"Task {task_id}: {error_msg}")
+                            raise Exception(error_msg)
+                            
+                        logger.info(f"Task {task_id}: Completed utility {index}/{len(utilities)} - {util[1]}")
 
                 # Upload to platforms
                 platforms = json.loads(task_data[5])

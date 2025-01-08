@@ -395,6 +395,35 @@
 		.filter-checkbox {
 			@apply form-checkbox h-4 w-4 text-primary-500 rounded border-gray-700 bg-gray-800;
 		}
+		.selected-utility {
+			cursor: move;
+			transition: all 0.2s ease;
+		}
+		.selected-utility.dragging {
+			opacity: 0.5;
+			transform: scale(1.02);
+		}
+		.selected-utility.drag-over {
+			border-top: 2px solid rgb(99, 102, 241);
+		}
+		#selected-utilities {
+			min-height: 50px;
+			border: 2px dashed rgba(99, 102, 241, 0.2);
+			border-radius: 0.5rem;
+			margin-top: 1rem;
+			padding: 0.5rem;
+		}
+		#selected-utilities:empty {
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			padding: 2rem;
+		}
+		#selected-utilities:empty:after {
+			content: 'Drag utilities here to set their order';
+			color: rgba(156, 163, 175, 0.5);
+			font-size: 0.875rem;
+		}
     </style>
     {% block head %}{% endblock %}
 </head>
