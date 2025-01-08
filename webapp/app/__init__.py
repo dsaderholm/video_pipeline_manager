@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import os
 import sqlite3
 import time
+from datetime import datetime, timedelta
 
 # Load environment variables from .env file
 load_dotenv()
@@ -105,7 +106,7 @@ def create_app():
         func=cleanup_preview_files,
         trigger='interval',
         hours=1,
-        next_run_time=time.time() + 60  # First run after 1 minute
+        next_run_time=datetime.now() + timedelta(minutes=1)  # First run after 1 minute
     )
     
     scheduler.start()  # Start scheduler here, before app context
