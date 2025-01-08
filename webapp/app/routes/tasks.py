@@ -240,21 +240,25 @@ def preview_task(id):
         
         if video_path and os.path.exists(video_path):
             try:
-                # Return the video file
+                logger.info(f"Sending preview file: {video_path}")
+                # Use absolute path and ensure mimetype is set correctly
                 return send_file(
-                    video_path,
+                    os.path.abspath(video_path),
                     mimetype='video/mp4',
                     as_attachment=True,
                     download_name=f'preview_task_{id}.mp4'
                 )
             finally:
-                # Clean up after sending
                 try:
+                    # Add a small delay before cleanup to ensure file is sent
                     if os.path.exists(video_path):
+                        import time
+                        time.sleep(0.5)  # 500ms delay
                         os.remove(video_path)
                 except Exception as e:
                     logger.error(f"Error cleaning up preview file {video_path}: {e}")
         else:
+            logger.error(f"Preview file not found at path: {video_path}")
             return jsonify({
                 'success': False,
                 'message': 'Failed to generate preview video'
