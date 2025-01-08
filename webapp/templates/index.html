@@ -435,9 +435,6 @@
 				return;
 			}
 			
-			// Set the active preview ID to prevent auto-refresh
-			activePreviewId = id;
-			
 			showToast('Starting preview generation...', 'info');
 			
 			const response = await fetch(`/api/tasks/${id}/preview`, {
@@ -449,50 +446,22 @@
 				throw new Error(error.message || 'Failed to start preview');
 			}
 
-			showToast('Preview generation started. Status will update when ready', 'success');
-			
-			// Poll for task status
-			const checkInterval = setInterval(async () => {
-				try {
-					const taskResponse = await fetch('/api/tasks');
-					const tasks = await taskResponse.json();
-					const task = tasks.find(t => t.id === id);
-					
-					if (task && task.status === 'completed') {
-						clearInterval(checkInterval);
-						showToast('Preview ready. Starting download...', 'success');
-						// Wait a moment before starting download to ensure file is ready
-						setTimeout(() => {
-							window.location.href = `/api/tasks/${id}/preview/download`;
-							// Reset active preview ID after a short delay to allow download to start
-							setTimeout(() => {
-								activePreviewId = null;
-								loadData(); // Refresh data once after preview is complete
-							}, 2000);
-						}, 1000);
-					} else if (task && task.status === 'failed') {
-						clearInterval(checkInterval);
-						showToast('Preview generation failed', 'error');
-						activePreviewId = null; // Reset active preview ID
-					}
-				} catch (error) {
-					console.error('Error checking preview status:', error);
-				}
-			}, 10000); // Check every 10 seconds
-			
-			// Stop checking after 20 minutes
-			setTimeout(() => {
-				clearInterval(checkInterval);
-				activePreviewId = null; // Reset active preview ID
-				showToast('Preview is taking longer than expected. You can try downloading it manually later.', 'warning');
-			}, 1200000); // 20 minutes
-			
+			const result = await response.json();
+			if (result.success) {
+				showToast('Preview generated! Starting download...', 'success');
+				window.location.href = `/api/tasks/${id}/preview/download`;
+			} else {
+				throw new Error(result.message || 'Preview failed');
+			}
+
 		} catch (error) {
-			activePreviewId = null; // Reset active preview ID on error
 			showToast('Error: ' + error.message, 'error');
+		} finally {
+			// Force a data refresh
+			await loadData();
 		}
 	}
-	
+
 	async function dryRunTask(id) {
 		try {
 			const response = await fetch(`/api/tasks/${id}/dry-run`, {

@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timedelta
 import logging
 import os
+import time
 from app.timezone import localize_timestamp
 
 # Create blueprint and logger
@@ -222,16 +223,33 @@ def run_task(id):
 @tasks_bp.route('/api/tasks/<int:id>/preview', methods=['POST'])
 def preview_task(id):
     try:
-        # First verify task exists
+        # First verify task exists and isn't already previewing
         with sqlite3.connect('pipeline.db') as conn:
             c = conn.cursor()
             c.execute("SELECT id, status FROM tasks WHERE id = ?", (id,))
             task = c.fetchone()
+            
             if not task:
                 return jsonify({
                     'success': False,
                     'message': f'Task {id} not found'
                 }), 404
+                
+            if task[1] == 'previewing':
+                return jsonify({
+                    'success': False,
+                    'message': 'Preview already in progress'
+                }), 409
+
+            # Clean up any existing preview files for this task
+            from app.core.pipeline import get_preview_dir
+            preview_dir = get_preview_dir()
+            preview_path = os.path.join(preview_dir, f'preview_task_{id}.mp4')
+            try:
+                if os.path.exists(preview_path):
+                    os.remove(preview_path)
+            except Exception as e:
+                logger.warning(f"Failed to clean up old preview file: {e}")
 
             # Update task status for preview
             c.execute("""
@@ -241,28 +259,21 @@ def preview_task(id):
             """, (id,))
             conn.commit()
 
-        # Get correct preview directory path
-        from app.core.pipeline import get_preview_dir
-        preview_dir = get_preview_dir()
-        os.makedirs(preview_dir, exist_ok=True)
-
         # Start the pipeline in preview mode
         from app.core.pipeline import process_video_pipeline
-        try:
-            preview_path = process_video_pipeline(id, preview_mode=True)
-            if preview_path:
-                return jsonify({
-                    'success': True,
-                    'message': 'Preview generated successfully',
-                    'path': preview_path
-                })
-            else:
-                raise Exception("Failed to generate preview")
-        except Exception as e:
-            raise Exception(f"Preview generation failed: {str(e)}")
+        preview_result = process_video_pipeline(id, preview_mode=True)
+        
+        if preview_result and os.path.exists(os.path.join(get_preview_dir(), f'preview_task_{id}.mp4')):
+            return jsonify({
+                'success': True,
+                'message': 'Preview generated successfully',
+                'preview_url': f'/static/previews/preview_task_{id}.mp4'
+            })
+        else:
+            raise Exception("Failed to generate preview")
             
     except Exception as e:
-        logger.error(f"Error starting preview for task {id}: {str(e)}")
+        logger.error(f"Error generating preview for task {id}: {str(e)}")
         # Update task status on error
         with sqlite3.connect('pipeline.db') as conn:
             c = conn.cursor()
@@ -272,9 +283,10 @@ def preview_task(id):
                 WHERE id = ?
             """, (id,))
             conn.commit()
+            
         return jsonify({
             'success': False,
-            'message': str(e)
+            'message': f'Preview generation failed: {str(e)}'
         }), 500
 
 @tasks_bp.route('/api/tasks/<int:id>/preview/download', methods=['GET'])
@@ -284,44 +296,53 @@ def download_preview(id):
         preview_dir = get_preview_dir()
         preview_path = os.path.join(preview_dir, f'preview_task_{id}.mp4')
         
-        if os.path.exists(preview_path):
-            try:
-                # Check if file is still being written to
-                for _ in range(10):  # Try for up to 10 seconds
-                    try:
-                        with open(preview_path, 'rb') as f:
-                            f.seek(0, 2)  # Seek to end to check if file is locked
-                        break
-                    except IOError:
-                        time.sleep(1)
-                        continue
-                
-                return send_file(
-                    preview_path,
-                    mimetype='video/mp4',
-                    as_attachment=True,
-                    download_name=f'preview_task_{id}.mp4'
-                )
-            except Exception as e:
-                logger.error(f"Error sending preview file: {e}")
-                raise
-            finally:
-                # Clean up the preview file after sending
-                try:
-                    os.remove(preview_path)
-                except Exception as e:
-                    logger.error(f"Error cleaning up preview file: {e}")
-        else:
+        if not os.path.exists(preview_path):
             return jsonify({
                 'success': False,
                 'message': 'Preview not found or still generating'
             }), 404
+
+        try:
+            # Ensure file is ready for reading
+            max_retries = 10
+            retry_delay = 1  # second
+            for attempt in range(max_retries):
+                try:
+                    with open(preview_path, 'rb') as f:
+                        # Try to read a small chunk to verify file access
+                        f.read(1024)
+                        f.seek(0)
+                        break
+                except (IOError, PermissionError):
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                        continue
+                    raise
             
+            return send_file(
+                preview_path,
+                mimetype='video/mp4',
+                as_attachment=True,
+                download_name=f'preview_task_{id}.mp4'
+            )
+            
+        except Exception as e:
+            logger.error(f"Error sending preview file: {e}")
+            raise
+            
+        finally:
+            # Clean up the preview file after sending
+            try:
+                if os.path.exists(preview_path):
+                    os.remove(preview_path)
+            except Exception as e:
+                logger.error(f"Error cleaning up preview file: {e}")
+                
     except Exception as e:
         logger.error(f"Error downloading preview for task {id}: {str(e)}")
         return jsonify({
             'success': False,
-            'message': str(e)
+            'message': f'Error downloading preview: {str(e)}'
         }), 500
 
 @tasks_bp.route('/api/tasks/<int:id>/dry-run', methods=['POST'])
