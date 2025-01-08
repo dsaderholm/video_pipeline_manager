@@ -221,7 +221,6 @@ def run_task(id):
 
 @tasks_bp.route('/api/tasks/<int:id>/preview', methods=['POST'])
 def preview_task(id):
-    video_path = None
     try:
         # First verify task exists
         with sqlite3.connect('pipeline.db') as conn:
@@ -234,41 +233,71 @@ def preview_task(id):
                     'message': f'Task {id} not found'
                 }), 404
 
-        # Run the pipeline in preview mode
+            # Update task status for preview
+            c.execute("""
+                UPDATE tasks 
+                SET status = 'previewing'
+                WHERE id = ?
+            """, (id,))
+            conn.commit()
+
+        # Ensure previews directory exists
+        os.makedirs('previews', exist_ok=True)
+
+        # Start the pipeline in preview mode async
         from app.core.pipeline import process_video_pipeline
-        video_path = process_video_pipeline(id, preview_mode=True)
+        from concurrent.futures import ThreadPoolExecutor
+        executor = ThreadPoolExecutor(max_workers=1)
+        executor.submit(process_video_pipeline, id, preview_mode=True)
         
-        if video_path and os.path.exists(video_path):
-            try:
-                logger.info(f"Sending preview file: {video_path}")
-                # Get just the filename and create a URL that serves from static directory
-                filename = os.path.basename(video_path)
-                response = jsonify({
-                    'success': True,
-                    'video_url': f'/static/previews/{filename}'
-                })
-                return response
-            except Exception as e:
-                logger.error(f"Error preparing preview response: {e}")
-                return jsonify({
-                    'success': False,
-                    'message': 'Error preparing preview response'
-                }), 500
-        else:
-            logger.error(f"Preview file not found at path: {video_path}")
-            return jsonify({
-                'success': False,
-                'message': 'Failed to generate preview video'
-            }), 500
+        return jsonify({
+            'success': True,
+            'message': 'Preview generation started',
+            'task_id': id
+        })
             
     except Exception as e:
-        logger.error(f"Error previewing task {id}: {str(e)}")
-        # Clean up if there was an error
-        if video_path and os.path.exists(video_path):
+        logger.error(f"Error starting preview for task {id}: {str(e)}")
+        # Update task status on error
+        with sqlite3.connect('pipeline.db') as conn:
+            c = conn.cursor()
+            c.execute("""
+                UPDATE tasks 
+                SET status = 'failed'
+                WHERE id = ?
+            """, (id,))
+            conn.commit()
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        }), 500
+
+@tasks_bp.route('/api/tasks/<int:id>/preview/download', methods=['GET'])
+def download_preview(id):
+    try:
+        preview_path = os.path.join('previews', f'preview_task_{id}.mp4')
+        if os.path.exists(preview_path):
             try:
-                os.remove(video_path)
-            except Exception as cleanup_error:
-                logger.error(f"Error cleaning up preview file after error: {cleanup_error}")
+                return send_file(
+                    preview_path,
+                    mimetype='video/mp4',
+                    as_attachment=True,
+                    download_name=f'preview_task_{id}.mp4'
+                )
+            finally:
+                # Clean up the preview file after sending
+                try:
+                    os.remove(preview_path)
+                except Exception as e:
+                    logger.error(f"Error cleaning up preview file: {e}")
+        else:
+            return jsonify({
+                'success': False,
+                'message': 'Preview not found'
+            }), 404
+            
+    except Exception as e:
+        logger.error(f"Error downloading preview for task {id}: {str(e)}")
         return jsonify({
             'success': False,
             'message': str(e)
