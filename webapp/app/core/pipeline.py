@@ -140,8 +140,8 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
 
                 # For preview mode, save the processed video and return its path
                 if preview_mode and video_file:
-                    preview_dir = os.path.join(os.path.dirname(video_file), 'previews')
-                    os.makedirs(preview_dir, exist_ok=True)
+                    preview_dir = '/app/webapp/app/previews'  # Fixed absolute path for previews
+                    os.makedirs(preview_dir, exist_ok=True)  # Create if doesn't exist
                     preview_path = os.path.join(preview_dir, f'preview_task_{task_id}.mp4')
                     os.rename(video_file, preview_path)
                     return preview_path
