@@ -58,9 +58,9 @@ def release_lock():
 
 def get_preview_dir():
     """Get the absolute path to the previews directory"""
-    # Get the webapp root directory (parent of 'app' directory)
     webapp_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     preview_dir = os.path.join(webapp_root, 'static', 'previews')
+    os.makedirs(preview_dir, exist_ok=True)  # Ensure directory exists
     return preview_dir
 
 def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
@@ -149,11 +149,13 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                 # For preview mode, save the processed video and return its path
                 if preview_mode and video_file:
                     preview_dir = get_preview_dir()
-                    os.makedirs(preview_dir, exist_ok=True)
                     preview_path = os.path.join(preview_dir, f'preview_task_{task_id}.mp4')
+                    if os.path.exists(preview_path):
+                        os.remove(preview_path)  # Remove existing preview if any
                     os.rename(video_file, preview_path)
-                    # Return a relative path that works with url_for
-                    return os.path.join('static', 'previews', f'preview_task_{task_id}.mp4')
+                    c.execute("UPDATE tasks SET status='completed' WHERE id=?", (task_id,))
+                    conn.commit()
+                    return preview_path
 
                 # For dry run or preview mode, skip uploads
                 if dry_run or preview_mode:
