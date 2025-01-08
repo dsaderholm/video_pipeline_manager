@@ -1,6 +1,7 @@
 import sqlite3
 import json
 import time
+import os
 from app import logger
 from app.core.utils import execute_curl, get_latest_video, cleanup_video, format_upload_command
 from app.core.email_utils import send_task_completion_notification
@@ -54,20 +55,32 @@ def release_lock():
         """)
         conn.commit()
 
-def process_video_pipeline(task_id):
-    """Main pipeline process for generating, processing, and uploading videos"""
-    # Try to acquire lock, exit if another task is running
-    if not check_and_set_lock():
+def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
+    """Main pipeline process for generating, processing, and uploading videos
+    
+    Args:
+        task_id (int): ID of the task to process
+        preview_mode (bool): If True, generate and process video but don't upload
+        dry_run (bool): If True, simulate all steps without executing
+        
+    Returns:
+        - If preview_mode: path to the generated video file
+        - If dry_run: bool indicating success
+        - Otherwise: None
+    """
+    # For dry runs, we don't need to acquire a lock
+    if not dry_run and not check_and_set_lock():
         logger.info(f"Another task is currently running. Task {task_id} will retry later.")
-        return
+        return False if dry_run else None
     
     try:
         with sqlite3.connect('pipeline.db') as conn:
             c = conn.cursor()
             
-            # Update lock with current task_id
-            c.execute("UPDATE task_lock SET task_id = ? WHERE id = 1", (task_id,))
-            conn.commit()
+            if not dry_run:
+                # Update lock with current task_id
+                c.execute("UPDATE task_lock SET task_id = ? WHERE id = 1", (task_id,))
+                conn.commit()
             
             # Get task information
             c.execute("""
@@ -80,29 +93,37 @@ def process_video_pipeline(task_id):
             
             if not task_data:
                 logger.error(f"No task found with ID {task_id}")
-                return
+                return False if dry_run else None
 
             video_file = None
+            preview_path = None
             try:
                 # Generate initial video
-                success, stdout, stderr = execute_curl(task_data[-1])  # generator_curl is the last column
-                if not success:
-                    raise Exception(f"Generator failed: {stderr}")
+                if dry_run:
+                    logger.info(f"[DRY RUN] Would execute generator: {task_data[-1]}")
+                else:
+                    success, stdout, stderr = execute_curl(task_data[-1])
+                    if not success:
+                        raise Exception(f"Generator failed: {stderr}")
 
-                video_file = get_latest_video()
-                if not video_file:
-                    raise Exception("No video file was generated")
+                    video_file = get_latest_video()
+                    if not video_file:
+                        raise Exception("No video file was generated")
                 
                 # Apply utilities in sequence
                 if task_data[3]:  # utilities JSON string
                     utilities = json.loads(task_data[3])
-                    logger.info(f"Task {task_id}: Processing {len(utilities)} utilities in order: {utilities}")
+                    logger.info(f"Task {task_id}: {'[DRY RUN] Would process' if dry_run else 'Processing'} {len(utilities)} utilities")
                     
                     for index, util_id in enumerate(utilities, 1):
                         c.execute("SELECT id, name, utility_curl FROM utilities WHERE id=?", (util_id,))
                         util = c.fetchone()
                         if not util:
                             logger.warning(f"Task {task_id}: Utility {util_id} not found, skipping")
+                            continue
+                        
+                        if dry_run:
+                            logger.info(f"[DRY RUN] Would run utility {index}/{len(utilities)} - {util[1]}")
                             continue
                             
                         logger.info(f"Task {task_id}: Running utility {index}/{len(utilities)} - {util[1]}")
@@ -116,6 +137,20 @@ def process_video_pipeline(task_id):
                             raise Exception(error_msg)
                             
                         logger.info(f"Task {task_id}: Completed utility {index}/{len(utilities)} - {util[1]}")
+
+                # For preview mode, save the processed video and return its path
+                if preview_mode and video_file:
+                    preview_dir = os.path.join(os.path.dirname(video_file), 'previews')
+                    os.makedirs(preview_dir, exist_ok=True)
+                    preview_path = os.path.join(preview_dir, f'preview_task_{task_id}.mp4')
+                    os.rename(video_file, preview_path)
+                    return preview_path
+
+                # For dry run or preview mode, skip uploads
+                if dry_run or preview_mode:
+                    if dry_run:
+                        logger.info("[DRY RUN] Would upload to platforms:", task_data[5])
+                    return True if dry_run else None
 
                 # Upload to platforms
                 platforms = json.loads(task_data[5])
@@ -158,42 +193,50 @@ def process_video_pipeline(task_id):
                     if not success:
                         raise Exception(f"Upload failed for platform {platform[1]}: {last_error}")
 
-                # Update task status
-                c.execute("UPDATE tasks SET status=? WHERE id=?", ('completed', task_id))
-                conn.commit()
+                # Update task status for real runs
+                if not dry_run:
+                    c.execute("UPDATE tasks SET status=? WHERE id=?", ('completed', task_id))
+                    conn.commit()
+                    
+                    logger.info(f"Task {task_id} completed successfully")
+                    
+                    # Send success notification if email is configured
+                    if task_data[10]:  # email_notify field
+                        send_task_completion_notification(
+                            task_id=task_id,
+                            task_name=task_data[1],  # name field
+                            to_email=task_data[10],   # email_notify field
+                            success=True
+                        )
                 
-                logger.info(f"Task {task_id} completed successfully")
-                
-                # Send success notification if email is configured
-                if task_data[10]:  # email_notify field
-                    send_task_completion_notification(
-                        task_id=task_id,
-                        task_name=task_data[1],  # name field
-                        to_email=task_data[10],   # email_notify field
-                        success=True
-                    )
+                return True if dry_run else None
                 
             except Exception as e:
                 error_msg = f"Pipeline error for task {task_id}: {str(e)}"
                 logger.error(error_msg)
                 
-                # Update task status
-                c.execute("UPDATE tasks SET status=? WHERE id=?", ('failed', task_id))
-                conn.commit()
+                if not dry_run:
+                    # Update task status
+                    c.execute("UPDATE tasks SET status=? WHERE id=?", ('failed', task_id))
+                    conn.commit()
+                    
+                    # Send failure notification if email is configured
+                    if task_data[10]:  # email_notify field
+                        send_task_completion_notification(
+                            task_id=task_id,
+                            task_name=task_data[1],  # name field
+                            to_email=task_data[10],   # email_notify field
+                            success=False
+                        )
                 
-                # Send failure notification if email is configured
-                if task_data[10]:  # email_notify field
-                    send_task_completion_notification(
-                        task_id=task_id,
-                        task_name=task_data[1],  # name field
-                        to_email=task_data[10],   # email_notify field
-                        success=False
-                    )
+                return False if dry_run else None
                 
             finally:
-                if video_file:
+                # Clean up video file unless it's a preview that we want to keep
+                if video_file and not preview_mode:
                     cleanup_video(video_file)
                     
     finally:
-        # Always release the lock, even if an exception occurs
-        release_lock()
+        # Always release the lock for real runs
+        if not dry_run:
+            release_lock()

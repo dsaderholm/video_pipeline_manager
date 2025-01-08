@@ -268,12 +268,18 @@
                                 <i class="fas fa-play mr-1"></i>
                                 Run
                             </button>
-                            <button onclick="duplicateTask(${task.id})"
-                                class="inline-flex items-center px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-xs transition-colors"
-                                data-tooltip="Create a copy of this task">
-                                <i class="fas fa-copy mr-1"></i>
-                                Copy
-                            </button>
+							<button onclick="previewTask(${task.id})"
+								class="inline-flex items-center px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-xs transition-colors"
+								data-tooltip="Preview task output">
+								<i class="fas fa-eye mr-1"></i>
+								Preview
+							</button>
+							<button onclick="dryRunTask(${task.id})"
+								class="inline-flex items-center px-3 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded-md text-xs transition-colors"
+								data-tooltip="Test without uploading">
+								<i class="fas fa-vial mr-1"></i>
+								Dry Run
+							</button>
                             <button onclick="deleteTask(${task.id})"
                                 class="inline-flex items-center px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded-md text-xs transition-colors"
                                 data-tooltip="Delete task">
@@ -391,38 +397,6 @@
         }
     }
 
-    async function duplicateTask(id) {
-        try {
-            const task = tasks.find(t => t.id === id);
-            if (!task) {
-                throw new Error('Task not found');
-            }
-
-            // Create a copy of the task with a new name
-            const newTask = {
-                ...task,
-                name: `${task.name} (Copy)`,
-                status: 'PENDING'
-            };
-            delete newTask.id; // Remove the ID so a new one will be generated
-
-            const response = await fetch('/api/tasks', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(newTask)
-            });
-
-            if (!response.ok) {
-                throw new Error('Failed to duplicate task');
-            }
-
-            showToast('Task duplicated successfully!', 'success');
-            await loadData();
-        } catch (error) {
-            showToast('Error duplicating task: ' + error.message, 'error');
-        }
-    }
-
     async function runTask(id) {
         try {
             const response = await fetch(`/api/tasks/${id}/run`, {
@@ -449,6 +423,40 @@
             showToast('Error deleting task: ' + error.message, 'error');
         }
     }
+	
+	async function previewTask(id) {
+	try {
+		const response = await fetch(`/api/tasks/${id}/preview`, {
+			method: 'POST'
+		});
+		
+		if (response.ok) {
+			// Get the video as a blob and create a temporary URL
+			const blob = await response.blob();
+			const url = window.URL.createObjectURL(blob);
+			
+			// Open the video in a new tab
+			window.open(url, '_blank');
+		} else {
+			const error = await response.json();
+			throw new Error(error.message || 'Preview failed');
+		}
+	} catch (error) {
+		showToast('Error previewing task: ' + error.message, 'error');
+	}
+}
+
+async function dryRunTask(id) {
+	try {
+		const response = await fetch(`/api/tasks/${id}/dry-run`, {
+			method: 'POST'
+		});
+		const result = await response.json();
+		showToast(result.message, result.success ? 'success' : 'error');
+	} catch (error) {
+		showToast('Error during dry run: ' + error.message, 'error');
+	}
+}
 
     // =====================================
     // Data Loading

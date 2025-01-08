@@ -6,6 +6,7 @@ import sys
 from dotenv import load_dotenv
 import os
 import sqlite3
+import time
 
 # Load environment variables from .env file
 load_dotenv()
@@ -54,6 +55,35 @@ def setup_logging():
 # Initialize logger
 logger = setup_logging()
 
+def cleanup_preview_files():
+    """Clean up preview files older than 1 hour"""
+    preview_dir = os.path.join(APP_ROOT, 'previews')
+    if not os.path.exists(preview_dir):
+        return
+        
+    logger.info("Starting scheduled preview files cleanup")
+    deleted_count = 0
+    error_count = 0
+    current_time = time.time()
+    
+    for file in os.listdir(preview_dir):
+        if not file.startswith('preview_task_'):
+            continue
+            
+        file_path = os.path.join(preview_dir, file)
+        # If file is older than 1 hour
+        if os.path.getmtime(file_path) < current_time - 3600:
+            try:
+                os.remove(file_path)
+                deleted_count += 1
+                logger.debug(f"Deleted old preview file: {file}")
+            except Exception as e:
+                error_count += 1
+                logger.error(f"Error cleaning up old preview file {file_path}: {e}")
+    
+    if deleted_count > 0 or error_count > 0:
+        logger.info(f"Preview cleanup complete. Deleted: {deleted_count}, Errors: {error_count}")
+
 def create_app():
     """Create and configure the Flask application"""
     logger.info("Starting application initialization...")
@@ -68,8 +98,24 @@ def create_app():
     app.config['SCHEDULER_TIMEZONE'] = "UTC"
     scheduler = APScheduler()
     scheduler.init_app(app)
+    
+    # Add cleanup job to run every hour
+    scheduler.add_job(
+        id='cleanup_previews',
+        func=cleanup_preview_files,
+        trigger='interval',
+        hours=1,
+        next_run_time=time.time() + 60  # First run after 1 minute
+    )
+    
     scheduler.start()  # Start scheduler here, before app context
     app.scheduler = scheduler  # Make scheduler accessible throughout the app
+    
+    # Create previews directory if it doesn't exist
+    previews_dir = os.path.join(APP_ROOT, 'previews')
+    if not os.path.exists(previews_dir):
+        os.makedirs(previews_dir)
+        logger.info("Created previews directory")
     
     with app.app_context():
         # Initialize log manager

@@ -1,8 +1,9 @@
-from flask import jsonify, request, Blueprint, current_app
+from flask import jsonify, request, Blueprint, current_app, send_file
 import sqlite3
 import json
 from datetime import datetime, timedelta
 import logging
+import os
 from app.timezone import localize_timestamp
 
 # Create blueprint and logger
@@ -217,3 +218,87 @@ def run_task(id):
             'message': 'Task is queued for retry',
             'error': str(e)
         }), 503
+
+@tasks_bp.route('/api/tasks/<int:id>/preview', methods=['POST'])
+def preview_task(id):
+    video_path = None
+    try:
+        # First verify task exists
+        with sqlite3.connect('pipeline.db') as conn:
+            c = conn.cursor()
+            c.execute("SELECT id, status FROM tasks WHERE id = ?", (id,))
+            task = c.fetchone()
+            if not task:
+                return jsonify({
+                    'success': False,
+                    'message': f'Task {id} not found'
+                }), 404
+
+        # Run the pipeline in preview mode
+        from app.core.pipeline import process_video_pipeline
+        video_path = process_video_pipeline(id, preview_mode=True)
+        
+        if video_path and os.path.exists(video_path):
+            try:
+                # Return the video file
+                return send_file(
+                    video_path,
+                    mimetype='video/mp4',
+                    as_attachment=True,
+                    download_name=f'preview_task_{id}.mp4'
+                )
+            finally:
+                # Clean up after sending
+                try:
+                    if os.path.exists(video_path):
+                        os.remove(video_path)
+                except Exception as e:
+                    logger.error(f"Error cleaning up preview file {video_path}: {e}")
+        else:
+            return jsonify({
+                'success': False,
+                'message': 'Failed to generate preview video'
+            }), 500
+            
+    except Exception as e:
+        logger.error(f"Error previewing task {id}: {str(e)}")
+        # Clean up if there was an error
+        if video_path and os.path.exists(video_path):
+            try:
+                os.remove(video_path)
+            except Exception as cleanup_error:
+                logger.error(f"Error cleaning up preview file after error: {cleanup_error}")
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        }), 500
+
+@tasks_bp.route('/api/tasks/<int:id>/dry-run', methods=['POST'])
+def dry_run_task(id):
+    try:
+        # First verify task exists
+        with sqlite3.connect('pipeline.db') as conn:
+            c = conn.cursor()
+            c.execute("SELECT id, status FROM tasks WHERE id = ?", (id,))
+            task = c.fetchone()
+            if not task:
+                return jsonify({
+                    'success': False,
+                    'message': f'Task {id} not found'
+                }), 404
+
+        # Run the pipeline in dry run mode
+        from app.core.pipeline import process_video_pipeline
+        success = process_video_pipeline(id, dry_run=True)
+        
+        return jsonify({
+            'success': success,
+            'message': 'Dry run completed successfully' if success else 'Dry run failed'
+        })
+            
+    except Exception as e:
+        logger.error(f"Error dry running task {id}: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        }), 500
