@@ -5,6 +5,7 @@ import os
 from app import logger
 from app.core.utils import execute_curl, get_latest_video, cleanup_video, format_upload_command
 from app.core.email_utils import send_task_completion_notification
+from flask import current_app
 
 def check_and_set_lock():
     """Check if any task is running and set lock if not"""
@@ -54,6 +55,13 @@ def release_lock():
             WHERE id = 1
         """)
         conn.commit()
+
+def get_preview_dir():
+    """Get the absolute path to the previews directory"""
+    # Get the webapp root directory (parent of 'app' directory)
+    webapp_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    preview_dir = os.path.join(webapp_root, 'static', 'previews')
+    return preview_dir
 
 def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
     """Main pipeline process for generating, processing, and uploading videos
@@ -140,12 +148,12 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
 
                 # For preview mode, save the processed video and return its path
                 if preview_mode and video_file:
-                    # Change to use a relative path for previews
-                    preview_dir = os.path.join(os.getcwd(), 'previews')
+                    preview_dir = get_preview_dir()
                     os.makedirs(preview_dir, exist_ok=True)
                     preview_path = os.path.join(preview_dir, f'preview_task_{task_id}.mp4')
                     os.rename(video_file, preview_path)
-                    return preview_path
+                    # Return a relative path that works with url_for
+                    return os.path.join('static', 'previews', f'preview_task_{task_id}.mp4')
 
                 # For dry run or preview mode, skip uploads
                 if dry_run or preview_mode:

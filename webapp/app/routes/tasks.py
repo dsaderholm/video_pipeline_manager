@@ -1,4 +1,4 @@
-from flask import jsonify, request, Blueprint, current_app, send_file
+from flask import jsonify, request, Blueprint, current_app, send_from_directory
 import sqlite3
 import json
 from datetime import datetime, timedelta
@@ -241,22 +241,19 @@ def preview_task(id):
         if video_path and os.path.exists(video_path):
             try:
                 logger.info(f"Sending preview file: {video_path}")
-                # Use absolute path and ensure mimetype is set correctly
-                return send_file(
-                    os.path.abspath(video_path),
-                    mimetype='video/mp4',
-                    as_attachment=True,
-                    download_name=f'preview_task_{id}.mp4'
-                )
-            finally:
-                try:
-                    # Add a small delay before cleanup to ensure file is sent
-                    if os.path.exists(video_path):
-                        import time
-                        time.sleep(0.5)  # 500ms delay
-                        os.remove(video_path)
-                except Exception as e:
-                    logger.error(f"Error cleaning up preview file {video_path}: {e}")
+                # Get just the filename and create a URL that serves from static directory
+                filename = os.path.basename(video_path)
+                response = jsonify({
+                    'success': True,
+                    'video_url': f'/static/previews/{filename}'
+                })
+                return response
+            except Exception as e:
+                logger.error(f"Error preparing preview response: {e}")
+                return jsonify({
+                    'success': False,
+                    'message': 'Error preparing preview response'
+                }), 500
         else:
             logger.error(f"Preview file not found at path: {video_path}")
             return jsonify({
