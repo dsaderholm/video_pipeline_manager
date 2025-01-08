@@ -8,6 +8,7 @@
     let platforms = [];
     let tasks = [];
     let filteredTasks = [];
+	let activePreviewId = null;  // Add this at the top with other global state variables
     const filterState = {
         search: '',
         status: [],
@@ -434,6 +435,9 @@
 				return;
 			}
 			
+			// Set the active preview ID to prevent auto-refresh
+			activePreviewId = id;
+			
 			showToast('Starting preview generation...', 'info');
 			
 			const response = await fetch(`/api/tasks/${id}/preview`, {
@@ -445,32 +449,46 @@
 				throw new Error(error.message || 'Failed to start preview');
 			}
 
-			showToast('Preview generation started. Status will update when ready (about 5 minutes)', 'success');
+			showToast('Preview generation started. Status will update when ready', 'success');
 			
-			// Poll for task status until preview is ready
+			// Poll for task status
 			const checkInterval = setInterval(async () => {
-				const taskResponse = await fetch('/api/tasks');
-				const tasks = await taskResponse.json();
-				const task = tasks.find(t => t.id === id);
-				
-				if (task && task.status === 'completed') {
-					clearInterval(checkInterval);
-					// Download the preview
-					window.location.href = `/api/tasks/${id}/preview/download`;
-					showToast('Downloading preview...', 'success');
-				} else if (task && task.status === 'failed') {
-					clearInterval(checkInterval);
-					showToast('Preview generation failed', 'error');
+				try {
+					const taskResponse = await fetch('/api/tasks');
+					const tasks = await taskResponse.json();
+					const task = tasks.find(t => t.id === id);
+					
+					if (task && task.status === 'completed') {
+						clearInterval(checkInterval);
+						showToast('Preview ready. Starting download...', 'success');
+						// Wait a moment before starting download to ensure file is ready
+						setTimeout(() => {
+							window.location.href = `/api/tasks/${id}/preview/download`;
+							// Reset active preview ID after a short delay to allow download to start
+							setTimeout(() => {
+								activePreviewId = null;
+								loadData(); // Refresh data once after preview is complete
+							}, 2000);
+						}, 1000);
+					} else if (task && task.status === 'failed') {
+						clearInterval(checkInterval);
+						showToast('Preview generation failed', 'error');
+						activePreviewId = null; // Reset active preview ID
+					}
+				} catch (error) {
+					console.error('Error checking preview status:', error);
 				}
 			}, 10000); // Check every 10 seconds
 			
-			// Stop checking after 6 minutes
+			// Stop checking after 20 minutes
 			setTimeout(() => {
 				clearInterval(checkInterval);
-				showToast('Preview timed out. Check task status manually.', 'error');
-			}, 360000);
+				activePreviewId = null; // Reset active preview ID
+				showToast('Preview is taking longer than expected. You can try downloading it manually later.', 'warning');
+			}, 1200000); // 20 minutes
 			
 		} catch (error) {
+			activePreviewId = null; // Reset active preview ID on error
 			showToast('Error: ' + error.message, 'error');
 		}
 	}
@@ -490,33 +508,38 @@
     // =====================================
     // Data Loading
     // =====================================
-    async function loadData() {
-        try {
-            setLoading(true);
-            const [generatorsRes, utilitiesRes, platformsRes, tasksRes] = await Promise.all([
-                fetch('/api/generators'),
-                fetch('/api/utilities'),
-                fetch('/api/platforms'),
-                fetch('/api/tasks')
-            ]);
+	async function loadData() {
+		try {
+			// Don't refresh if we're in the middle of a preview
+			if (activePreviewId !== null) {
+				return;
+			}
+			
+			setLoading(true);
+			const [generatorsRes, utilitiesRes, platformsRes, tasksRes] = await Promise.all([
+				fetch('/api/generators'),
+				fetch('/api/utilities'),
+				fetch('/api/platforms'),
+				fetch('/api/tasks')
+			]);
 
-            generators = await generatorsRes.json();
-            utilities = await utilitiesRes.json();
-            platforms = await platformsRes.json();
-            tasks = await tasksRes.json();
-            filteredTasks = [...tasks]; // Initialize filtered tasks
+			generators = await generatorsRes.json();
+			utilities = await utilitiesRes.json();
+			platforms = await platformsRes.json();
+			tasks = await tasksRes.json();
+			filteredTasks = [...tasks]; // Initialize filtered tasks
 
-            updateGeneratorSelect();
-            updateUtilitiesCheckboxes();
-            updatePlatformsCheckboxes();
-            renderTasks();
-            initializeFilters(); // Initialize the filter UI
-        } catch (error) {
-            showToast('Error loading data', 'error');
-        } finally {
-            setLoading(false);
-        }
-    }
+			updateGeneratorSelect();
+			updateUtilitiesCheckboxes();
+			updatePlatformsCheckboxes();
+			renderTasks();
+			initializeFilters(); // Initialize the filter UI
+		} catch (error) {
+			showToast('Error loading data', 'error');
+		} finally {
+			setLoading(false);
+		}
+	}
 
     // Initialize on page load
     document.addEventListener('DOMContentLoaded', loadData);
