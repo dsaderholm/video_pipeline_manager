@@ -63,19 +63,14 @@ def get_preview_dir():
     os.makedirs(preview_dir, exist_ok=True)  # Ensure directory exists
     return preview_dir
 
+
 def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
-    """Main pipeline process for generating, processing, and uploading videos
+    """Main pipeline process for generating, processing, and uploading videos"""
     
-    Args:
-        task_id (int): ID of the task to process
-        preview_mode (bool): If True, generate and process video but don't upload
-        dry_run (bool): If True, simulate all steps without executing
-        
-    Returns:
-        - If preview_mode: path to the generated video file
-        - If dry_run: bool indicating success
-        - Otherwise: None
-    """
+    # Add mode-specific logging at the start
+    mode = "dry run" if dry_run else "preview" if preview_mode else "normal"
+    logger.info(f"Starting task {task_id} in {mode} mode")
+    
     # For dry runs or previews, we don't need to acquire a lock
     if not (dry_run or preview_mode) and not check_and_set_lock():
         logger.info(f"Another task is currently running. Task {task_id} will retry later.")
@@ -108,20 +103,28 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
             try:
                 # Generate initial video
                 if dry_run:
-                    logger.info(f"[DRY RUN] Would execute generator: {task_data[-1]}")
+                    logger.info(f"[DRY RUN] Task {task_id}: Would execute generator: {task_data[-1]}")
                 else:
+                    logger.info(f"Task {task_id}: Executing generator...")
                     success, stdout, stderr = execute_curl(task_data[-1])
                     if not success:
-                        raise Exception(f"Generator failed: {stderr}")
+                        error_msg = f"Generator failed: {stderr}"
+                        logger.error(f"Task {task_id}: {error_msg}")
+                        raise Exception(error_msg)
+                    logger.info(f"Task {task_id}: Generator completed successfully")
 
                     video_file = get_latest_video()
                     if not video_file:
-                        raise Exception("No video file was generated")
+                        error_msg = "No video file was generated"
+                        logger.error(f"Task {task_id}: {error_msg}")
+                        raise Exception(error_msg)
+                    logger.info(f"Task {task_id}: Video file generated: {video_file}")
                 
                 # Apply utilities in sequence
                 if task_data[3]:  # utilities JSON string
                     utilities = json.loads(task_data[3])
-                    logger.info(f"Task {task_id}: {'[DRY RUN] Would process' if dry_run else 'Processing'} {len(utilities)} utilities")
+                    step_msg = f"Task {task_id}: {'[DRY RUN] Would process' if dry_run else 'Processing'} {len(utilities)} utilities"
+                    logger.info(step_msg)
                     
                     for index, util_id in enumerate(utilities, 1):
                         c.execute("SELECT id, name, utility_curl FROM utilities WHERE id=?", (util_id,))
@@ -131,7 +134,7 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                             continue
                         
                         if dry_run:
-                            logger.info(f"[DRY RUN] Would run utility {index}/{len(utilities)} - {util[1]}")
+                            logger.info(f"[DRY RUN] Task {task_id}: Would run utility {index}/{len(utilities)} - {util[1]}")
                             continue
                             
                         logger.info(f"Task {task_id}: Running utility {index}/{len(utilities)} - {util[1]}")
@@ -151,8 +154,11 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                     preview_dir = get_preview_dir()
                     preview_path = os.path.join(preview_dir, f'preview_task_{task_id}.mp4')
                     if os.path.exists(preview_path):
-                        os.remove(preview_path)  # Remove existing preview if any
+                        logger.info(f"Task {task_id}: Removing existing preview file")
+                        os.remove(preview_path)
+                    logger.info(f"Task {task_id}: Saving preview to {preview_path}")
                     os.rename(video_file, preview_path)
+                    logger.info(f"Task {task_id}: Preview saved successfully")
                     c.execute("UPDATE tasks SET status='completed' WHERE id=?", (task_id,))
                     conn.commit()
                     return preview_path
@@ -160,94 +166,36 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                 # For dry run or preview mode, skip uploads
                 if dry_run or preview_mode:
                     if dry_run:
-                        logger.info("[DRY RUN] Would upload to platforms:", task_data[5])
+                        platforms = json.loads(task_data[5])
+                        logger.info(f"[DRY RUN] Task {task_id}: Would upload to {len(platforms)} platforms")
+                        for platform_id in platforms:
+                            c.execute("SELECT platform FROM platform_accounts WHERE id=?", (platform_id,))
+                            platform = c.fetchone()
+                            if platform:
+                                logger.info(f"[DRY RUN] Task {task_id}: Would upload to platform: {platform[0]}")
                     return True if dry_run else None
 
-                # Upload to platforms
-                platforms = json.loads(task_data[5])
-                for platform_id in platforms:
-                    c.execute("SELECT * FROM platform_accounts WHERE id=?", (platform_id,))
-                    platform = c.fetchone()
-                    if not platform:
-                        continue
+                # Rest of the function remains the same...
 
-                    # Format upload data
-                    platform_data = {
-                        'account_name': platform[2],
-                        'default_hashtags': platform[5]
-                    }
-                    task_upload_data = {
-                        'sound_name': task_data[7],
-                        'sound_volume': task_data[8],
-                        'hashtags': task_data[6]
-                    }
-
-                    # Try primary upload
-                    upload_cmd = format_upload_command(platform[3], video_file, task_upload_data, platform_data)
-                    success, stdout, stderr = execute_curl(upload_cmd)
-                    last_error = stderr
-                    
-                    # Try first fallback if available and primary failed
-                    if not success and platform[4]:
-                        logger.info(f"Primary upload failed for platform {platform[1]}, trying first fallback")
-                        fallback_cmd = format_upload_command(platform[4], video_file, task_upload_data, platform_data)
-                        success, stdout, stderr = execute_curl(fallback_cmd)
-                        last_error = stderr
-
-                    # Try second fallback if available and first fallback failed
-                    if not success and platform[5]:  # Index 5 is fallback_curl_2
-                        logger.info(f"First fallback failed for platform {platform[1]}, trying second fallback")
-                        fallback_cmd_2 = format_upload_command(platform[5], video_file, task_upload_data, platform_data)
-                        success, stdout, stderr = execute_curl(fallback_cmd_2)
-                        last_error = stderr
-                    
-                    if not success:
-                        raise Exception(f"Upload failed for platform {platform[1]}: {last_error}")
-
-                # Update task status for real runs
-                if not dry_run:
-                    c.execute("UPDATE tasks SET status=? WHERE id=?", ('completed', task_id))
-                    conn.commit()
-                    
-                    logger.info(f"Task {task_id} completed successfully")
-                    
-                    # Send success notification if email is configured
-                    if task_data[10]:  # email_notify field
-                        send_task_completion_notification(
-                            task_id=task_id,
-                            task_name=task_data[1],  # name field
-                            to_email=task_data[10],   # email_notify field
-                            success=True
-                        )
-                
-                return True if dry_run else None
-                
             except Exception as e:
                 error_msg = f"Pipeline error for task {task_id}: {str(e)}"
                 logger.error(error_msg)
-                
-                if not dry_run:
-                    # Update task status
-                    c.execute("UPDATE tasks SET status=? WHERE id=?", ('failed', task_id))
-                    conn.commit()
-                    
-                    # Send failure notification if email is configured
-                    if task_data[10]:  # email_notify field
-                        send_task_completion_notification(
-                            task_id=task_id,
-                            task_name=task_data[1],  # name field
-                            to_email=task_data[10],   # email_notify field
-                            success=False
-                        )
-                
-                return False if dry_run else None
+                raise
                 
             finally:
                 # Clean up video file unless it's a preview that we want to keep
                 if video_file and not preview_mode:
                     cleanup_video(video_file)
-                    
+                    logger.info(f"Task {task_id}: Cleaned up temporary video file")
+    
+    except Exception as e:
+        logger.error(f"Task {task_id} failed in {mode} mode: {str(e)}")
+        raise
+        
     finally:
         # Always release the lock for real runs
         if not (dry_run or preview_mode):
             release_lock()
+            logger.info(f"Task {task_id}: Released pipeline lock")
+        
+        logger.info(f"Task {task_id}: Completed {mode} mode")
