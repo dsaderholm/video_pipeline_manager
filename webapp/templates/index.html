@@ -449,7 +449,9 @@
 			const result = await response.json();
 			if (result.success) {
 				showToast('Preview generated! Starting download...', 'success');
-				window.location.href = `/api/tasks/${id}/preview/download`;
+				setTimeout(() => {
+					window.location.href = `/api/tasks/${id}/preview/download`;
+				}, 1000);  // Add 1 second delay before starting download
 			} else {
 				throw new Error(result.message || 'Preview failed');
 			}

@@ -5,11 +5,104 @@ from datetime import datetime, timedelta
 import logging
 import os
 import time
+import glob
 from app.timezone import localize_timestamp
 
 # Create blueprint and logger
 tasks_bp = Blueprint('tasks', __name__)
 logger = logging.getLogger(__name__)
+
+def cleanup_old_previews(max_age_hours=24):
+    """
+    Clean up preview files older than the specified age
+    
+    Args:
+        max_age_hours (int): Maximum age of preview files in hours
+    """
+    try:
+        from app.core.pipeline import get_preview_dir
+        preview_dir = get_preview_dir()
+        current_time = datetime.now()
+        
+        # Get all preview files
+        preview_files = glob.glob(os.path.join(preview_dir, 'preview_task_*.mp4'))
+        
+        for file_path in preview_files:
+            try:
+                # Get file's modified time
+                mtime = datetime.fromtimestamp(os.path.getmtime(file_path))
+                
+                # If file is older than max_age_hours, delete it
+                if current_time - mtime > timedelta(hours=max_age_hours):
+                    try:
+                        os.remove(file_path)
+                        logger.info(f"Cleaned up old preview file: {file_path}")
+                    except OSError as e:
+                        logger.warning(f"Failed to delete old preview file {file_path}: {e}")
+                        
+            except OSError as e:
+                logger.warning(f"Error checking preview file {file_path}: {e}")
+                
+    except Exception as e:
+        logger.error(f"Error during preview cleanup: {e}")
+
+def should_cleanup():
+    """Check if cleanup is needed (avoid cleaning up too frequently)"""
+    try:
+        from app.core.pipeline import get_preview_dir
+        preview_dir = get_preview_dir()
+        marker_file = os.path.join(preview_dir, '.last_cleanup')
+        
+        # If marker doesn't exist or is old enough, cleanup is needed
+        if not os.path.exists(marker_file):
+            return True
+            
+        last_cleanup = datetime.fromtimestamp(os.path.getmtime(marker_file))
+        return datetime.now() - last_cleanup > timedelta(hours=1)
+        
+    except Exception:
+        return True  # If in doubt, do cleanup
+
+def cleanup_preview_dir():
+    """
+    Perform maintenance on the preview directory:
+    1. Ensure the directory exists
+    2. Clean up old preview files
+    3. Remove empty subdirectories
+    
+    Cleanup only runs if it hasn't been run in the last hour.
+    """
+    try:
+        # Check if cleanup is needed
+        if not should_cleanup():
+            logger.debug("Skipping cleanup - last cleanup was too recent")
+            return
+
+        from app.core.pipeline import get_preview_dir
+        preview_dir = get_preview_dir()
+        
+        # Clean up old preview files
+        cleanup_old_previews()
+        
+        # Remove empty subdirectories
+        for root, dirs, files in os.walk(preview_dir, topdown=False):
+            for name in dirs:
+                try:
+                    dir_path = os.path.join(root, name)
+                    if not os.listdir(dir_path):  # if directory is empty
+                        os.rmdir(dir_path)
+                        logger.info(f"Removed empty preview subdirectory: {dir_path}")
+                except OSError as e:
+                    logger.warning(f"Failed to remove empty directory {name}: {e}")
+        
+        # Update marker file to indicate successful cleanup
+        marker_file = os.path.join(preview_dir, '.last_cleanup')
+        with open(marker_file, 'w') as f:
+            f.write(datetime.now().isoformat())
+                    
+    except Exception as e:
+        logger.error(f"Error during preview directory maintenance: {e}")
+       
 
 @tasks_bp.route('/api/tasks', methods=['GET'])
 def get_tasks():
@@ -223,19 +316,29 @@ def run_task(id):
 @tasks_bp.route('/api/tasks/<int:id>/preview', methods=['POST'])
 def preview_task(id):
     try:
-        # First verify task exists and isn't already previewing
+        # Run cleanup before generating new preview
+        cleanup_preview_dir()
+        
         with sqlite3.connect('pipeline.db') as conn:
+            conn.isolation_level = None  # Enable autocommit mode
             c = conn.cursor()
-            c.execute("SELECT id, status FROM tasks WHERE id = ?", (id,))
+            
+            # Begin transaction
+            c.execute("BEGIN IMMEDIATE")
+            
+            # Now check this specific task - within transaction
+            c.execute("SELECT id, status FROM tasks WHERE id = ? FOR UPDATE", (id,))
             task = c.fetchone()
             
             if not task:
+                c.execute("COMMIT")
                 return jsonify({
                     'success': False,
                     'message': f'Task {id} not found'
                 }), 404
                 
             if task[1] == 'previewing':
+                c.execute("COMMIT")
                 return jsonify({
                     'success': False,
                     'message': 'Preview already in progress'
@@ -245,33 +348,73 @@ def preview_task(id):
             from app.core.pipeline import get_preview_dir
             preview_dir = get_preview_dir()
             preview_path = os.path.join(preview_dir, f'preview_task_{id}.mp4')
-            try:
-                if os.path.exists(preview_path):
-                    os.remove(preview_path)
-            except Exception as e:
-                logger.warning(f"Failed to clean up old preview file: {e}")
+            
+            max_retries = 3
+            retry_delay = 1  # second
+            
+            for attempt in range(max_retries):
+                try:
+                    if os.path.exists(preview_path):
+                        os.remove(preview_path)
+                    break
+                except (IOError, PermissionError) as e:
+                    if attempt == max_retries - 1:  # Last attempt
+                        logger.error(f"Failed to remove existing preview after {max_retries} attempts: {e}")
+                        raise
+                    time.sleep(retry_delay)
 
-            # Update task status for preview
+            # Update task status for preview within transaction
             c.execute("""
                 UPDATE tasks 
                 SET status = 'previewing'
                 WHERE id = ?
             """, (id,))
-            conn.commit()
+            
+            # Commit transaction
+            c.execute("COMMIT")
 
         # Start the pipeline in preview mode
         from app.core.pipeline import process_video_pipeline
         preview_result = process_video_pipeline(id, preview_mode=True)
         
-        if preview_result and os.path.exists(os.path.join(get_preview_dir(), f'preview_task_{id}.mp4')):
-            return jsonify({
-                'success': True,
-                'message': 'Preview generated successfully',
-                'preview_url': f'/static/previews/preview_task_{id}.mp4'
-            })
-        else:
-            raise Exception("Failed to generate preview")
+        if preview_result:
+            # Verify file is completely written
+            file_size = 0
+            prev_size = -1
+            max_wait = 10  # seconds
+            start_time = time.time()
             
+            while file_size != prev_size and time.time() - start_time < max_wait:
+                prev_size = file_size
+                try:
+                    file_size = os.path.getsize(preview_path)
+                    time.sleep(0.5)
+                except OSError:
+                    time.sleep(0.5)
+                    continue
+            
+            if time.time() - start_time >= max_wait:
+                raise Exception("Timeout waiting for preview file to stabilize")
+
+            # Only proceed if file exists and is stable
+            if os.path.exists(preview_path) and file_size > 0:
+                with sqlite3.connect('pipeline.db') as conn:
+                    c = conn.cursor()
+                    c.execute("""
+                        UPDATE tasks 
+                        SET status = 'completed'
+                        WHERE id = ?
+                    """, (id,))
+                    conn.commit()
+                    
+                return jsonify({
+                    'success': True,
+                    'message': 'Preview generated successfully',
+                    'preview_url': f'/static/previews/preview_task_{id}.mp4'
+                })
+            else:
+                raise Exception("Preview file not found or empty")
+                
     except Exception as e:
         logger.error(f"Error generating preview for task {id}: {str(e)}")
         # Update task status on error
@@ -332,11 +475,7 @@ def download_preview(id):
             
         finally:
             # Clean up the preview file after sending
-            try:
-                if os.path.exists(preview_path):
-                    os.remove(preview_path)
-            except Exception as e:
-                logger.error(f"Error cleaning up preview file: {e}")
+            cleanup_preview_dir()
                 
     except Exception as e:
         logger.error(f"Error downloading preview for task {id}: {str(e)}")
