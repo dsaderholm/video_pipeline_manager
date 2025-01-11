@@ -327,7 +327,7 @@ def preview_task(id):
             c.execute("BEGIN IMMEDIATE")
             
             # Now check this specific task - within transaction
-            c.execute("SELECT id, status FROM tasks WHERE id = ? FOR UPDATE", (id,))
+            c.execute("SELECT id, status FROM tasks WHERE id = ?", (id,))
             task = c.fetchone()
             
             if not task:
