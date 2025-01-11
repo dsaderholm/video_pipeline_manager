@@ -26,6 +26,9 @@ def setup_logging():
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
 
+    # Disable werkzeug access logs
+    logging.getLogger('werkzeug').setLevel(logging.WARNING)
+
     # Create formatters
     detailed_formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
