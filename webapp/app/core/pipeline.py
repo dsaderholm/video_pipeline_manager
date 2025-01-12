@@ -175,7 +175,46 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                                 logger.info(f"[DRY RUN] Task {task_id}: Would upload to platform: {platform[0]}")
                     return True if dry_run else None
 
-                # Rest of the function remains the same...
+                # Process uploads
+                if task_data[5]:  # platform_accounts JSON string
+                    platforms = json.loads(task_data[5])
+                    logger.info(f"Task {task_id}: Processing {len(platforms)} platform uploads")
+                    
+                    for platform_id in platforms:
+                        c.execute("""
+                            SELECT pa.platform, pa.upload_curl, pa.credentials
+                            FROM platform_accounts pa
+                            WHERE pa.id=?
+                        """, (platform_id,))
+                        platform_data = c.fetchone()
+                        
+                        if not platform_data:
+                            logger.warning(f"Task {task_id}: Platform account {platform_id} not found, skipping")
+                            continue
+                            
+                        platform, upload_curl, credentials = platform_data
+                        logger.info(f"Task {task_id}: Uploading to {platform}")
+                        
+                        # Format the upload command with credentials and video file
+                        upload_cmd = format_upload_command(upload_curl, credentials, video_file)
+                        success, stdout, stderr = execute_curl(upload_cmd)
+                        
+                        if not success:
+                            error_msg = f"Upload to {platform} failed: {stderr}"
+                            logger.error(f"Task {task_id}: {error_msg}")
+                            raise Exception(error_msg)
+                            
+                        logger.info(f"Task {task_id}: Successfully uploaded to {platform}")
+                
+                # Update task status and send notification
+                c.execute("UPDATE tasks SET status='completed' WHERE id=?", (task_id,))
+                conn.commit()
+                
+                if task_data[4]:  # notification_email
+                    send_task_completion_notification(task_data[4], task_id)
+                    logger.info(f"Task {task_id}: Sent completion notification")
+                
+                return True
 
             except Exception as e:
                 error_msg = f"Pipeline error for task {task_id}: {str(e)}"
