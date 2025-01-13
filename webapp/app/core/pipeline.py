@@ -63,7 +63,6 @@ def get_preview_dir():
     os.makedirs(preview_dir, exist_ok=True)  # Ensure directory exists
     return preview_dir
 
-
 def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
     """Main pipeline process for generating, processing, and uploading videos"""
     
@@ -85,9 +84,12 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                 c.execute("UPDATE task_lock SET task_id = ? WHERE id = 1", (task_id,))
                 conn.commit()
             
-            # Get task information
+            # Get task information with explicit column selection
             c.execute("""
-                SELECT t.*, g.generator_curl 
+                SELECT t.id, t.name, t.generator_id, t.utilities, t.schedule, 
+                       t.hashtags, t.sound_name, t.sound_volume, t.status, 
+                       t.email_notify, t.retry_count, t.created_at,
+                       g.generator_curl 
                 FROM tasks t
                 JOIN generators g ON t.generator_id = g.id
                 WHERE t.id=?
@@ -163,55 +165,58 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                     conn.commit()
                     return preview_path
 
-                # For dry run or preview mode, skip uploads
-                if dry_run or preview_mode:
-                    if dry_run:
-                        platforms = json.loads(task_data[5])
-                        logger.info(f"[DRY RUN] Task {task_id}: Would upload to {len(platforms)} platforms")
-                        for platform_id in platforms:
-                            c.execute("SELECT platform FROM platform_accounts WHERE id=?", (platform_id,))
-                            platform = c.fetchone()
-                            if platform:
-                                logger.info(f"[DRY RUN] Task {task_id}: Would upload to platform: {platform[0]}")
-                    return True if dry_run else None
+                # For dry run mode, simulate platform uploads
+                if dry_run:
+                    c.execute("""
+                        SELECT p.name, tpa.account_name
+                        FROM task_platform_accounts tpa
+                        JOIN platforms p ON tpa.platform_id = p.id
+                        WHERE tpa.task_id = ?
+                    """, (task_id,))
+                    platform_data = c.fetchall()
+                    if platform_data:
+                        logger.info(f"[DRY RUN] Task {task_id}: Would upload to {len(platform_data)} platforms")
+                        for platform_name, account_name in platform_data:
+                            logger.info(f"[DRY RUN] Task {task_id}: Would upload to {platform_name} with account {account_name}")
+                    return True
 
-                # Process uploads
-                if task_data[5]:  # platform_accounts JSON string
-                    platforms = json.loads(task_data[5])
-                    logger.info(f"Task {task_id}: Processing {len(platforms)} platform uploads")
+                # For preview mode, skip uploads
+                if preview_mode:
+                    return None
+
+                # Process uploads using the new schema
+                c.execute("""
+                    SELECT p.id, p.name, p.uploader_curl, tpa.account_name
+                    FROM task_platform_accounts tpa
+                    JOIN platforms p ON tpa.platform_id = p.id
+                    WHERE tpa.task_id = ?
+                """, (task_id,))
+                platform_data_list = c.fetchall()
+
+                if platform_data_list:
+                    logger.info(f"Task {task_id}: Processing {len(platform_data_list)} platform uploads")
                     
-                    for platform_id in platforms:
-                        c.execute("""
-                            SELECT pa.platform, pa.upload_curl, pa.credentials
-                            FROM platform_accounts pa
-                            WHERE pa.id=?
-                        """, (platform_id,))
-                        platform_data = c.fetchone()
+                    for platform_data in platform_data_list:
+                        platform_id, platform_name, upload_curl, account_name = platform_data
+                        logger.info(f"Task {task_id}: Uploading to {platform_name} with account {account_name}")
                         
-                        if not platform_data:
-                            logger.warning(f"Task {task_id}: Platform account {platform_id} not found, skipping")
-                            continue
-                            
-                        platform, upload_curl, credentials = platform_data
-                        logger.info(f"Task {task_id}: Uploading to {platform}")
-                        
-                        # Format the upload command with credentials and video file
-                        upload_cmd = format_upload_command(upload_curl, credentials, video_file)
+                        # Format the upload command with video file
+                        upload_cmd = format_upload_command(upload_curl, account_name, video_file)
                         success, stdout, stderr = execute_curl(upload_cmd)
                         
                         if not success:
-                            error_msg = f"Upload to {platform} failed: {stderr}"
+                            error_msg = f"Upload to {platform_name} failed: {stderr}"
                             logger.error(f"Task {task_id}: {error_msg}")
                             raise Exception(error_msg)
                             
-                        logger.info(f"Task {task_id}: Successfully uploaded to {platform}")
+                        logger.info(f"Task {task_id}: Successfully uploaded to {platform_name}")
                 
                 # Update task status and send notification
                 c.execute("UPDATE tasks SET status='completed' WHERE id=?", (task_id,))
                 conn.commit()
                 
-                if task_data[4]:  # notification_email
-                    send_task_completion_notification(task_data[4], task_id)
+                if task_data[9]:  # email_notify is now at index 9
+                    send_task_completion_notification(task_data[9], task_id)
                     logger.info(f"Task {task_id}: Sent completion notification")
                 
                 return True
