@@ -246,7 +246,7 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
         video_file = os.path.normpath(video_file)
         
         return cmd_template.format(
-            video=shlex.quote(video_file),
+            video=f"@{shlex.quote(video_file)}",  # Add @ before the quoted filename
             description=shlex.quote(video_title),
             account=shlex.quote(platform_data['account_name']),
             sound=shlex.quote(task_data['sound_name']),
