@@ -239,6 +239,11 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                     send_task_completion_notification(task_data[9], task_id)
                     logger.info(f"Task {task_id}: Sent completion notification")
                 
+                # Clean up video file unless it's a preview that we want to keep
+                if video_file and not preview_mode:
+                    cleanup_video(video_file)
+                    logger.info(f"Task {task_id}: Cleaned up temporary video file")
+                
                 return True
 
             except Exception as e:
@@ -247,10 +252,7 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                 raise
                 
             finally:
-                # Clean up video file unless it's a preview that we want to keep
-                if video_file and not preview_mode:
-                    cleanup_video(video_file)
-                    logger.info(f"Task {task_id}: Cleaned up temporary video file")
+                pass
     
     except Exception as e:
         logger.error(f"Task {task_id} failed in {mode} mode: {str(e)}")
