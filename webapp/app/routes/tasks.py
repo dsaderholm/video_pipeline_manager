@@ -54,33 +54,23 @@ def validate_schedule(schedule):
         return False, f"Invalid schedule format: {str(e)}"
 
 def cleanup_old_previews(max_age_hours=24):
-    """
-    Clean up preview files older than the specified age
-    
-    Args:
-        max_age_hours (int): Maximum age of preview files in hours
-    """
+    """Clean up preview files older than the specified age"""
     try:
         from app.core.pipeline import get_preview_dir
         preview_dir = get_preview_dir()
         current_time = datetime.now()
         
-        # Get all preview files
         preview_files = glob.glob(os.path.join(preview_dir, 'preview_task_*.mp4'))
         
         for file_path in preview_files:
             try:
-                # Get file's modified time
                 mtime = datetime.fromtimestamp(os.path.getmtime(file_path))
-                
-                # If file is older than max_age_hours, delete it
                 if current_time - mtime > timedelta(hours=max_age_hours):
                     try:
                         os.remove(file_path)
                         logger.info(f"Cleaned up old preview file: {file_path}")
                     except OSError as e:
                         logger.warning(f"Failed to delete old preview file {file_path}: {e}")
-                        
             except OSError as e:
                 logger.warning(f"Error checking preview file {file_path}: {e}")
                 
@@ -94,7 +84,6 @@ def should_cleanup():
         preview_dir = get_preview_dir()
         marker_file = os.path.join(preview_dir, '.last_cleanup')
         
-        # If marker doesn't exist or is old enough, cleanup is needed
         if not os.path.exists(marker_file):
             return True
             
@@ -102,19 +91,11 @@ def should_cleanup():
         return datetime.now() - last_cleanup > timedelta(hours=1)
         
     except Exception:
-        return True  # If in doubt, do cleanup
+        return True
 
 def cleanup_preview_dir():
-    """
-    Perform maintenance on the preview directory:
-    1. Ensure the directory exists
-    2. Clean up old preview files
-    3. Remove empty subdirectories
-    
-    Cleanup only runs if it hasn't been run in the last hour.
-    """
+    """Perform maintenance on the preview directory"""
     try:
-        # Check if cleanup is needed
         if not should_cleanup():
             logger.debug("Skipping cleanup - last cleanup was too recent")
             return
@@ -122,82 +103,117 @@ def cleanup_preview_dir():
         from app.core.pipeline import get_preview_dir
         preview_dir = get_preview_dir()
         
-        # Clean up old preview files
         cleanup_old_previews()
         
-        # Remove empty subdirectories
         for root, dirs, files in os.walk(preview_dir, topdown=False):
             for name in dirs:
                 try:
                     dir_path = os.path.join(root, name)
-                    if not os.listdir(dir_path):  # if directory is empty
+                    if not os.listdir(dir_path):
                         os.rmdir(dir_path)
                         logger.info(f"Removed empty preview subdirectory: {dir_path}")
                 except OSError as e:
                     logger.warning(f"Failed to remove empty directory {name}: {e}")
         
-        # Update marker file to indicate successful cleanup
         marker_file = os.path.join(preview_dir, '.last_cleanup')
         with open(marker_file, 'w') as f:
             f.write(datetime.now().isoformat())
                     
     except Exception as e:
         logger.error(f"Error during preview directory maintenance: {e}")
-       
+
+def get_task_details(task_id, conn):
+    """Get detailed task information including platforms and utilities"""
+    c = conn.cursor()
+    
+    # Get basic task info with generator name
+    c.execute("""
+        SELECT t.*, g.name as generator_name
+        FROM tasks t
+        LEFT JOIN generators g ON t.generator_id = g.id
+        WHERE t.id = ?
+    """, (task_id,))
+    task = c.fetchone()
+    
+    if not task:
+        return None
+        
+    # Get utilities
+    utilities = []
+    if task[3]:  # utilities column
+        utility_ids = json.loads(task[3])
+        if utility_ids:
+            placeholders = ','.join('?' * len(utility_ids))
+            c.execute(f"SELECT id, name FROM utilities WHERE id IN ({placeholders})", utility_ids)
+            utilities = [{'id': u[0], 'name': u[1]} for u in c.fetchall()]
+
+    # Get platforms with account names
+    c.execute("""
+        SELECT p.id, p.name, p.uploader_curl, p.fallback_curl, p.fallback_curl_2,
+               p.default_hashtags, tpa.account_name
+        FROM platforms p
+        JOIN task_platform_accounts tpa ON p.id = tpa.platform_id
+        WHERE tpa.task_id = ?
+    """, (task_id,))
+    platforms = c.fetchall()
+
+    return {
+        'id': task[0],
+        'name': task[1],
+        'generator_id': task[2],
+        'generator_name': task[12],
+        'utilities': utilities,
+        'schedule': task[4],
+        'hashtags': task[5],
+        'sound_name': task[6],
+        'sound_volume': task[7],
+        'status': task[8],
+        'email_notify': task[9],
+        'retry_count': task[10],
+        'created_at': localize_timestamp(task[11]),
+        'platforms': [{
+            'id': p[0],
+            'name': p[1],
+            'uploader_curl': p[2],
+            'fallback_curl': p[3],
+            'fallback_curl_2': p[4],
+            'default_hashtags': p[5],
+            'account_name': p[6]
+        } for p in platforms]
+    }
 
 @tasks_bp.route('/api/tasks', methods=['GET'])
 def get_tasks():
     with sqlite3.connect('pipeline.db') as conn:
+        tasks = []
         c = conn.cursor()
+        
         c.execute("""
-            SELECT t.*, g.name as generator_name 
+            SELECT t.*, g.name as generator_name
             FROM tasks t
-            JOIN generators g ON t.generator_id = g.id
+            LEFT JOIN generators g ON t.generator_id = g.id
             ORDER BY t.created_at DESC
         """)
-        tasks = c.fetchall()
+        task_rows = c.fetchall()
         
-        # Get utilities for each task
-        task_list = []
-        for t in tasks:
-            utilities = []
-            if t[3]:  # utilities JSON string
-                util_ids = json.loads(t[3])
-                if util_ids:  # Check if there are any utilities
-                    c.execute("SELECT id, name FROM utilities WHERE id IN (%s)" % 
-                             ','.join('?' * len(util_ids)), util_ids)
-                    utilities = c.fetchall()
-
-            task_list.append({
-                'id': t[0],
-                'name': t[1],
-                'generator_id': t[2],
-                'generator_name': t[12],
-                'utilities': [{'id': u[0], 'name': u[1]} for u in utilities],
-                'schedule': t[4],
-                'platforms': json.loads(t[5] if t[5] else '[]'),
-                'hashtags': t[6],
-                'sound_name': t[7],
-                'sound_volume': t[8],
-                'status': t[9],
-                'email_notify': t[10],
-                'created_at': localize_timestamp(t[11])  # Convert timestamp to local time
-            })
-        
-        return jsonify(task_list)
+        for task in task_rows:
+            task_detail = get_task_details(task[0], conn)
+            if task_detail:
+                tasks.append(task_detail)
+                
+        return jsonify(tasks)
 
 def retry_with_backoff(task_id):
     """Retry task with exponential backoff"""
     scheduler = current_app.scheduler
     
-    # Get current retry count
     with sqlite3.connect('pipeline.db') as conn:
         c = conn.cursor()
         c.execute("SELECT retry_count FROM tasks WHERE id = ?", (task_id,))
         result = c.fetchone()
         retry_count = result[0] if result and result[0] is not None else 0
         
-        if retry_count >= 3:  # Max retries
+        if retry_count >= 3:
             c.execute("""
                 UPDATE tasks 
                 SET status = 'failed', 
@@ -207,11 +223,9 @@ def retry_with_backoff(task_id):
             conn.commit()
             return
         
-        # Calculate delay using exponential backoff (1min, 2min, 4min)
         delay = 60 * (2 ** retry_count)
-        
-        # Schedule retry
         next_run = datetime.now() + timedelta(seconds=delay)
+        
         from app.core.pipeline import process_video_pipeline
         scheduler.add_job(
             func=process_video_pipeline,
@@ -221,7 +235,6 @@ def retry_with_backoff(task_id):
             id=f'retry_task_{task_id}_{next_run.timestamp()}'
         )
         
-        # Update retry count
         c.execute("""
             UPDATE tasks 
             SET retry_count = ?,
@@ -238,104 +251,117 @@ def create_task():
     # Validate schedule format
     is_valid, error_message = validate_schedule(data['schedule'])
     if not is_valid:
-        return jsonify({
-            'success': False,
-            'message': error_message
-        }), 400
+        return jsonify({'success': False, 'message': error_message}), 400
     
     with sqlite3.connect('pipeline.db') as conn:
-        c = conn.cursor()
-        
-        # Check if retry_count column exists
         try:
-            c.execute("SELECT retry_count FROM tasks LIMIT 1")
-        except sqlite3.OperationalError:
-            try:
-                c.execute("ALTER TABLE tasks ADD COLUMN retry_count INTEGER DEFAULT 0")
-            except sqlite3.OperationalError:
-                pass  # Column might have been added by another concurrent request
-        
-        # Convert lists to JSON strings
-        utilities_json = json.dumps(data.get('utilities', []))
-        platforms_json = json.dumps(data['platforms'])
-        
-        c.execute('''INSERT INTO tasks 
-                    (name, generator_id, utilities, schedule, platforms, 
-                     hashtags, sound_name, sound_volume, email_notify, retry_count)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)''',
-                 (data['name'], data['generator_id'], utilities_json,
-                  data['schedule'], platforms_json, data.get('hashtags'),
-                  data.get('sound_name'), data.get('sound_volume', 'background'),
-                  data.get('email_notify')))
-        task_id = c.lastrowid
-        
-        # Parse the schedule format: day|HH:MM,HH:MM;day|HH:MM,HH:MM
-        day_schedules = data['schedule'].split(';')
-        from app.core.pipeline import process_video_pipeline
-        
-        for day_schedule in day_schedules:
-            if not day_schedule.strip():
-                continue
-                
-            day, times = day_schedule.split('|')
-            day_number = {
-                'sun': 0, 'mon': 1, 'tue': 2, 'wed': 3, 
-                'thu': 4, 'fri': 5, 'sat': 6
-            }[day.lower()]
+            conn.execute('BEGIN')
+            c = conn.cursor()
             
-            for time in times.split(','):
-                hour, minute = map(int, time.strip().split(':'))
-                job_id = f'task_{task_id}_{day}_{hour}_{minute}'
+            # Insert the main task
+            utilities_json = json.dumps(data.get('utilities', []))
+            c.execute('''INSERT INTO tasks 
+                        (name, generator_id, utilities, schedule, 
+                         hashtags, sound_name, sound_volume, email_notify, retry_count)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)''',
+                     (data['name'], data['generator_id'], utilities_json,
+                      data['schedule'], data.get('hashtags'),
+                      data.get('sound_name'), data.get('sound_volume', 'background'),
+                      data.get('email_notify')))
+            task_id = c.lastrowid
+            
+            # Insert platform associations
+            for platform in data.get('platforms', []):
+                c.execute('''INSERT INTO task_platform_accounts 
+                            (task_id, platform_id, account_name)
+                            VALUES (?, ?, ?)''',
+                         (task_id, platform['id'], platform['account_name']))
+            
+            # Schedule the task
+            day_schedules = data['schedule'].split(';')
+            from app.core.pipeline import process_video_pipeline
+            
+            for day_schedule in day_schedules:
+                if not day_schedule.strip():
+                    continue
+                    
+                day, times = day_schedule.split('|')
+                day_number = {
+                    'sun': 0, 'mon': 1, 'tue': 2, 'wed': 3, 
+                    'thu': 4, 'fri': 5, 'sat': 6
+                }[day.lower()]
                 
-                # Schedule the task for this specific day and time
-                scheduler.add_job(
-                    func=process_video_pipeline,
-                    trigger='cron',
-                    day_of_week=day_number,
-                    hour=hour,
-                    minute=minute,
-                    args=[task_id],
-                    id=job_id,
-                    misfire_grace_time=45  # Allow 45 seconds grace time for misfires
-                )
-                logger.info(f"Scheduled task {task_id} for {day} at {hour:02d}:{minute:02d}")
-        
-        return jsonify({'id': task_id, 'status': 'scheduled'})
+                for time in times.split(','):
+                    hour, minute = map(int, time.strip().split(':'))
+                    job_id = f'task_{task_id}_{day}_{hour}_{minute}'
+                    
+                    scheduler.add_job(
+                        func=process_video_pipeline,
+                        trigger='cron',
+                        day_of_week=day_number,
+                        hour=hour,
+                        minute=minute,
+                        args=[task_id],
+                        id=job_id,
+                        misfire_grace_time=45
+                    )
+                    logger.info(f"Scheduled task {task_id} for {day} at {hour:02d}:{minute:02d}")
+            
+            conn.commit()
+            return jsonify({'id': task_id, 'status': 'scheduled'})
+            
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Error creating task: {str(e)}")
+            return jsonify({'success': False, 'message': str(e)}), 500
 
 @tasks_bp.route('/api/tasks/<int:id>', methods=['DELETE'])
 def delete_task(id):
     scheduler = current_app.scheduler
     
     with sqlite3.connect('pipeline.db') as conn:
-        c = conn.cursor()
-        # Remove any scheduled jobs first
-        c.execute('SELECT schedule FROM tasks WHERE id = ?', (id,))
-        task = c.fetchone()
-        if task and task[0]:
-            # Parse the schedule format: day|HH:MM,HH:MM;day|HH:MM,HH:MM
-            day_schedules = task[0].split(';')
-            for day_schedule in day_schedules:
-                if not day_schedule.strip():
-                    continue
-                
-                day, times = day_schedule.split('|')
-                for time in times.split(','):
-                    hour, minute = map(int, time.strip().split(':'))
-                    try:
-                        scheduler.remove_job(f'task_{id}_{day}_{hour}_{minute}')
-                    except:
-                        pass
+        try:
+            conn.execute('BEGIN')
+            c = conn.cursor()
+            
+            # Remove scheduled jobs
+            c.execute('SELECT schedule FROM tasks WHERE id = ?', (id,))
+            task = c.fetchone()
+            if task and task[0]:
+                day_schedules = task[0].split(';')
+                for day_schedule in day_schedules:
+                    if not day_schedule.strip():
+                        continue
+                    
+                    day, times = day_schedule.split('|')
+                    for time in times.split(','):
+                        hour, minute = map(int, time.strip().split(':'))
+                        try:
+                            scheduler.remove_job(f'task_{id}_{day}_{hour}_{minute}')
+                        except:
+                            pass
 
-            # Remove any pending retry jobs
-            for job in scheduler.get_jobs():
-                if job.id.startswith(f'retry_task_{id}'):
-                    try:
-                        scheduler.remove_job(job.id)
-                    except:
-                        pass
-                        
-        c.execute('DELETE FROM tasks WHERE id = ?', (id,))
-        return jsonify({'success': True})
+                # Remove retry jobs
+                for job in scheduler.get_jobs():
+                    if job.id.startswith(f'retry_task_{id}'):
+                        try:
+                            scheduler.remove_job(job.id)
+                        except:
+                            pass
+            
+            # Delete task platform associations (will cascade)
+            c.execute('DELETE FROM task_platform_accounts WHERE task_id = ?', (id,))
+            
+            # Delete the task
+            c.execute('DELETE FROM tasks WHERE id = ?', (id,))
+            
+            conn.commit()
+            return jsonify({'success': True})
+            
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"Error deleting task: {str(e)}")
+            return jsonify({'success': False, 'message': str(e)}), 500
 
 @tasks_bp.route('/api/tasks/<int:id>/run', methods=['POST'])
 def run_task(id):

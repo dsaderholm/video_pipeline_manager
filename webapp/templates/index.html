@@ -173,19 +173,74 @@
         initializeDragAndDrop();
     }
 
-    function updatePlatformsCheckboxes() {
-        const platDiv = document.getElementById('platforms');
-        platDiv.innerHTML = platforms.map(plat => `
-            <label class="flex items-center p-3 bg-gray-800 rounded-lg border border-gray-700 hover:border-primary-500 transition-colors cursor-pointer">
-                <input type="checkbox" id="platform_${plat.id}" name="platforms" value="${plat.id}"
-                    class="w-4 h-4 text-primary-500 focus:ring-primary-500 rounded">
-                <span class="ml-2 text-sm">
-                    <i class="fas fa-share-alt text-primary-500 mr-2"></i>
-                    ${plat.platform} - ${plat.account_name}
-                </span>
-            </label>
-        `).join('');
-    }
+	function updatePlatformsCheckboxes() {
+		const platDiv = document.getElementById('platforms');
+		platDiv.innerHTML = platforms.map(plat => `
+			<label class="flex items-center p-3 bg-gray-800 rounded-lg border border-gray-700 hover:border-primary-500 transition-colors cursor-pointer">
+				<input type="checkbox" id="platform_${plat.id}" name="platforms" value="${plat.id}"
+					class="w-4 h-4 text-primary-500 focus:ring-primary-500 rounded"
+					onchange="handlePlatformSelection(this, ${plat.id})">
+				<span class="ml-2 text-sm">
+					<i class="fas fa-share-alt text-primary-500 mr-2"></i>
+					${plat.name}
+				</span>
+			</label>
+		`).join('');
+	}
+	
+	function handlePlatformSelection(checkbox, platformId) {
+		const container = document.getElementById('selected-platforms');
+		const platformData = platforms.find(p => p.id === platformId);
+		
+		if (!platformData) return;
+
+		if (checkbox.checked) {
+			// Add platform with account input
+			const platformDiv = document.createElement('div');
+			platformDiv.className = 'selected-platform mb-2';
+			platformDiv.setAttribute('data-id', platformId);
+			platformDiv.innerHTML = `
+				<div class="flex items-center gap-3 p-3 bg-gray-700 rounded-lg border border-primary-500">
+					<div class="flex-1">
+						<div class="text-sm mb-2">
+							<i class="fas fa-share-alt text-primary-500 mr-2"></i>
+							${platformData.name}
+						</div>
+						<input type="text" 
+							class="w-full py-1 px-2 text-sm bg-gray-800 border border-gray-600 rounded"
+							placeholder="Enter account name"
+							onchange="validatePlatformAccountName(this)"
+							required>
+					</div>
+				</div>
+			`;
+			container.appendChild(platformDiv);
+		} else {
+			// Remove platform
+			const platformElement = container.querySelector(`[data-id="${platformId}"]`);
+			if (platformElement) {
+				platformElement.remove();
+			}
+		}
+	}
+
+	function validatePlatformAccountName(input) {
+		const submitButton = document.querySelector('button[type="submit"]');
+		if (!input.value.trim()) {
+			input.classList.add('border-red-500');
+			submitButton.disabled = true;
+		} else {
+			input.classList.remove('border-red-500');
+			checkAllPlatformAccounts();
+		}
+	}
+
+	function checkAllPlatformAccounts() {
+		const submitButton = document.querySelector('button[type="submit"]');
+		const accountInputs = document.querySelectorAll('#selected-platforms input[type="text"]');
+		const allValid = Array.from(accountInputs).every(input => input.value.trim() !== '');
+		submitButton.disabled = !allValid;
+	}
 
     function renderTasks() {
         const tbody = document.getElementById('tasksBody');
@@ -242,14 +297,14 @@
                         </div>
                     </td>
                     <td class="px-6 py-4">
-                        <div class="flex flex-wrap gap-1">
-                            ${platformNames.split(', ').map(platform => `
-                                <span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-gray-700">
-                                    <i class="fas fa-share-alt text-primary-500 mr-1"></i>
-                                    ${platform}
-                                </span>
-                            `).join('')}
-                        </div>
+						<div class="flex flex-wrap gap-1">
+							${task.platforms.map(platform => `
+								<span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-gray-700">
+									<i class="fas fa-share-alt text-primary-500 mr-1"></i>
+									${platform.name} (${platform.account_name})
+								</span>
+							`).join('')}
+						</div>
                     </td>
                     <td class="px-6 py-4 whitespace-nowrap">
                         <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium ${statusColors[task.status]}">
@@ -318,7 +373,7 @@
                 <input type="checkbox" value="${platform.id}" 
                     class="w-4 h-4 text-primary-500 focus:ring-primary-500 rounded"
                     onchange="updateFilters()">
-                <span class="ml-2 text-sm">${platform.platform}</span>
+                <span class="ml-2 text-sm">${platform.name}</span>
             </label>
         `).join('');
     }
@@ -370,8 +425,10 @@
             generator_id: parseInt(document.getElementById('generator_id').value),
             utilities: selectedUtilities, // This will now be in the correct order
             schedule: document.getElementById('schedule').value,
-            platforms: Array.from(document.querySelectorAll('input[name="platforms"]:checked'))
-                .map(checkbox => parseInt(checkbox.value)),
+			platforms: Array.from(document.querySelectorAll('#selected-platforms .selected-platform')).map(plat => ({
+				id: parseInt(plat.dataset.id),
+				account_name: plat.querySelector('input[type="text"]').value.trim()
+			})),
             hashtags: document.getElementById('hashtags').value,
             sound_name: document.getElementById('sound_name').value,
             sound_volume: document.getElementById('sound_volume').value,
@@ -589,9 +646,12 @@
                 <i class="fas fa-share-alt text-primary-500 mr-2"></i>
                 Platforms
             </h3>
-            <div id="platforms" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                <!-- Dynamically populated -->
-            </div>
+			<div id="platforms" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+				<!-- Dynamically populated -->
+			</div>
+			<div id="selected-platforms" class="mt-4 space-y-2">
+				<!-- Selected platforms will appear here -->
+			</div>
         </div>
 
         <!-- Advanced Options -->

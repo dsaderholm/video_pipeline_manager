@@ -178,81 +178,80 @@
         `).join('');
     }
 
-    function renderPlatforms(platforms) {
-        const tbody = document.getElementById('platforms');
-        if (platforms.length === 0) {
-            tbody.innerHTML = getEmptyState('No platforms found', 'Add your first platform using the form above');
-            return;
-        }
-        
-        tbody.innerHTML = platforms.map(p => `
-            <tr class="bg-gray-800 border-b border-gray-700 hover:bg-gray-700 transition-colors">
-                <td class="px-6 py-4">
-                    <div class="flex flex-col">
-                        <div class="flex items-center font-medium">
-                            <i class="fas fa-share-alt text-primary-500 mr-2"></i>
-                            ${p.platform}
-                        </div>
-                        <span class="text-sm text-gray-400 mt-1">${p.account_name}</span>
-                    </div>
-                </td>
-                <td class="px-6 py-4">
-                    <div class="relative group">
-                        <div class="text-xs text-gray-400 mb-1">Primary Upload Command:</div>
-                        <pre class="code-snippet bg-gray-900 rounded-lg p-3 text-sm font-mono overflow-x-auto">${p.uploader_curl}</pre>
-                        <button onclick="copyToClipboard('${p.uploader_curl}')" 
-                            class="absolute top-2 right-2 p-2 bg-gray-800 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity"
-                            data-tooltip="Copy to clipboard">
-                            <i class="fas fa-copy text-primary-500"></i>
-                        </button>
-                    </div>
-                    ${p.fallback_curl ? `
-                        <div class="relative group mt-2">
-                            <div class="text-xs text-gray-400 mb-1">Primary Fallback Command:</div>
-                            <pre class="code-snippet bg-gray-900 rounded-lg p-3 text-sm font-mono overflow-x-auto">${p.fallback_curl}</pre>
-                            <button onclick="copyToClipboard('${p.fallback_curl}')" 
-                                class="absolute top-2 right-2 p-2 bg-gray-800 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity"
-                                data-tooltip="Copy to clipboard">
-                                <i class="fas fa-copy text-primary-500"></i>
-                            </button>
-                        </div>
-                    ` : ''}
-                    ${p.fallback_curl_2 ? `
-                        <div class="relative group mt-2">
-                            <div class="text-xs text-gray-400 mb-1">Secondary Fallback Command:</div>
-                            <pre class="code-snippet bg-gray-900 rounded-lg p-3 text-sm font-mono overflow-x-auto">${p.fallback_curl_2}</pre>
-                            <button onclick="copyToClipboard('${p.fallback_curl_2}')" 
-                                class="absolute top-2 right-2 p-2 bg-gray-800 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity"
-                                data-tooltip="Copy to clipboard">
-                                <i class="fas fa-copy text-primary-500"></i>
-                            </button>
-                        </div>
-                    ` : ''}
-                </td>
-                <td class="px-6 py-4">
-                    <div class="flex flex-wrap gap-1">
-                        ${(p.default_hashtags || '').split(',').map(tag => `
-                            <span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-gray-700">
-                                <i class="fas fa-hashtag text-primary-500 mr-1"></i>
-                                ${tag.trim()}
-                            </span>
-                        `).join('')}
-                    </div>
-                </td>
-                <td class="px-6 py-4 whitespace-nowrap text-gray-400 text-sm">
-                    ${new Date(p.created_at).toLocaleString()}
-                </td>
-                <td class="px-6 py-4">
-                    <button onclick="deleteItem('platforms', ${p.id})"
-                        class="inline-flex items-center px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded-md text-xs transition-colors"
-                        data-tooltip="Delete platform">
-                        <i class="fas fa-trash mr-1"></i>
-                        Delete
-                    </button>
-                </td>
-            </tr>
-        `).join('');
-    }
+	function renderPlatforms(platforms) {
+		const tbody = document.getElementById('platforms');
+		if (platforms.length === 0) {
+			tbody.innerHTML = getEmptyState('No platforms found', 'Add your first platform using the form above');
+			return;
+		}
+		
+		tbody.innerHTML = platforms.map(p => `
+			<tr class="bg-gray-800 border-b border-gray-700 hover:bg-gray-700 transition-colors">
+				<td class="px-6 py-4">
+					<div class="flex flex-col">
+						<div class="flex items-center font-medium">
+							<i class="fas fa-share-alt text-primary-500 mr-2"></i>
+							${p.name}
+						</div>
+					</div>
+				</td>
+				<td class="px-6 py-4">
+					<div class="relative group">
+						<div class="text-xs text-gray-400 mb-1">Primary Upload Command:</div>
+						<pre class="code-snippet bg-gray-900 rounded-lg p-3 text-sm font-mono overflow-x-auto">${p.uploader_curl}</pre>
+						<button onclick="copyToClipboard('${p.uploader_curl}')" 
+							class="absolute top-2 right-2 p-2 bg-gray-800 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity"
+							data-tooltip="Copy to clipboard">
+							<i class="fas fa-copy text-primary-500"></i>
+						</button>
+					</div>
+					${p.fallback_curl ? `
+						<div class="relative group mt-2">
+							<div class="text-xs text-gray-400 mb-1">Primary Fallback Command:</div>
+							<pre class="code-snippet bg-gray-900 rounded-lg p-3 text-sm font-mono overflow-x-auto">${p.fallback_curl}</pre>
+							<button onclick="copyToClipboard('${p.fallback_curl}')" 
+								class="absolute top-2 right-2 p-2 bg-gray-800 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity"
+								data-tooltip="Copy to clipboard">
+								<i class="fas fa-copy text-primary-500"></i>
+							</button>
+						</div>
+					` : ''}
+					${p.fallback_curl_2 ? `
+						<div class="relative group mt-2">
+							<div class="text-xs text-gray-400 mb-1">Secondary Fallback Command:</div>
+							<pre class="code-snippet bg-gray-900 rounded-lg p-3 text-sm font-mono overflow-x-auto">${p.fallback_curl_2}</pre>
+							<button onclick="copyToClipboard('${p.fallback_curl_2}')" 
+								class="absolute top-2 right-2 p-2 bg-gray-800 rounded-lg opacity-0 group-hover:opacity-100 transition-opacity"
+								data-tooltip="Copy to clipboard">
+								<i class="fas fa-copy text-primary-500"></i>
+							</button>
+						</div>
+					` : ''}
+				</td>
+				<td class="px-6 py-4">
+					<div class="flex flex-wrap gap-1">
+						${(p.default_hashtags || '').split(',').map(tag => `
+							<span class="inline-flex items-center px-2 py-1 rounded-md text-xs font-medium bg-gray-700">
+								<i class="fas fa-hashtag text-primary-500 mr-1"></i>
+								${tag.trim()}
+							</span>
+						`).join('')}
+					</div>
+				</td>
+				<td class="px-6 py-4 whitespace-nowrap text-gray-400 text-sm">
+					${new Date(p.created_at).toLocaleString()}
+				</td>
+				<td class="px-6 py-4">
+					<button onclick="deleteItem('platforms', ${p.id})"
+						class="inline-flex items-center px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded-md text-xs transition-colors"
+						data-tooltip="Delete platform">
+						<i class="fas fa-trash mr-1"></i>
+						Delete
+					</button>
+				</td>
+			</tr>
+		`).join('');
+	}
 	
     // Form handling functions
     async function createGenerator(event) {
@@ -321,42 +320,41 @@
         }
     }
 
-    async function createPlatform(event) {
-        event.preventDefault();
-        if (!validateForm(event.target)) return;
+	async function createPlatform(event) {
+		event.preventDefault();
+		if (!validateForm(event.target)) return;
 
-        const submitButton = event.target.querySelector('button[type="submit"]');
-        setButtonLoading(submitButton, true);
+		const submitButton = event.target.querySelector('button[type="submit"]');
+		setButtonLoading(submitButton, true);
 
-        const formData = {
-            platform: document.getElementById('platform_name').value,
-            account_name: document.getElementById('account_name').value,
-            uploader_curl: document.getElementById('platform_uploader_curl').value,
-            fallback_curl: document.getElementById('platform_fallback_curl').value,
-            fallback_curl_2: document.getElementById('platform_fallback_curl_2').value,
-            default_hashtags: document.getElementById('platform_hashtags').value
-        };
+		const formData = {
+			name: document.getElementById('platform_name').value,
+			uploader_curl: document.getElementById('platform_uploader_curl').value,
+			fallback_curl: document.getElementById('platform_fallback_curl').value,
+			fallback_curl_2: document.getElementById('platform_fallback_curl_2').value,
+			default_hashtags: document.getElementById('platform_hashtags').value
+		};
 
-        try {
-            const response = await fetch('/api/platforms', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(formData)
-            });
+		try {
+			const response = await fetch('/api/platforms', {
+				method: 'POST',
+				headers: {'Content-Type': 'application/json'},
+				body: JSON.stringify(formData)
+			});
 
-            if (!response.ok) {
-                throw new Error('Failed to create platform');
-            }
+			if (!response.ok) {
+				throw new Error('Failed to create platform');
+			}
 
-            showToast('Platform created successfully!', 'success');
-            document.getElementById('platformForm').reset();
-            await loadAllData();
-        } catch (error) {
-            showToast('Error creating platform: ' + error.message, 'error');
-        } finally {
-            setButtonLoading(submitButton, false);
-        }
-    }
+			showToast('Platform created successfully!', 'success');
+			document.getElementById('platformForm').reset();
+			await loadAllData();
+		} catch (error) {
+			showToast('Error creating platform: ' + error.message, 'error');
+		} finally {
+			setButtonLoading(submitButton, false);
+		}
+	}
 
     function setButtonLoading(button, isLoading) {
         if (!button) return;
@@ -480,42 +478,37 @@
     </div>
 
     <form id="platformForm" onsubmit="createPlatform(event)" class="space-y-6">
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div>
-                <label for="platform_name" class="block text-sm font-medium text-gray-300 mb-1">Platform Name</label>
-                <input type="text" id="platform_name" required placeholder="Enter platform name"
-                    class="w-full">
-            </div>
-            <div>
-                <label for="account_name" class="block text-sm font-medium text-gray-300 mb-1">Account Name</label>
-                <input type="text" id="account_name" required placeholder="Enter account name"
-                    class="w-full">
-            </div>
-            <div class="md:col-span-2">
-                <label for="platform_uploader_curl" class="block text-sm font-medium text-gray-300 mb-1">Upload CURL Command</label>
-                <textarea id="platform_uploader_curl" required rows="3" 
-                    placeholder="Enter upload CURL command"
-                    class="w-full font-mono text-sm"></textarea>
-                <p class="mt-1 text-xs text-gray-400">Use placeholders: {video}, {description}, {account}, {sound}, {volume}, {hashtags}</p>
-            </div>
-            <div class="md:col-span-2">
-                <label for="platform_fallback_curl" class="block text-sm font-medium text-gray-300 mb-1">Primary Fallback CURL Command (Optional)</label>
-                <textarea id="platform_fallback_curl" rows="3" 
-                    placeholder="Enter primary fallback upload command"
-                    class="w-full font-mono text-sm"></textarea>
-            </div>
-            <div class="md:col-span-2">
-                <label for="platform_fallback_curl_2" class="block text-sm font-medium text-gray-300 mb-1">Secondary Fallback CURL Command (Optional)</label>
-                <textarea id="platform_fallback_curl_2" rows="3" 
-                    placeholder="Enter secondary fallback upload command"
-                    class="w-full font-mono text-sm"></textarea>
-            </div>
-            <div>
-                <label for="platform_hashtags" class="block text-sm font-medium text-gray-300 mb-1">Default Platform Hashtags</label>
-                <input type="text" id="platform_hashtags" placeholder="#example,#tags"
-                    class="w-full">
-            </div>
-        </div>
+		<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+			<div>
+				<label for="platform_name" class="block text-sm font-medium text-gray-300 mb-1">Platform Name</label>
+				<input type="text" id="platform_name" required placeholder="Enter platform name"
+					class="w-full">
+			</div>
+			<div class="md:col-span-2">
+				<label for="platform_uploader_curl" class="block text-sm font-medium text-gray-300 mb-1">Upload CURL Command</label>
+				<textarea id="platform_uploader_curl" required rows="3" 
+					placeholder="Enter upload CURL command"
+					class="w-full font-mono text-sm"></textarea>
+				<p class="mt-1 text-xs text-gray-400">Use placeholders: {video}, {description}, {account}, {sound}, {volume}, {hashtags}</p>
+			</div>
+			<div class="md:col-span-2">
+				<label for="platform_fallback_curl" class="block text-sm font-medium text-gray-300 mb-1">Primary Fallback CURL Command (Optional)</label>
+				<textarea id="platform_fallback_curl" rows="3" 
+					placeholder="Enter primary fallback upload command"
+					class="w-full font-mono text-sm"></textarea>
+			</div>
+			<div class="md:col-span-2">
+				<label for="platform_fallback_curl_2" class="block text-sm font-medium text-gray-300 mb-1">Secondary Fallback CURL Command (Optional)</label>
+				<textarea id="platform_fallback_curl_2" rows="3" 
+					placeholder="Enter secondary fallback upload command"
+					class="w-full font-mono text-sm"></textarea>
+			</div>
+			<div>
+				<label for="platform_hashtags" class="block text-sm font-medium text-gray-300 mb-1">Default Platform Hashtags</label>
+				<input type="text" id="platform_hashtags" placeholder="#example,#tags"
+					class="w-full">
+			</div>
+		</div>
         
         <button type="submit" class="inline-flex items-center px-4 py-2 bg-gradient-to-r from-primary-500 to-primary-600 text-white rounded-lg font-semibold hover:from-primary-600 hover:to-primary-700 focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 focus:ring-offset-gray-900 transition-all">
             <i class="fas fa-plus mr-2"></i>
