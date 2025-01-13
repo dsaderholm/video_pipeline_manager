@@ -582,20 +582,22 @@
 			{ key: 'sat', label: 'Saturday' }
 		  ];
 
-		  // Generate hours in 12-hour format with AM/PM
-		  const hours = Array.from({ length: 24 }, (_, i) => {
-			const hour = i;
-			const period = hour < 12 ? 'AM' : 'PM';
-			const displayHour = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
-			const value = i.toString().padStart(2, '0');
-			const label = `${displayHour}:00 ${period}`;
-			return { value, label };
-		  });
+		  // Convert time from 12-hour to 24-hour format
+		  const to24Hour = (hour, minute, period) => {
+			hour = parseInt(hour);
+			if (period === 'PM' && hour !== 12) hour += 12;
+			if (period === 'AM' && hour === 12) hour = 0;
+			return `${hour.toString().padStart(2, '0')}:${minute}`;
+		  };
 
-		  const minutes = Array.from({ length: 60 }, (_, i) => ({
-			value: i.toString().padStart(2, '0'),
-			label: i.toString().padStart(2, '0')
-		  }));
+		  // Convert time from 24-hour to display components
+		  const parseTime = (time24) => {
+			const [hour24, minute] = time24.split(':');
+			let hour = parseInt(hour24);
+			const period = hour >= 12 ? 'PM' : 'AM';
+			hour = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
+			return { hour: hour.toString(), minute, period };
+		  };
 
 		  const addTimeToDay = (day) => {
 			const newSchedule = { ...schedule };
@@ -611,9 +613,11 @@
 			updateHiddenInput(newSchedule);
 		  };
 
-		  const updateTime = (day, index, hour, minute) => {
+		  const updateTime = (day, index, field, value) => {
 			const newSchedule = { ...schedule };
-			newSchedule[day][index] = `${hour}:${minute}`;
+			const time = parseTime(newSchedule[day][index]);
+			time[field] = value;
+			newSchedule[day][index] = to24Hour(time.hour, time.minute, time.period);
 			setSchedule(newSchedule);
 			updateHiddenInput(newSchedule);
 		  };
@@ -674,8 +678,8 @@
 					  className: 'space-y-3' 
 					},
 					schedule[key].length > 0 
-					  ? schedule[key].map((time, index) => {
-						  const [currentHour, currentMinute] = time.split(':');
+					  ? schedule[key].map((time24, index) => {
+						  const time = parseTime(time24);
 						  return React.createElement(
 							'div',
 							{
@@ -683,36 +687,38 @@
 							  className: 'flex items-center space-x-2'
 							},
 							[
-							  // Hour Select - Shows hour with AM/PM
+							  // Hour Select (1-12)
 							  React.createElement(
 								'select',
 								{
-								  value: currentHour,
-								  onChange: (e) => updateTime(key, index, e.target.value, currentMinute),
-								  className: 'w-32'
-								},
-								hours.map(h =>
-								  React.createElement(
-									'option',
-									{ key: h.value, value: h.value },
-									h.label
-								  )
-								)
-							  ),
-							  // Minutes Select
-							  React.createElement(
-								'select',
-								{
-								  value: currentMinute,
-								  onChange: (e) => updateTime(key, index, currentHour, e.target.value),
+								  value: time.hour,
+								  onChange: (e) => updateTime(key, index, 'hour', e.target.value),
 								  className: 'w-20'
 								},
-								minutes.map(m =>
-								  React.createElement(
-									'option',
-									{ key: m.value, value: m.value },
-									m.label
-								  )
+								Array.from({ length: 12 }, (_, i) => (i + 1).toString())
+								  .map(h => React.createElement('option', { key: h, value: h }, h))
+							  ),
+							  // Minute Select (00-59)
+							  React.createElement(
+								'select',
+								{
+								  value: time.minute,
+								  onChange: (e) => updateTime(key, index, 'minute', e.target.value),
+								  className: 'w-20'
+								},
+								Array.from({ length: 60 }, (_, i) => i.toString().padStart(2, '0'))
+								  .map(m => React.createElement('option', { key: m, value: m }, m))
+							  ),
+							  // AM/PM Select
+							  React.createElement(
+								'select',
+								{
+								  value: time.period,
+								  onChange: (e) => updateTime(key, index, 'period', e.target.value),
+								  className: 'w-20'
+								},
+								['AM', 'PM'].map(p => 
+								  React.createElement('option', { key: p, value: p }, p)
 								)
 							  ),
 							  // Remove Button
