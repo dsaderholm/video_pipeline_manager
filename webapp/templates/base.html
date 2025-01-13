@@ -582,8 +582,20 @@
 			{ key: 'sat', label: 'Saturday' }
 		  ];
 
-		  const hours = Array.from({ length: 24 }, (_, i) => i.toString().padStart(2, '0'));
-		  const minutes = Array.from({ length: 60 }, (_, i) => i.toString().padStart(2, '0'));
+		  // Generate hours in 12-hour format with AM/PM
+		  const hours = Array.from({ length: 24 }, (_, i) => {
+			const hour = i;
+			const period = hour < 12 ? 'AM' : 'PM';
+			const displayHour = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
+			const value = i.toString().padStart(2, '0');
+			const label = `${displayHour}:00 ${period}`;
+			return { value, label };
+		  });
+
+		  const minutes = Array.from({ length: 60 }, (_, i) => ({
+			value: i.toString().padStart(2, '0'),
+			label: i.toString().padStart(2, '0')
+		  }));
 
 		  const addTimeToDay = (day) => {
 			const newSchedule = { ...schedule };
@@ -662,42 +674,45 @@
 					  className: 'space-y-3' 
 					},
 					schedule[key].length > 0 
-					  ? schedule[key].map((time, index) =>
-						  React.createElement(
+					  ? schedule[key].map((time, index) => {
+						  const [currentHour, currentMinute] = time.split(':');
+						  return React.createElement(
 							'div',
 							{
 							  key: index,
 							  className: 'flex items-center space-x-2'
 							},
 							[
-							  // Hour Select
+							  // Hour Select - Shows hour with AM/PM
 							  React.createElement(
 								'select',
 								{
-								  value: time.split(':')[0],
-								  onChange: (e) => updateTime(key, index, e.target.value, time.split(':')[1]),
-								  className: 'w-24'
+								  value: currentHour,
+								  onChange: (e) => updateTime(key, index, e.target.value, currentMinute),
+								  className: 'w-32'
 								},
 								hours.map(h =>
 								  React.createElement(
 									'option',
-									{ key: h, value: h },
-									parseInt(h) > 12 
-									  ? `${parseInt(h) - 12}:00 PM` 
-									  : `${parseInt(h) || 12}:00 AM`
+									{ key: h.value, value: h.value },
+									h.label
 								  )
 								)
 							  ),
-							  // Minute Select
+							  // Minutes Select
 							  React.createElement(
 								'select',
 								{
-								  value: time.split(':')[1],
-								  onChange: (e) => updateTime(key, index, time.split(':')[0], e.target.value),
+								  value: currentMinute,
+								  onChange: (e) => updateTime(key, index, currentHour, e.target.value),
 								  className: 'w-20'
 								},
 								minutes.map(m =>
-								  React.createElement('option', { key: m, value: m }, m)
+								  React.createElement(
+									'option',
+									{ key: m.value, value: m.value },
+									m.label
+								  )
 								)
 							  ),
 							  // Remove Button
@@ -711,8 +726,8 @@
 								React.createElement('i', { className: 'fas fa-times' })
 							  )
 							]
-						  )
-						)
+						  );
+						})
 					  : React.createElement(
 						  'div',
 						  { className: 'text-gray-400 text-sm italic' },
