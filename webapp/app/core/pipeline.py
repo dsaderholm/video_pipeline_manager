@@ -100,6 +100,15 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                 logger.error(f"No task found with ID {task_id}")
                 return False if dry_run else None
 
+            # Convert task_data tuple to dict for format_upload_command
+            task_dict = {
+                'id': task_data[0],
+                'name': task_data[1],
+                'hashtags': task_data[5],
+                'sound_name': task_data[6],
+                'sound_volume': task_data[7]
+            }
+
             video_file = None
             preview_path = None
             try:
@@ -186,7 +195,7 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
 
                 # Process uploads using the new schema
                 c.execute("""
-                    SELECT p.id, p.name, p.uploader_curl, tpa.account_name
+                    SELECT p.id, p.name, p.uploader_curl, tpa.account_name, p.default_hashtags
                     FROM task_platform_accounts tpa
                     JOIN platforms p ON tpa.platform_id = p.id
                     WHERE tpa.task_id = ?
@@ -197,11 +206,22 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                     logger.info(f"Task {task_id}: Processing {len(platform_data_list)} platform uploads")
                     
                     for platform_data in platform_data_list:
-                        platform_id, platform_name, upload_curl, account_name = platform_data
+                        platform_id, platform_name, upload_curl, account_name, default_hashtags = platform_data
                         logger.info(f"Task {task_id}: Uploading to {platform_name} with account {account_name}")
                         
-                        # Format the upload command with video file
-                        upload_cmd = format_upload_command(upload_curl, account_name, video_file)
+                        # Create platform_dict for format_upload_command
+                        platform_dict = {
+                            'account_name': account_name,
+                            'default_hashtags': default_hashtags
+                        }
+                        
+                        # Format the upload command with all required parameters
+                        upload_cmd = format_upload_command(
+                            upload_curl,
+                            video_file,
+                            task_dict,
+                            platform_dict
+                        )
                         success, stdout, stderr = execute_curl(upload_cmd)
                         
                         if not success:
