@@ -560,96 +560,183 @@
     </script>
 	<script type="text/javascript">
 		// Schedule Picker Component
-		function SchedulePicker() {
-			const [times, setTimes] = React.useState([{ hour: '12', minute: '00', period: 'AM' }]);
-			
-			const hours = Array.from({ length: 12 }, (_, i) => (i + 1).toString().padStart(2, '0'));
-			const minutes = Array.from({ length: 60 }, (_, i) => i.toString().padStart(2, '0'));
-			
-			const addTime = () => {
-				setTimes([...times, { hour: '12', minute: '00', period: 'AM' }]);
-			};
-			
-			const removeTime = (index) => {
-				if (times.length > 1) {
-					setTimes(times.filter((_, i) => i !== index));
-				}
-			};
-			
-			const updateTime = (index, field, value) => {
-				const newTimes = [...times];
-				newTimes[index] = { ...newTimes[index], [field]: value };
-				setTimes(newTimes);
-				
-				// Convert to 24-hour format and update hidden input
-				const formattedTimes = newTimes.map(time => {
-					let hour = parseInt(time.hour);
-					if (time.period === 'PM' && hour !== 12) hour += 12;
-					if (time.period === 'AM' && hour === 12) hour = 0;
-					return `${hour.toString().padStart(2, '0')}:${time.minute}`;
-				});
-				
-				const input = document.getElementById('schedule');
-				if (input) input.value = formattedTimes.join(', ');
-			};
-			
-			return React.createElement('div', { className: 'space-y-4' },
-				times.map((time, index) => 
-					React.createElement('div', { key: index, className: 'flex items-center space-x-2' },
-						React.createElement('select', {
-							value: time.hour,
-							onChange: (e) => updateTime(index, 'hour', e.target.value),
-							className: 'bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-gray-100 w-20'
-						}, hours.map(h => 
-							React.createElement('option', { key: h, value: h }, h)
-						)),
-						React.createElement('span', { className: 'text-gray-300' }, ':'),
-						React.createElement('select', {
-							value: time.minute,
-							onChange: (e) => updateTime(index, 'minute', e.target.value),
-							className: 'bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-gray-100 w-20'
-						}, minutes.map(m => 
-							React.createElement('option', { key: m, value: m }, m)
-						)),
-						React.createElement('select', {
-							value: time.period,
-							onChange: (e) => updateTime(index, 'period', e.target.value),
-							className: 'bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-gray-100 w-20'
-						}, [
-							React.createElement('option', { key: 'AM', value: 'AM' }, 'AM'),
-							React.createElement('option', { key: 'PM', value: 'PM' }, 'PM')
-						]),
-						React.createElement('button', {
-							type: 'button',
-							onClick: () => removeTime(index),
-							className: 'p-2 text-red-400 hover:text-red-300 transition-colors',
-							disabled: times.length === 1
-						}, React.createElement('i', { className: 'fas fa-times' }))
-					)
-				),
-				React.createElement('button', {
-					type: 'button',
-					onClick: addTime,
-					className: 'inline-flex items-center px-3 py-2 text-sm bg-gray-700 hover:bg-gray-600 text-white rounded-lg transition-colors'
-				}, [
-					React.createElement('i', { className: 'fas fa-plus mr-2' }),
-					'Add Time'
-				]),
-				React.createElement('input', {
-					type: 'hidden',
-					id: 'schedule',
-					name: 'schedule',
-					required: true
-				})
-			);
-		}
+		const DaySchedulePicker = () => {
+		  const { useState } = React;
+		  const [schedule, setSchedule] = useState({
+			sun: [],
+			mon: [],
+			tue: [],
+			wed: [],
+			thu: [],
+			fri: [],
+			sat: []
+		  });
+
+		  const days = [
+			{ key: 'sun', label: 'Sunday' },
+			{ key: 'mon', label: 'Monday' },
+			{ key: 'tue', label: 'Tuesday' },
+			{ key: 'wed', label: 'Wednesday' },
+			{ key: 'thu', label: 'Thursday' },
+			{ key: 'fri', label: 'Friday' },
+			{ key: 'sat', label: 'Saturday' }
+		  ];
+
+		  const hours = Array.from({ length: 24 }, (_, i) => i.toString().padStart(2, '0'));
+		  const minutes = Array.from({ length: 60 }, (_, i) => i.toString().padStart(2, '0'));
+
+		  const addTimeToDay = (day) => {
+			const newSchedule = { ...schedule };
+			newSchedule[day] = [...schedule[day], "12:00"];
+			setSchedule(newSchedule);
+			updateHiddenInput(newSchedule);
+		  };
+
+		  const removeTimeFromDay = (day, index) => {
+			const newSchedule = { ...schedule };
+			newSchedule[day] = schedule[day].filter((_, i) => i !== index);
+			setSchedule(newSchedule);
+			updateHiddenInput(newSchedule);
+		  };
+
+		  const updateTime = (day, index, hour, minute) => {
+			const newSchedule = { ...schedule };
+			newSchedule[day][index] = `${hour}:${minute}`;
+			setSchedule(newSchedule);
+			updateHiddenInput(newSchedule);
+		  };
+
+		  const updateHiddenInput = (newSchedule) => {
+			const formatted = Object.entries(newSchedule)
+			  .filter(([_, times]) => times.length > 0)
+			  .map(([day, times]) => `${day}|${times.join(',')}`)
+			  .join(';');
+
+			const input = document.getElementById('schedule');
+			if (input) input.value = formatted;
+		  };
+
+		  return React.createElement(
+			'div',
+			{ className: 'space-y-6' },
+			days.map(({ key, label }) =>
+			  React.createElement(
+				'div',
+				{
+				  key,
+				  className: 'p-4 bg-gray-800 rounded-lg border border-gray-700'
+				},
+				[
+				  // Header with Label and Add Button
+				  React.createElement(
+					'div',
+					{ 
+					  key: 'header',
+					  className: 'flex items-center justify-between mb-4' 
+					},
+					[
+					  React.createElement('h3', { 
+						className: 'text-lg font-medium text-white' 
+					  }, label),
+					  React.createElement(
+						'button',
+						{
+						  type: 'button',
+						  onClick: () => addTimeToDay(key),
+						  className: 'inline-flex items-center px-3 py-1 text-sm bg-primary-500 hover:bg-primary-600 text-white rounded-lg transition-colors'
+						},
+						[
+						  React.createElement('i', { 
+							className: 'fas fa-plus mr-2' 
+						  }),
+						  'Add Time'
+						]
+					  )
+					]
+				  ),
+				  // Time Slots Container
+				  React.createElement(
+					'div',
+					{ 
+					  key: 'slots',
+					  className: 'space-y-3' 
+					},
+					schedule[key].length > 0 
+					  ? schedule[key].map((time, index) =>
+						  React.createElement(
+							'div',
+							{
+							  key: index,
+							  className: 'flex items-center space-x-2'
+							},
+							[
+							  // Hour Select
+							  React.createElement(
+								'select',
+								{
+								  value: time.split(':')[0],
+								  onChange: (e) => updateTime(key, index, e.target.value, time.split(':')[1]),
+								  className: 'w-24'
+								},
+								hours.map(h =>
+								  React.createElement(
+									'option',
+									{ key: h, value: h },
+									parseInt(h) > 12 
+									  ? `${parseInt(h) - 12}:00 PM` 
+									  : `${parseInt(h) || 12}:00 AM`
+								  )
+								)
+							  ),
+							  // Minute Select
+							  React.createElement(
+								'select',
+								{
+								  value: time.split(':')[1],
+								  onChange: (e) => updateTime(key, index, time.split(':')[0], e.target.value),
+								  className: 'w-20'
+								},
+								minutes.map(m =>
+								  React.createElement('option', { key: m, value: m }, m)
+								)
+							  ),
+							  // Remove Button
+							  React.createElement(
+								'button',
+								{
+								  type: 'button',
+								  onClick: () => removeTimeFromDay(key, index),
+								  className: 'p-2 text-red-400 hover:text-red-300 transition-colors'
+								},
+								React.createElement('i', { className: 'fas fa-times' })
+							  )
+							]
+						  )
+						)
+					  : React.createElement(
+						  'div',
+						  { className: 'text-gray-400 text-sm italic' },
+						  'No times scheduled'
+						)
+				  )
+				]
+			  )
+			),
+			React.createElement('input', {
+			  type: 'hidden',
+			  id: 'schedule',
+			  name: 'schedule',
+			  required: true
+			})
+		  );
+		};
 
 		// Initialize when the page loads
 		document.addEventListener('DOMContentLoaded', () => {
-			const container = document.getElementById('schedule-picker-root');
-			if (container) {
-				ReactDOM.render(React.createElement(SchedulePicker), container);
-			}
+		  const container = document.getElementById('schedule-picker-root');
+		  if (container) {
+			ReactDOM.render(React.createElement(DaySchedulePicker), container);
+		  }
 		});
 		</script>
 		<script type="text/javascript">

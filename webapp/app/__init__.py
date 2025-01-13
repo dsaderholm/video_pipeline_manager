@@ -8,6 +8,7 @@ import os
 import sqlite3
 import time
 from datetime import datetime, timedelta
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 
 # Load environment variables from .env file
 load_dotenv()
@@ -88,6 +89,58 @@ def cleanup_preview_files():
     if deleted_count > 0 or error_count > 0:
         logger.info(f"Preview cleanup complete. Deleted: {deleted_count}, Errors: {error_count}")
 
+def init_scheduler(app):
+    """Initialize the APScheduler with improved logging and error handling"""
+    def handle_job_error(event):
+        logger.error(f"Job error occurred. Job ID: {event.job_id}, Error: {event.exception}")
+        if event.job_id.startswith('task_'):
+            try:
+                task_id = int(event.job_id.split('_')[1])
+                with sqlite3.connect('pipeline.db') as conn:
+                    c = conn.cursor()
+                    c.execute("UPDATE tasks SET status = 'failed' WHERE id = ?", (task_id,))
+                    conn.commit()
+            except Exception as e:
+                logger.error(f"Failed to update task status: {e}")
+        
+    def handle_job_missed(event):
+        logger.warning(f"Job missed! Job ID: {event.job_id}, Scheduled run time: {event.scheduled_run_time}")
+
+    # Set up the scheduler with configuration
+    scheduler = APScheduler()
+    app.config['SCHEDULER_API_ENABLED'] = True
+    app.config['SCHEDULER_TIMEZONE'] = os.getenv('TIMEZONE', 'UTC')
+    scheduler.init_app(app)
+
+    # Add event listeners
+    scheduler.scheduler.add_listener(handle_job_error, EVENT_JOB_ERROR)
+    scheduler.scheduler.add_listener(handle_job_missed, EVENT_JOB_MISSED)
+
+    # Add cleanup job
+    scheduler.add_job(
+        id='cleanup_previews',
+        func=cleanup_preview_files,
+        trigger='interval',
+        hours=1,
+        next_run_time=datetime.now() + timedelta(minutes=1)
+    )
+
+    # Log all existing tasks
+    try:
+        with sqlite3.connect('pipeline.db') as conn:
+            c = conn.cursor()
+            c.execute("SELECT id, name, schedule FROM tasks WHERE status != 'completed'")
+            tasks = c.fetchall()
+            
+            logger.info(f"Initializing scheduler with {len(tasks)} active tasks")
+            for task in tasks:
+                logger.info(f"Task {task[0]} ({task[1]}): Schedule = {task[2]}")
+    except Exception as e:
+        logger.error(f"Failed to log existing tasks: {e}")
+
+    scheduler.start()
+    return scheduler
+
 def create_app():
     """Create and configure the Flask application"""
     logger.info("Starting application initialization...")
@@ -96,24 +149,9 @@ def create_app():
     app = Flask(__name__,
                 template_folder=os.path.join(APP_ROOT, 'templates'),
                 static_folder=os.path.join(APP_ROOT, 'static'))
-
-    # Configure scheduler
-    app.config['SCHEDULER_API_ENABLED'] = True
-    app.config['SCHEDULER_TIMEZONE'] = "UTC"
-    scheduler = APScheduler()
-    scheduler.init_app(app)
     
-    # Add cleanup job to run every hour
-    scheduler.add_job(
-        id='cleanup_previews',
-        func=cleanup_preview_files,
-        trigger='interval',
-        hours=1,
-        next_run_time=datetime.now() + timedelta(minutes=1)  # First run after 1 minute
-    )
-    
-    scheduler.start()  # Start scheduler here, before app context
-    app.scheduler = scheduler  # Make scheduler accessible throughout the app
+    # Initialize scheduler with improved error handling and logging
+    app.scheduler = init_scheduler(app)
     
     # Create previews directory if it doesn't exist
     previews_dir = os.path.join(APP_ROOT, 'previews')

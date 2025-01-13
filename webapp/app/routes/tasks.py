@@ -12,6 +12,47 @@ from app.timezone import localize_timestamp
 tasks_bp = Blueprint('tasks', __name__)
 logger = logging.getLogger(__name__)
 
+def validate_schedule(schedule):
+    """Validate a schedule string and return (is_valid, error_message)"""
+    try:
+        valid_days = {'sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'}
+        
+        # Check if schedule is empty
+        if not schedule.strip():
+            return False, "Schedule cannot be empty"
+
+        day_schedules = schedule.split(';')
+        for day_schedule in day_schedules:
+            if not day_schedule.strip():
+                continue
+                
+            # Check day|time format
+            if '|' not in day_schedule:
+                return False, f"Invalid schedule format in '{day_schedule}'. Expected 'day|time'"
+                
+            day, times = day_schedule.split('|')
+            
+            # Validate day
+            if day.lower() not in valid_days:
+                return False, f"Invalid day '{day}'. Must be one of: {', '.join(valid_days)}"
+                
+            # Validate times
+            for time in times.split(','):
+                if not time.strip():
+                    return False, "Empty time value found"
+                    
+                try:
+                    hour, minute = map(int, time.strip().split(':'))
+                    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                        return False, f"Invalid time '{time}'. Hours must be 0-23, minutes must be 0-59"
+                except ValueError:
+                    return False, f"Invalid time format '{time}'. Expected HH:MM"
+
+        return True, ""
+        
+    except Exception as e:
+        return False, f"Invalid schedule format: {str(e)}"
+
 def cleanup_old_previews(max_age_hours=24):
     """
     Clean up preview files older than the specified age
@@ -194,6 +235,14 @@ def create_task():
     data = request.json
     scheduler = current_app.scheduler
     
+    # Validate schedule format
+    is_valid, error_message = validate_schedule(data['schedule'])
+    if not is_valid:
+        return jsonify({
+            'success': False,
+            'message': error_message
+        }), 400
+    
     with sqlite3.connect('pipeline.db') as conn:
         c = conn.cursor()
         
@@ -204,8 +253,7 @@ def create_task():
             try:
                 c.execute("ALTER TABLE tasks ADD COLUMN retry_count INTEGER DEFAULT 0")
             except sqlite3.OperationalError:
-                # Column might have been added by another concurrent request
-                pass
+                pass  # Column might have been added by another concurrent request
         
         # Convert lists to JSON strings
         utilities_json = json.dumps(data.get('utilities', []))
@@ -221,21 +269,36 @@ def create_task():
                   data.get('email_notify')))
         task_id = c.lastrowid
         
-        # Schedule multiple times if needed
-        schedule_times = data['schedule'].split(',')
+        # Parse the schedule format: day|HH:MM,HH:MM;day|HH:MM,HH:MM
+        day_schedules = data['schedule'].split(';')
         from app.core.pipeline import process_video_pipeline
-        for schedule_time in schedule_times:
-            hour, minute = map(int, schedule_time.strip().split(':'))
-            job_id = f'task_{task_id}_{hour}_{minute}'
-            scheduler.add_job(
-                func=process_video_pipeline,
-                trigger='cron',
-                hour=hour,
-                minute=minute,
-                args=[task_id],
-                id=job_id,
-                misfire_grace_time=45  # Allow 45 seconds grace time for misfires
-            )
+        
+        for day_schedule in day_schedules:
+            if not day_schedule.strip():
+                continue
+                
+            day, times = day_schedule.split('|')
+            day_number = {
+                'sun': 0, 'mon': 1, 'tue': 2, 'wed': 3, 
+                'thu': 4, 'fri': 5, 'sat': 6
+            }[day.lower()]
+            
+            for time in times.split(','):
+                hour, minute = map(int, time.strip().split(':'))
+                job_id = f'task_{task_id}_{day}_{hour}_{minute}'
+                
+                # Schedule the task for this specific day and time
+                scheduler.add_job(
+                    func=process_video_pipeline,
+                    trigger='cron',
+                    day_of_week=day_number,
+                    hour=hour,
+                    minute=minute,
+                    args=[task_id],
+                    id=job_id,
+                    misfire_grace_time=45  # Allow 45 seconds grace time for misfires
+                )
+                logger.info(f"Scheduled task {task_id} for {day} at {hour:02d}:{minute:02d}")
         
         return jsonify({'id': task_id, 'status': 'scheduled'})
 
@@ -249,13 +312,20 @@ def delete_task(id):
         c.execute('SELECT schedule FROM tasks WHERE id = ?', (id,))
         task = c.fetchone()
         if task and task[0]:
-            # Remove both regular and retry jobs
-            schedule_times = task[0].split(',')
-            for time in schedule_times:
-                try:
-                    scheduler.remove_job(f'task_{id}_{time.strip().replace(":", "_")}')
-                except:
-                    pass
+            # Parse the schedule format: day|HH:MM,HH:MM;day|HH:MM,HH:MM
+            day_schedules = task[0].split(';')
+            for day_schedule in day_schedules:
+                if not day_schedule.strip():
+                    continue
+                
+                day, times = day_schedule.split('|')
+                for time in times.split(','):
+                    hour, minute = map(int, time.strip().split(':'))
+                    try:
+                        scheduler.remove_job(f'task_{id}_{day}_{hour}_{minute}')
+                    except:
+                        pass
+
             # Remove any pending retry jobs
             for job in scheduler.get_jobs():
                 if job.id.startswith(f'retry_task_{id}'):
