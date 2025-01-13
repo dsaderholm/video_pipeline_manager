@@ -193,6 +193,8 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                 if preview_mode:
                     return None
 
+                logger.info(f"Task {task_id}: Video file path before upload: {video_file}")
+
                 # Process uploads using the new schema
                 c.execute("""
                     SELECT p.id, p.name, p.uploader_curl, tpa.account_name, p.default_hashtags
