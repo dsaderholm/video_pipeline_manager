@@ -83,7 +83,7 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False):
 
             # Communicate with timeout
             try:
-                stdout, stderr = process.communicate(timeout=360)  # 6-minute timeout
+                stdout, stderr = process.communicate(timeout=1200)  # 6-minute timeout
                 stdout_str = stdout.decode(errors='replace')
                 stderr_str = stderr.decode(errors='replace')
             except subprocess.TimeoutExpired:
@@ -94,12 +94,15 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False):
             # Log output
             if stdout_str:
                 logger.info(f"Stdout: {stdout_str[:1000]}...")
+            
+            # Check if command was successful but taking too long
+            if "200" in stdout_str and attempt < retries - 1:
+                logger.info("Command returned 200 but waiting for file...")
+                time.sleep(retry_delay * 5)  # Wait longer between retries
+                continue
+                
             if stderr_str:
                 logger.warning(f"Stderr: {stderr_str}")
-
-            # Check if command was successful
-            if process.returncode == 0:
-                return True, stdout_str, stderr_str
 
             logger.error(f"Command failed with return code {process.returncode}")
             
