@@ -173,55 +173,50 @@
         initializeDragAndDrop();
     }
 
-	function updatePlatformsCheckboxes() {
-		const platDiv = document.getElementById('platforms');
-		platDiv.innerHTML = platforms.map(plat => `
-			<label class="flex items-center p-3 bg-gray-800 rounded-lg border border-gray-700 hover:border-primary-500 transition-colors cursor-pointer">
-				<input type="checkbox" id="platform_${plat.id}" name="platforms" value="${plat.id}"
-					class="w-4 h-4 text-primary-500 focus:ring-primary-500 rounded"
-					onchange="handlePlatformSelection(this, ${plat.id})">
-				<span class="ml-2 text-sm">
-					<i class="fas fa-share-alt text-primary-500 mr-2"></i>
-					${plat.name}
-				</span>
-			</label>
-		`).join('');
+	function updatePlatformSelect() {
+		const select = document.getElementById('platform_select');
+		select.innerHTML = '<option value="">Select a Platform...</option>' + 
+			platforms.map(plat => 
+				`<option value="${plat.id}">${plat.name}</option>`
+			).join('');
 	}
 	
-	function handlePlatformSelection(checkbox, platformId) {
-		const container = document.getElementById('selected-platforms');
-		const platformData = platforms.find(p => p.id === platformId);
-		
+	function addPlatform() {
+		const select = document.getElementById('platform_select');
+		const platformId = select.value;
+		if (!platformId) return;
+
+		const platformData = platforms.find(p => p.id === parseInt(platformId));
 		if (!platformData) return;
 
-		if (checkbox.checked) {
-			// Add platform with account input
-			const platformDiv = document.createElement('div');
-			platformDiv.className = 'selected-platform mb-2';
-			platformDiv.setAttribute('data-id', platformId);
-			platformDiv.innerHTML = `
-				<div class="flex items-center gap-3 p-3 bg-gray-700 rounded-lg border border-primary-500">
-					<div class="flex-1">
-						<div class="text-sm mb-2">
-							<i class="fas fa-share-alt text-primary-500 mr-2"></i>
-							${platformData.name}
-						</div>
-						<input type="text" 
-							class="w-full py-1 px-2 text-sm bg-gray-800 border border-gray-600 rounded"
-							placeholder="Enter account name"
-							onchange="validatePlatformAccountName(this)"
-							required>
+		const container = document.getElementById('selected-platforms');
+		const platformDiv = document.createElement('div');
+		platformDiv.className = 'selected-platform mb-2';
+		platformDiv.setAttribute('data-id', platformId);
+		platformDiv.innerHTML = `
+			<div class="flex items-center gap-3 p-3 bg-gray-700 rounded-lg border border-primary-500">
+				<div class="flex-1">
+					<div class="text-sm mb-2">
+						<i class="fas fa-share-alt text-primary-500 mr-2"></i>
+						${platformData.name}
 					</div>
+					<input type="text" 
+						class="w-full py-1 px-2 text-sm bg-gray-800 border border-gray-600 rounded"
+						placeholder="Enter account name"
+						onchange="validatePlatformAccountName(this)"
+						required>
 				</div>
-			`;
-			container.appendChild(platformDiv);
-		} else {
-			// Remove platform
-			const platformElement = container.querySelector(`[data-id="${platformId}"]`);
-			if (platformElement) {
-				platformElement.remove();
-			}
-		}
+				<button type="button" onclick="removePlatform(this)" class="p-1 hover:text-red-500">
+					<i class="fas fa-times"></i>
+				</button>
+			</div>
+		`;
+		container.appendChild(platformDiv);
+	}
+
+	function removePlatform(button) {
+		button.closest('.selected-platform').remove();
+		checkAllPlatformAccounts();
 	}
 
 	function validatePlatformAccountName(input) {
@@ -559,7 +554,7 @@
 
 			updateGeneratorSelect();
 			updateUtilitiesCheckboxes();
-			updatePlatformsCheckboxes();
+			updatePlatformSelect(); // instead of updatePlatformsCheckboxes()
 			renderTasks();
 			initializeFilters(); // Initialize the filter UI
 		} catch (error) {
@@ -571,9 +566,6 @@
 
     // Initialize on page load
     document.addEventListener('DOMContentLoaded', loadData);
-
-    // Refresh tasks every 60 seconds
-    setInterval(loadData, 60000);
 </script>
 
 {% endblock %}`
@@ -640,19 +632,25 @@
 			</div>
 		</div>
 
-        <!-- Platforms -->
-        <div class="glass rounded-lg p-6 border border-gray-700">
-            <h3 class="text-lg font-semibold mb-4 text-white">
-                <i class="fas fa-share-alt text-primary-500 mr-2"></i>
-                Platforms
-            </h3>
-			<div id="platforms" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-				<!-- Dynamically populated -->
+		<!-- Platforms -->
+		<div class="glass rounded-lg p-6 border border-gray-700">
+			<h3 class="text-lg font-semibold mb-4 text-white">
+				<i class="fas fa-share-alt text-primary-500 mr-2"></i>
+				Platforms
+			</h3>
+			<div class="mb-4">
+				<select id="platform_select" class="w-full">
+					<option value="">Select a Platform...</option>
+				</select>
 			</div>
+			<button type="button" onclick="addPlatform()" class="mb-4 inline-flex items-center px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white rounded-lg">
+				<i class="fas fa-plus mr-2"></i>
+				Add Platform
+			</button>
 			<div id="selected-platforms" class="mt-4 space-y-2">
 				<!-- Selected platforms will appear here -->
 			</div>
-        </div>
+		</div>
 
         <!-- Advanced Options -->
         <div class="glass rounded-lg p-6 border border-gray-700">
