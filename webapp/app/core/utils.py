@@ -2,6 +2,7 @@ import subprocess
 import time
 import glob
 import os
+import shlex
 from datetime import datetime
 from app import logger
 
@@ -245,12 +246,12 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
         video_file = os.path.normpath(video_file)
         
         return cmd_template.format(
-            video=video_file,
-            description=video_title,
-            account=platform_data['account_name'],
-            sound=task_data['sound_name'],
-            volume=task_data['sound_volume'],
-            hashtags=task_data['hashtags']
+            video=shlex.quote(video_file),
+            description=shlex.quote(video_title),
+            account=shlex.quote(platform_data['account_name']),
+            sound=shlex.quote(task_data['sound_name']),
+            volume=shlex.quote(task_data['sound_volume']),
+            hashtags=shlex.quote(task_data['hashtags'])
         )
         
     except KeyError as e:
