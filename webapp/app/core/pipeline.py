@@ -8,14 +8,18 @@ from app.core.utils import execute_curl, get_latest_video, cleanup_video, format
 from app.core.email_utils import send_task_completion_notification
 from flask import current_app
 
-class TaskAdapter(logging.LoggerAdapter):
-    def process(self, msg, kwargs):
-        kwargs.setdefault('extra', {})['task_id'] = self.extra['task_id']
-        return msg, kwargs
-
-def get_task_logger(task_id):
-    """Create a logger that automatically attaches task_id to all records"""
-    return TaskAdapter(logger, {'task_id': task_id})
+def create_logger_with_task_id(task_id):
+    """Create a logger that attaches task_id to all records"""
+    logger_instance = logging.getLogger(f'task_{task_id}')
+    
+    # Add a filter to inject task_id into the record
+    class TaskFilter(logging.Filter):
+        def filter(self, record):
+            record.task_id = task_id
+            return True
+    
+    logger_instance.addFilter(TaskFilter())
+    return logger_instance
 
 def check_and_set_lock():
     """Check if any task is running and set lock if not"""
@@ -77,7 +81,7 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
     """Main pipeline process for generating, processing, and uploading videos"""
     
     # Create a task-specific logger
-    task_logger = get_task_logger(task_id)
+    task_logger = create_logger_with_task_id(task_id)
     
     # Add mode-specific logging at the start
     mode = "dry run" if dry_run else "preview" if preview_mode else "normal"
