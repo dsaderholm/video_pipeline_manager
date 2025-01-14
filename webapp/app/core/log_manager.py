@@ -17,11 +17,14 @@ class DatabaseLogHandler(logging.Handler):
             with sqlite3.connect('pipeline.db') as conn:
                 c = conn.cursor()
                 
-                # Create logs table if it doesn't exist
+                # Drop the existing logs table if it exists
+                c.execute("DROP TABLE IF EXISTS logs")
+                
+                # Create logs table with new schema
                 c.execute('''
                     CREATE TABLE IF NOT EXISTS logs (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        timestamp TEXT NOT NULL,  -- Changed from TIMESTAMP to TEXT to store microseconds
+                        timestamp TEXT NOT NULL,
                         level TEXT NOT NULL,
                         message TEXT NOT NULL,
                         task_id INTEGER,
@@ -125,13 +128,20 @@ def add_log_entry(level, message, task_id=None, details=None, source=None):
         with sqlite3.connect('pipeline.db') as conn:
             c = conn.cursor()
             
+            current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+            
             # Add new log entry
             c.execute('''
-                INSERT INTO logs (level, message, task_id, details, source)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (level, message, task_id, 
-                 json.dumps(details) if details else None,
-                 source))
+                INSERT INTO logs (timestamp, level, message, task_id, details, source)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                current_time, 
+                level, 
+                message, 
+                task_id, 
+                json.dumps(details) if details else None,
+                source
+            ))
             
             conn.commit()
             
@@ -158,11 +168,14 @@ def init_logs():
         with sqlite3.connect('pipeline.db') as conn:
             c = conn.cursor()
             
-            # Create logs table if it doesn't exist
+            # Drop the existing logs table if it exists
+            c.execute("DROP TABLE IF EXISTS logs")
+            
+            # Create logs table with new schema
             c.execute('''
                 CREATE TABLE IF NOT EXISTS logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,  -- Changed from TIMESTAMP to TEXT to store microseconds
+                    timestamp TEXT NOT NULL,
                     level TEXT NOT NULL,
                     message TEXT NOT NULL,
                     task_id INTEGER,
