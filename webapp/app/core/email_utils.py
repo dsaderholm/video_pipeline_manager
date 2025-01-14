@@ -96,15 +96,15 @@ def format_task_info_html(task_info, success, base_url):
     # Add action buttons
     action_buttons = f"""
     <div style="display: flex; gap: 1rem; justify-content: center; margin-top: 1.5rem;">
-        <a href="{base_url}/manage?task={task_info['id']}" 
+        <a href="{base_url}/#/tasks/{task_info['id']}" 
            style="background-color: #3b82f6; color: white; padding: 0.5rem 1rem; border-radius: 0.375rem; text-decoration: none; font-weight: 500;">
             <i class="fas fa-external-link-alt mr-2"></i>View Task
         </a>
     """
-    
+
     if not success:
         action_buttons += f"""
-        <a href="{base_url}/logs?task={task_info['id']}" 
+        <a href="{base_url}/#/logs/{task_info['id']}" 
            style="background-color: #ef4444; color: white; padding: 0.5rem 1rem; border-radius: 0.375rem; text-decoration: none; font-weight: 500;">
             <i class="fas fa-exclamation-circle mr-2"></i>View Logs
         </a>

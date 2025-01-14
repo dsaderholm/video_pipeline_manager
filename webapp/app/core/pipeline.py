@@ -237,8 +237,11 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                 c.execute("UPDATE tasks SET status='completed' WHERE id=?", (task_id,))
                 conn.commit()
                 
-                if task_data[9]:  # email_notify is now at index 9
-                    send_task_completion_notification(task_data[9], task_id)
+                if task_data[9]:  # If email notifications are enabled
+                    c.execute("SELECT id, name, email_notify FROM tasks WHERE id=?", (task_id,))
+                    task_info = c.fetchone()
+                    if task_info and task_info[2]:  # email_notify contains the email address
+                        send_task_completion_notification(task_id, task_info[1], task_info[2], success=True)
                     logger.info(f"Task {task_id}: Sent completion notification")
                 
                 # Clean up video file unless it's a preview that we want to keep
@@ -257,7 +260,19 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                 pass
     
     except Exception as e:
-        logger.error(f"Task {task_id} failed in {mode} mode: {str(e)}")
+        error_msg = f"Task {task_id} failed in {mode} mode: {str(e)}"
+        logger.error(error_msg)
+        
+        # Send failure notification if email notifications are enabled
+        if not (dry_run or preview_mode):
+            try:
+                c.execute("SELECT id, name, email_notify FROM tasks WHERE id=?", (task_id,))
+                task_info = c.fetchone()
+                if task_info and task_info[2]:
+                    send_task_completion_notification(task_id, task_info[1], task_info[2], success=False)
+            except Exception as notify_error:
+                logger.error(f"Failed to send error notification: {str(notify_error)}")
+        
         raise
         
     finally:

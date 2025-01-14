@@ -43,11 +43,26 @@ class DatabaseLogHandler(logging.Handler):
             with sqlite3.connect('pipeline.db') as conn:
                 c = conn.cursor()
                 
+                # Get current timestamp with microseconds
+                current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+                
+                # Get latest sequence number for this second
+                second_start = current_time[:19]  # Strip microseconds
+                c.execute("""
+                    SELECT COALESCE(MAX(sequence), 0)
+                    FROM logs
+                    WHERE timestamp >= ? AND timestamp < datetime(?, '+1 second')
+                """, (second_start, second_start))
+                
+                sequence = c.fetchone()[0] + 1
+                
                 # Add new log entry
                 c.execute('''
-                    INSERT INTO logs (level, message, task_id, details, source)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO logs (timestamp, sequence, level, message, task_id, details, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                 ''', (
+                    current_time,
+                    sequence,
                     record.levelname, 
                     record.getMessage(), 
                     getattr(record, 'task_id', None),
@@ -82,7 +97,6 @@ def get_logs(limit=100, level=None, task_id=None, since=None):
                 params.append(task_id)
                 
             if since:
-                # Convert the input datetime to UTC for comparison
                 local_tz = pytz.timezone(get_timezone())
                 utc_since = local_tz.localize(since).astimezone(pytz.UTC)
                 conditions.append("timestamp > ?")
@@ -91,21 +105,25 @@ def get_logs(limit=100, level=None, task_id=None, since=None):
             if conditions:
                 query += " WHERE " + " AND ".join(conditions)
             
-            query += " ORDER BY timestamp DESC LIMIT ?"
+            # Order by timestamp and sequence number
+            query += " ORDER BY timestamp DESC, sequence DESC LIMIT ?"
             params.append(limit)
             
             c.execute(query, params)
             logs = c.fetchall()
             
-            # Convert to list of dictionaries
+            # Convert to list of dictionaries with microsecond precision
             return [{
                 'id': log[0],
-                'timestamp': datetime.strptime(log[1], '%Y-%m-%d %H:%M:%S').replace(tzinfo=pytz.UTC).astimezone(pytz.timezone(get_timezone())).strftime('%Y-%m-%d %H:%M:%S'),
-                'level': log[2],
-                'message': log[3],
-                'task_id': log[4],
-                'details': json.loads(log[5]) if log[5] else None,
-                'source': log[6]
+                'timestamp': datetime.strptime(log[1], '%Y-%m-%d %H:%M:%S.%f')
+                    .replace(tzinfo=pytz.UTC)
+                    .astimezone(pytz.timezone(get_timezone()))
+                    .strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],  # Truncate to milliseconds
+                'level': log[3],
+                'message': log[4],
+                'task_id': log[5],
+                'details': json.loads(log[6]) if log[6] else None,
+                'source': log[7]
             } for log in logs]
             
     except Exception as e:
@@ -155,7 +173,8 @@ def init_logs():
             c.execute('''
                 CREATE TABLE IF NOT EXISTS logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    timestamp TEXT NOT NULL,  -- Changed from TIMESTAMP to TEXT to store microseconds
+                    sequence INTEGER NOT NULL,  -- Added sequence number within the same second
                     level TEXT NOT NULL,
                     message TEXT NOT NULL,
                     task_id INTEGER,

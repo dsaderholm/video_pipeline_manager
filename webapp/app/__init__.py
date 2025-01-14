@@ -26,6 +26,10 @@ def setup_logging():
     # Configure root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
+    
+    # Remove any existing handlers
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
 
     # Disable werkzeug access logs
     logging.getLogger('werkzeug').setLevel(logging.WARNING)
@@ -167,10 +171,11 @@ def create_app():
             # Initialize logs table
             init_logs()
             
-            # Add database handler to both root logger and Flask logger
+            # Add database handler only to the root logger
             logging.getLogger().addHandler(db_log_handler)
+            
+            # Make sure Flask's logger doesn't propagate to avoid duplication
             app.logger.propagate = False
-            app.logger.addHandler(db_log_handler)
             
             logger.info("Database logging system initialized successfully")
             
