@@ -2,10 +2,20 @@ import sqlite3
 import json
 import time
 import os
+import logging
 from app import logger
 from app.core.utils import execute_curl, get_latest_video, cleanup_video, format_upload_command
 from app.core.email_utils import send_task_completion_notification
 from flask import current_app
+
+class TaskAdapter(logging.LoggerAdapter):
+    def process(self, msg, kwargs):
+        kwargs.setdefault('extra', {})['task_id'] = self.extra['task_id']
+        return msg, kwargs
+
+def get_task_logger(task_id):
+    """Create a logger that automatically attaches task_id to all records"""
+    return TaskAdapter(logger, {'task_id': task_id})
 
 def check_and_set_lock():
     """Check if any task is running and set lock if not"""
@@ -66,13 +76,16 @@ def get_preview_dir():
 def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
     """Main pipeline process for generating, processing, and uploading videos"""
     
+    # Create a task-specific logger
+    task_logger = get_task_logger(task_id)
+    
     # Add mode-specific logging at the start
     mode = "dry run" if dry_run else "preview" if preview_mode else "normal"
-    logger.info(f"Starting task {task_id} in {mode} mode")
+    task_logger.info(f"Starting task in {mode} mode")
     
     # For dry runs or previews, we don't need to acquire a lock
     if not (dry_run or preview_mode) and not check_and_set_lock():
-        logger.info(f"Another task is currently running. Task {task_id} will retry later.")
+        task_logger.info("Another task is currently running. Task will retry later.")
         return False if dry_run else None
     
     try:
@@ -97,7 +110,7 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
             task_data = c.fetchone()
             
             if not task_data:
-                logger.error(f"No task found with ID {task_id}")
+                task_logger.error("No task found with this ID")
                 return False if dry_run else None
 
             # Convert task_data tuple to dict for format_upload_command
@@ -114,62 +127,62 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
             try:
                 # Generate initial video
                 if dry_run:
-                    logger.info(f"[DRY RUN] Task {task_id}: Would execute generator: {task_data[-1]}")
+                    task_logger.info(f"[DRY RUN] Would execute generator: {task_data[-1]}")
                 else:
-                    logger.info(f"Task {task_id}: Executing generator...")
+                    task_logger.info("Executing generator...")
                     success, stdout, stderr = execute_curl(task_data[-1])
                     if not success:
                         error_msg = f"Generator failed: {stderr}"
-                        logger.error(f"Task {task_id}: {error_msg}")
+                        task_logger.error(error_msg)
                         raise Exception(error_msg)
-                    logger.info(f"Task {task_id}: Generator completed successfully")
+                    task_logger.info("Generator completed successfully")
 
                     video_file = get_latest_video()
                     if not video_file:
                         error_msg = "No video file was generated"
-                        logger.error(f"Task {task_id}: {error_msg}")
+                        task_logger.error(error_msg)
                         raise Exception(error_msg)
-                    logger.info(f"Task {task_id}: Video file generated: {video_file}")
+                    task_logger.info(f"Video file generated: {video_file}")
                 
                 # Apply utilities in sequence
                 if task_data[3]:  # utilities JSON string
                     utilities = json.loads(task_data[3])
-                    step_msg = f"Task {task_id}: {'[DRY RUN] Would process' if dry_run else 'Processing'} {len(utilities)} utilities"
-                    logger.info(step_msg)
+                    step_msg = f"{'[DRY RUN] Would process' if dry_run else 'Processing'} {len(utilities)} utilities"
+                    task_logger.info(step_msg)
                     
                     for index, util_id in enumerate(utilities, 1):
                         c.execute("SELECT id, name, utility_curl FROM utilities WHERE id=?", (util_id,))
                         util = c.fetchone()
                         if not util:
-                            logger.warning(f"Task {task_id}: Utility {util_id} not found, skipping")
+                            task_logger.warning(f"Utility {util_id} not found, skipping")
                             continue
                         
                         if dry_run:
-                            logger.info(f"[DRY RUN] Task {task_id}: Would run utility {index}/{len(utilities)} - {util[1]}")
+                            task_logger.info(f"[DRY RUN] Would run utility {index}/{len(utilities)} - {util[1]}")
                             continue
                             
-                        logger.info(f"Task {task_id}: Running utility {index}/{len(utilities)} - {util[1]}")
+                        task_logger.info(f"Running utility {index}/{len(utilities)} - {util[1]}")
                         
                         # The utility will overwrite the input file
                         util_cmd = util[2].format(input=video_file)
                         success, stdout, stderr = execute_curl(util_cmd)
                         if not success:
                             error_msg = f"Utility {util[1]} ({index}/{len(utilities)}) failed: {stderr}"
-                            logger.error(f"Task {task_id}: {error_msg}")
+                            task_logger.error(error_msg)
                             raise Exception(error_msg)
                             
-                        logger.info(f"Task {task_id}: Completed utility {index}/{len(utilities)} - {util[1]}")
+                        task_logger.info(f"Completed utility {index}/{len(utilities)} - {util[1]}")
 
                 # For preview mode, save the processed video and return its path
                 if preview_mode and video_file:
                     preview_dir = get_preview_dir()
                     preview_path = os.path.join(preview_dir, f'preview_task_{task_id}.mp4')
                     if os.path.exists(preview_path):
-                        logger.info(f"Task {task_id}: Removing existing preview file")
+                        task_logger.info("Removing existing preview file")
                         os.remove(preview_path)
-                    logger.info(f"Task {task_id}: Saving preview to {preview_path}")
+                    task_logger.info(f"Saving preview to {preview_path}")
                     os.rename(video_file, preview_path)
-                    logger.info(f"Task {task_id}: Preview saved successfully")
+                    task_logger.info("Preview saved successfully")
                     c.execute("UPDATE tasks SET status='completed' WHERE id=?", (task_id,))
                     conn.commit()
                     return preview_path
@@ -184,16 +197,16 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                     """, (task_id,))
                     platform_data = c.fetchall()
                     if platform_data:
-                        logger.info(f"[DRY RUN] Task {task_id}: Would upload to {len(platform_data)} platforms")
+                        task_logger.info(f"[DRY RUN] Would upload to {len(platform_data)} platforms")
                         for platform_name, account_name in platform_data:
-                            logger.info(f"[DRY RUN] Task {task_id}: Would upload to {platform_name} with account {account_name}")
+                            task_logger.info(f"[DRY RUN] Would upload to {platform_name} with account {account_name}")
                     return True
 
                 # For preview mode, skip uploads
                 if preview_mode:
                     return None
 
-                logger.info(f"Task {task_id}: Video file path before upload: {video_file}")
+                task_logger.info(f"Video file path before upload: {video_file}")
 
                 # Process uploads using the new schema
                 c.execute("""
@@ -205,11 +218,11 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                 platform_data_list = c.fetchall()
 
                 if platform_data_list:
-                    logger.info(f"Task {task_id}: Processing {len(platform_data_list)} platform uploads")
+                    task_logger.info(f"Processing {len(platform_data_list)} platform uploads")
                     
                     for platform_data in platform_data_list:
                         platform_id, platform_name, upload_curl, account_name, default_hashtags = platform_data
-                        logger.info(f"Task {task_id}: Uploading to {platform_name} with account {account_name}")
+                        task_logger.info(f"Uploading to {platform_name} with account {account_name}")
                         
                         # Create platform_dict for format_upload_command
                         platform_dict = {
@@ -228,10 +241,10 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                         
                         if not success:
                             error_msg = f"Upload to {platform_name} failed: {stderr}"
-                            logger.error(f"Task {task_id}: {error_msg}")
+                            task_logger.error(error_msg)
                             raise Exception(error_msg)
                             
-                        logger.info(f"Task {task_id}: Successfully uploaded to {platform_name}")
+                        task_logger.info(f"Successfully uploaded to {platform_name}")
                 
                 # Update task status and send notification
                 c.execute("UPDATE tasks SET status='completed' WHERE id=?", (task_id,))
@@ -242,26 +255,26 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                     task_info = c.fetchone()
                     if task_info and task_info[2]:  # email_notify contains the email address
                         send_task_completion_notification(task_id, task_info[1], task_info[2], success=True)
-                    logger.info(f"Task {task_id}: Sent completion notification")
+                    task_logger.info("Sent completion notification")
                 
                 # Clean up video file unless it's a preview that we want to keep
                 if video_file and not preview_mode:
                     cleanup_video(video_file)
-                    logger.info(f"Task {task_id}: Cleaned up temporary video file")
+                    task_logger.info("Cleaned up temporary video file")
                 
                 return True
 
             except Exception as e:
-                error_msg = f"Pipeline error for task {task_id}: {str(e)}"
-                logger.error(error_msg)
+                error_msg = f"Pipeline error: {str(e)}"
+                task_logger.error(error_msg)
                 raise
                 
             finally:
                 pass
     
     except Exception as e:
-        error_msg = f"Task {task_id} failed in {mode} mode: {str(e)}"
-        logger.error(error_msg)
+        error_msg = f"Task failed in {mode} mode: {str(e)}"
+        task_logger.error(error_msg)
         
         # Send failure notification if email notifications are enabled
         if not (dry_run or preview_mode):
@@ -271,7 +284,7 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                 if task_info and task_info[2]:
                     send_task_completion_notification(task_id, task_info[1], task_info[2], success=False)
             except Exception as notify_error:
-                logger.error(f"Failed to send error notification: {str(notify_error)}")
+                task_logger.error(f"Failed to send error notification: {str(notify_error)}")
         
         raise
         
@@ -279,6 +292,6 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
         # Always release the lock for real runs
         if not (dry_run or preview_mode):
             release_lock()
-            logger.info(f"Task {task_id}: Released pipeline lock")
+            task_logger.info("Released pipeline lock")
         
-        logger.info(f"Task {task_id}: Completed {mode} mode")
+        task_logger.info(f"Completed {mode} mode")
