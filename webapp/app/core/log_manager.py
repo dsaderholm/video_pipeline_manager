@@ -49,6 +49,11 @@ class DatabaseLogHandler(logging.Handler):
                 # Get current timestamp with microseconds
                 current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
                 
+                # Get task_id from extra if it exists
+                task_id = record.__dict__.get('task_id')
+                if not task_id and hasattr(record, 'extra'):
+                    task_id = record.extra.get('task_id')
+                
                 # Add new log entry
                 c.execute('''
                     INSERT INTO logs (timestamp, level, message, task_id, details, source)
@@ -57,7 +62,7 @@ class DatabaseLogHandler(logging.Handler):
                     current_time,
                     record.levelname, 
                     record.getMessage(), 
-                    getattr(record, 'task_id', None),
+                    task_id,
                     json.dumps(getattr(record, 'details', None)) if hasattr(record, 'details') else None,
                     record.module
                 ))
@@ -135,10 +140,10 @@ def add_log_entry(level, message, task_id=None, details=None, source=None):
                 INSERT INTO logs (timestamp, level, message, task_id, details, source)
                 VALUES (?, ?, ?, ?, ?, ?)
             ''', (
-                current_time, 
-                level, 
-                message, 
-                task_id, 
+                current_time,
+                level,
+                message,
+                task_id,
                 json.dumps(details) if details else None,
                 source
             ))
