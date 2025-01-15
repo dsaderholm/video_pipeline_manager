@@ -243,16 +243,31 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
         task_data = {**task_defaults, **task_data}
         
         # Clean and validate paths
-        video_file = os.path.normpath(video_file)
+        video_file = os.path.abspath(video_file).replace('\\', '/')  # Convert Windows path to forward slashes
         
-        return cmd_template.format(
-            video=video_file.lstrip('@'),  # Just remove any leading @ since template has both @ and quotes
-            description=video_title,
+        # Log the exact file path being used
+        logger.info(f"Using video file path: {video_file}")
+        
+        # Verify file exists and is readable
+        if not os.path.exists(video_file):
+            raise FileNotFoundError(f"Video file not found: {video_file}")
+        if not os.access(video_file, os.R_OK):
+            raise PermissionError(f"Video file not readable: {video_file}")
+            
+        # Format the command with proper escaping of special characters
+        formatted_cmd = cmd_template.format(
+            video=video_file,  # Don't strip @ since we handle it in the template
+            description=shlex.quote(video_title) if video_title else '',
             account=platform_data['account_name'],
             sound=task_data['sound_name'],
             volume=task_data['sound_volume'],
             hashtags=task_data['hashtags']
         )
+        
+        # Log the formatted command for debugging
+        logger.info(f"Formatted upload command: {formatted_cmd}")
+        
+        return formatted_cmd
         
     except KeyError as e:
         logger.error(f"Missing required key in template data: {str(e)}")

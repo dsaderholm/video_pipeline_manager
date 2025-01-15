@@ -28,67 +28,89 @@ def load_smtp_config():
         config[var] = value
     
     if missing_vars:
-        raise ValueError(f"Missing required SMTP environment variables: {', '.join(missing_vars)}")
+        logger.warning(f"Missing SMTP environment variables: {', '.join(missing_vars)}")
+        return None
     
     return config
 
+def safely_parse_json(json_str, default=None):
+    """Safely parse JSON string with fallback to default"""
+    if not json_str:
+        return default
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        logger.warning(f"Failed to parse JSON: {json_str}")
+        return default
+
 def get_task_details(task_id):
     """Get detailed task information for email"""
-    with sqlite3.connect('pipeline.db') as conn:
-        c = conn.cursor()
-        
-        # Get task with generator name
-        c.execute("""
-            SELECT t.*, g.name as generator_name 
-            FROM tasks t
-            JOIN generators g ON t.generator_id = g.id
-            WHERE t.id = ?
-        """, (task_id,))
-        task = c.fetchone()
-        
-        if not task:
-            return None
+    try:
+        with sqlite3.connect('pipeline.db') as conn:
+            c = conn.cursor()
             
-        # Get utilities information
-        utilities = []
-        if task[3]:  # utilities JSON string
-            util_ids = json.loads(task[3])
+            # Get task with generator name
+            c.execute("""
+                SELECT t.*, g.name as generator_name 
+                FROM tasks t
+                JOIN generators g ON t.generator_id = g.id
+                WHERE t.id = ?
+            """, (task_id,))
+            task = c.fetchone()
+            
+            if not task:
+                logger.warning(f"No task found with ID {task_id}")
+                return None
+                
+            # Get utilities information
+            utilities = []
+            util_ids = safely_parse_json(task[3], [])
             if util_ids:
-                c.execute("""
-                    SELECT name 
-                    FROM utilities 
-                    WHERE id IN (%s)
-                """ % ','.join('?' * len(util_ids)), util_ids)
+                placeholders = ','.join('?' * len(util_ids))
+                c.execute(f"SELECT name FROM utilities WHERE id IN ({placeholders})", util_ids)
                 utilities = [u[0] for u in c.fetchall()]
-        
-        # Get platform names
-        platforms = []
-        if task[5]:  # platforms JSON string
-            platform_ids = json.loads(task[5])
+            
+            # Get platform names
+            platforms = []
+            platform_ids = safely_parse_json(task[5], [])
             if platform_ids:
-                c.execute("""
+                placeholders = ','.join('?' * len(platform_ids))
+                c.execute(f"""
                     SELECT platform, account_name 
                     FROM platform_accounts 
-                    WHERE id IN (%s)
-                """ % ','.join('?' * len(platform_ids)), platform_ids)
+                    WHERE id IN ({placeholders})
+                """, platform_ids)
                 platforms = [f"{p[0]} ({p[1]})" for p in c.fetchall()]
-        
-        return {
-            'id': task[0],
-            'name': task[1],
-            'generator': task[-1],  # generator_name from JOIN
-            'utilities': utilities,
-            'platforms': platforms,
-            'schedule': task[4],
-            'hashtags': task[6],
-            'sound_name': task[7],
-            'sound_volume': task[8],
-            'status': task[9],
-            'created_at': task[11]
-        }
+            
+            return {
+                'id': task[0],
+                'name': task[1],
+                'generator': task[-1],  # generator_name from JOIN
+                'utilities': utilities,
+                'platforms': platforms,
+                'schedule': task[4],
+                'hashtags': task[6],
+                'sound_name': task[7],
+                'sound_volume': task[8],
+                'status': task[9],
+                'created_at': task[11]
+            }
+    except Exception as e:
+        logger.error(f"Error getting task details: {str(e)}")
+        return None
 
 def format_task_info_html(task_info, success, base_url):
     """Format task information as HTML matching web UI style"""
+    if not task_info:
+        return """
+        <html>
+        <body style='font-family: sans-serif; color: #333;'>
+            <h2>Task Status Update</h2>
+            <p>The task has {status}, but detailed information is not available.</p>
+        </body>
+        </html>
+        """.format(status="completed successfully" if success else "failed")
+        
     status_color = "#22c55e" if success else "#ef4444"  # green-500 or red-500
     utilities_html = "".join([f"<li class='mb-1'><i class='fas fa-wrench mr-2'></i>{u}</li>" for u in task_info['utilities']]) if task_info['utilities'] else "None"
     platforms_html = "".join([f"<li class='mb-1'><i class='fas fa-share-alt mr-2'></i>{p}</li>" for p in task_info['platforms']]) if task_info['platforms'] else "None"
@@ -115,11 +137,9 @@ def format_task_info_html(task_info, success, base_url):
     return f"""
     <html>
     <head>
-        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-        <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" rel="stylesheet">
         <style>
             body {{
-                font-family: 'Inter', sans-serif;
+                font-family: sans-serif;
                 background-color: #111827;
                 color: #f3f4f6;
                 padding: 2rem;
@@ -188,22 +208,6 @@ def format_task_info_html(task_info, success, base_url):
                 border-top: 1px solid #374151;
                 color: #9ca3af;
                 font-size: 0.875rem;
-            }}
-            .action-button {{
-                display: inline-block;
-                padding: 0.5rem 1rem;
-                border-radius: 0.375rem;
-                text-decoration: none;
-                font-weight: 500;
-                margin: 0 0.5rem;
-            }}
-            .action-button.primary {{
-                background-color: #3b82f6;
-                color: white;
-            }}
-            .action-button.danger {{
-                background-color: #ef4444;
-                color: white;
             }}
         </style>
     </head>
@@ -291,7 +295,10 @@ def send_notification(to_emails, subject, message_html):
         
     try:
         config = load_smtp_config()
-        
+        if not config:
+            logger.warning("SMTP configuration not available, skipping notification")
+            return False
+            
         # Create the base message
         msg = MIMEMultipart('alternative')
         msg['From'] = config['SMTP_FROM_EMAIL']
@@ -323,22 +330,26 @@ def send_notification(to_emails, subject, message_html):
 
 def send_task_completion_notification(task_id, task_name, to_email, success=True):
     """Send a notification about task completion status with detailed information"""
-    status = "Completed Successfully" if success else "Failed"
-    subject = f"Video Pipeline Task {status}: {task_name}"
-    
-    # Handle multiple email recipients
-    to_emails = [email.strip() for email in to_email.split(',') if email.strip()] if to_email else []
-    
-    task_info = get_task_details(task_id)
-    if not task_info:
-        message_html = f"""
-        <div style='color: #f3f4f6; font-family: Inter, sans-serif;'>
-            Task {task_id} ({task_name}) {status.lower()}, but details are not available.
-        </div>
-        """
+    try:
+        status = "Completed Successfully" if success else "Failed"
+        subject = f"Video Pipeline Task {status}: {task_name}"
+        
+        # Handle multiple email recipients
+        to_emails = [email.strip() for email in to_email.split(',') if email.strip()] if to_email else []
+        if not to_emails:
+            logger.warning(f"No valid email recipients for task {task_id}")
+            return False
+            
+        task_info = get_task_details(task_id)
+        
+        config = load_smtp_config()
+        if not config:
+            return False
+            
+        base_url = config['APP_URL'].rstrip('/')
+        message_html = format_task_info_html(task_info, success, base_url)
+        
         return send_notification(to_emails, subject, message_html)
-    
-    config = load_smtp_config()
-    base_url = config['APP_URL'].rstrip('/')
-    message_html = format_task_info_html(task_info, success, base_url)
-    return send_notification(to_emails, subject, message_html)
+    except Exception as e:
+        logger.error(f"Error sending task completion notification: {str(e)}")
+        return False
