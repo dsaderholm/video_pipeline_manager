@@ -243,25 +243,29 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
         task_data = {**task_defaults, **task_data}
         
         # Clean and validate paths
-        video_file = os.path.abspath(video_file).replace('\\', '/')  # Convert Windows path to forward slashes
+        video_file = os.path.abspath(video_file).replace('\\', '/').replace('"', '\\"')  # Handle double quotes in path
         
         # Log the exact file path being used
         logger.info(f"Using video file path: {video_file}")
         
         # Verify file exists and is readable
-        if not os.path.exists(video_file):
+        if not os.path.exists(video_file.replace('\\"', '"')):  # Check the actual path without escapes
             raise FileNotFoundError(f"Video file not found: {video_file}")
-        if not os.access(video_file, os.R_OK):
+        if not os.access(video_file.replace('\\"', '"'), os.R_OK):
             raise PermissionError(f"Video file not readable: {video_file}")
             
-        # Format the command with proper escaping of special characters
+        # The video path needs special handling for spaces and special characters
+        video_path = f'"{video_file}"'  # Wrap in double quotes
+        video_path = video_path.replace(' ', '\\ ')  # Escape spaces for shell
+        
+        # Format the command ensuring each form field is properly quoted
         formatted_cmd = cmd_template.format(
-            video=video_file,  # Don't strip @ since we handle it in the template
+            video=video_path,
             description=shlex.quote(video_title) if video_title else '',
-            account=platform_data['account_name'],
-            sound=task_data['sound_name'],
+            account=shlex.quote(platform_data['account_name']),
+            sound=shlex.quote(task_data['sound_name']),
             volume=task_data['sound_volume'],
-            hashtags=task_data['hashtags']
+            hashtags=shlex.quote(task_data['hashtags'])
         )
         
         # Log the formatted command for debugging
