@@ -242,8 +242,10 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
         }
         task_data = {**task_defaults, **task_data}
         
-        # Clean and validate paths
-        video_file = os.path.abspath(video_file).replace('\\', '/')
+        # Clean and validate paths - handle Linux paths
+        video_file = os.path.abspath(video_file)
+        # Ensure forward slashes for Linux
+        video_file = video_file.replace('\\', '/')
         
         # Log the exact file path being used
         logger.info(f"Using video file path: {video_file}")
@@ -254,8 +256,8 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
         if not os.access(video_file, os.R_OK):
             raise PermissionError(f"Video file not readable: {video_file}")
             
-        # Just wrap the path in quotes, let curl handle the escaping
-        video_path = f'"{video_file}"'
+        # For Linux curl, we need to properly escape the path
+        video_path = shlex.quote(video_file)
         
         # Format the command ensuring each form field is properly quoted
         formatted_cmd = cmd_template.format(
