@@ -243,20 +243,19 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
         task_data = {**task_defaults, **task_data}
         
         # Clean and validate paths
-        video_file = os.path.abspath(video_file).replace('\\', '/').replace('"', '\\"')  # Handle double quotes in path
+        video_file = os.path.abspath(video_file).replace('\\', '/')
         
         # Log the exact file path being used
         logger.info(f"Using video file path: {video_file}")
         
         # Verify file exists and is readable
-        if not os.path.exists(video_file.replace('\\"', '"')):  # Check the actual path without escapes
+        if not os.path.exists(video_file):
             raise FileNotFoundError(f"Video file not found: {video_file}")
-        if not os.access(video_file.replace('\\"', '"'), os.R_OK):
+        if not os.access(video_file, os.R_OK):
             raise PermissionError(f"Video file not readable: {video_file}")
             
-        # The video path needs special handling for spaces and special characters
-        video_path = f'"{video_file}"'  # Wrap in double quotes
-        video_path = video_path.replace(' ', '\\ ')  # Escape spaces for shell
+        # Just wrap the path in quotes, let curl handle the escaping
+        video_path = f'"{video_file}"'
         
         # Format the command ensuring each form field is properly quoted
         formatted_cmd = cmd_template.format(
