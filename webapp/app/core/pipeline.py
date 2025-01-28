@@ -3,6 +3,7 @@ import json
 import time
 import os
 import logging
+import shutil
 from app import logger
 from app.core.utils import execute_curl, get_latest_video, cleanup_video, format_upload_command
 from app.core.email_utils import send_task_completion_notification
@@ -87,6 +88,9 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
     mode = "dry run" if dry_run else "preview" if preview_mode else "normal"
     task_logger.info(f"Starting task in {mode} mode")
     
+    current_video_file = None
+    safe_video_path = None
+    
     # For dry runs or previews, we don't need to acquire a lock
     if not (dry_run or preview_mode) and not check_and_set_lock():
         task_logger.info("Another task is currently running. Task will retry later.")
@@ -126,8 +130,6 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                 'sound_volume': task_data[7]
             }
 
-            video_file = None
-            preview_path = None
             try:
                 # Generate initial video
                 if dry_run:
@@ -141,12 +143,12 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                         raise Exception(error_msg)
                     task_logger.info("Generator completed successfully")
 
-                    video_file = get_latest_video()
-                    if not video_file:
+                    current_video_file = get_latest_video()
+                    if not current_video_file:
                         error_msg = "No video file was generated"
                         task_logger.error(error_msg)
                         raise Exception(error_msg)
-                    task_logger.info(f"Video file generated: {video_file}")
+                    task_logger.info(f"Video file generated: {current_video_file}")
                 
                 # Apply utilities in sequence
                 if task_data[3]:  # utilities JSON string
@@ -167,8 +169,8 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                             
                         task_logger.info(f"Running utility {index}/{len(utilities)} - {util[1]}")
                         
-                        # The utility will overwrite the input file
-                        util_cmd = util[2].format(input=video_file)
+                        # Apply the utility using the current video file path
+                        util_cmd = util[2].format(input=current_video_file)
                         success, stdout, stderr = execute_curl(util_cmd)
                         if not success:
                             error_msg = f"Utility {util[1]} ({index}/{len(utilities)}) failed: {stderr}"
@@ -178,14 +180,14 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                         task_logger.info(f"Completed utility {index}/{len(utilities)} - {util[1]}")
 
                 # For preview mode, save the processed video and return its path
-                if preview_mode and video_file:
+                if preview_mode and current_video_file:
                     preview_dir = get_preview_dir()
                     preview_path = os.path.join(preview_dir, f'preview_task_{task_id}.mp4')
                     if os.path.exists(preview_path):
                         task_logger.info("Removing existing preview file")
                         os.remove(preview_path)
                     task_logger.info(f"Saving preview to {preview_path}")
-                    os.rename(video_file, preview_path)
+                    shutil.copy2(current_video_file, preview_path)
                     task_logger.info("Preview saved successfully")
                     c.execute("UPDATE tasks SET status='completed' WHERE id=?", (task_id,))
                     conn.commit()
@@ -210,7 +212,7 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                 if preview_mode:
                     return None
 
-                task_logger.info(f"Video file path before upload: {video_file}")
+                task_logger.info(f"Video file path before upload: {current_video_file}")
 
                 # Process uploads using the new schema
                 c.execute("""
@@ -235,13 +237,25 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                         }
                         
                         # Format the upload command with all required parameters
-                        upload_cmd = format_upload_command(
+                        # This now returns both the command and the safe file path
+                        upload_cmd, safe_video_path = format_upload_command(
                             upload_curl,
-                            video_file,
+                            current_video_file,
                             task_dict,
                             platform_dict
                         )
+                        
+                        if not upload_cmd or not safe_video_path:
+                            raise Exception("Failed to prepare upload command or safe video path")
+                        
                         success, stdout, stderr = execute_curl(upload_cmd)
+                        
+                        # Restore original filename after upload attempt
+                        try:
+                            if os.path.exists(safe_video_path):
+                                os.rename(safe_video_path, current_video_file)
+                        except OSError as e:
+                            task_logger.error(f"Failed to restore original filename: {e}")
                         
                         if not success:
                             error_msg = f"Upload to {platform_name} failed: {stderr}"
@@ -262,19 +276,32 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                     task_logger.info("Sent completion notification")
                 
                 # Clean up video file unless it's a preview that we want to keep
-                if video_file and not preview_mode:
-                    cleanup_video(video_file)
-                    task_logger.info("Cleaned up temporary video file")
+                if current_video_file and not preview_mode:
+                    cleanup_video(current_video_file)
+                    if safe_video_path and os.path.exists(safe_video_path):
+                        cleanup_video(safe_video_path)
+                    task_logger.info("Cleaned up temporary video files")
                 
                 return True
 
             except Exception as e:
                 error_msg = f"Pipeline error: {str(e)}"
                 task_logger.error(error_msg)
+                # Clean up any remaining safe video path if exists
+                if safe_video_path and os.path.exists(safe_video_path):
+                    try:
+                        os.rename(safe_video_path, current_video_file)
+                    except OSError:
+                        pass
                 raise
                 
             finally:
-                pass
+                # Always try to restore original filename if safe path exists
+                if safe_video_path and os.path.exists(safe_video_path):
+                    try:
+                        os.rename(safe_video_path, current_video_file)
+                    except OSError:
+                        pass
     
     except Exception as e:
         error_msg = f"Task failed in {mode} mode: {str(e)}"

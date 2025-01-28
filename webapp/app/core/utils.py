@@ -3,6 +3,7 @@ import time
 import glob
 import os
 import shlex
+import uuid
 from datetime import datetime
 from app import logger
 
@@ -84,7 +85,7 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False):
 
             # Communicate with timeout
             try:
-                stdout, stderr = process.communicate(timeout=1200)  # 6-minute timeout
+                stdout, stderr = process.communicate(timeout=1200)  # 20-minute timeout
                 stdout_str = stdout.decode(errors='replace')
                 stderr_str = stderr.decode(errors='replace')
             except subprocess.TimeoutExpired:
@@ -212,9 +213,24 @@ def cleanup_video(video_file):
         logger.error(f"Error removing video file {video_file}: {str(e)}")
         logger.exception(e)
 
+def create_safe_filename(original_path):
+    """
+    Creates a safe temporary filename while preserving the original name for reference.
+    
+    Args:
+        original_path (str): Original file path
+        
+    Returns:
+        tuple: (safe_path, original_name)
+    """
+    directory = os.path.dirname(original_path) or '.'
+    original_name = os.path.basename(original_path)
+    safe_name = f"upload_{uuid.uuid4().hex[:8]}.mp4"
+    return os.path.join(directory, safe_name), original_name
+
 def format_upload_command(cmd_template, video_file, task_data, platform_data):
     """
-    Format an upload command with improved parameter handling
+    Format an upload command with improved parameter handling and safe file operations
     
     Args:
         cmd_template (str): Template string for the command
@@ -223,56 +239,49 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
         platform_data (dict): Platform-specific data
         
     Returns:
-        str: Formatted command string
+        tuple: (formatted_command: str, safe_video_path: str)
     """
     try:
-        video_title = os.path.splitext(os.path.basename(video_file))[0]
+        # Create a safe temporary filename for the upload while preserving original name
+        safe_video_path, original_name = create_safe_filename(video_file)
+        
+        # Rename the file to the safe name
+        try:
+            os.rename(video_file, safe_video_path)
+            logger.info(f"Renamed '{video_file}' to '{safe_video_path}' for safe upload")
+        except OSError as e:
+            logger.error(f"Failed to rename video file: {e}")
+            return None, None
+
+        # Get the title from the original filename (without .mp4)
+        video_title = os.path.splitext(original_name)[0]
         
         # Ensure all required keys exist with defaults
         platform_defaults = {
             'account_name': 'default_account',
             'default_hashtags': ''
         }
-        platform_data = {**platform_defaults, **platform_data}
+        platform_data = {**platform_defaults, **(platform_data or {})}
         
         task_defaults = {
             'sound_name': 'default',
             'sound_volume': 'background',
             'hashtags': platform_data['default_hashtags']
         }
-        task_data = {**task_defaults, **task_data}
-        
-        # Clean and validate paths - handle Linux paths
-        video_file = os.path.abspath(video_file)
-        # Ensure forward slashes for Linux
-        video_file = video_file.replace('\\', '/')
-        
-        # Log the exact file path being used
-        logger.info(f"Using video file path: {video_file}")
-        
-        # Verify file exists and is readable
-        if not os.path.exists(video_file):
-            raise FileNotFoundError(f"Video file not found: {video_file}")
-        if not os.access(video_file, os.R_OK):
-            raise PermissionError(f"Video file not readable: {video_file}")
-            
-        # For Linux curl, we need to properly escape the path
-        video_path = shlex.quote(video_file)
-        
-        # Format the command ensuring each form field is properly quoted
+        task_data = {**task_defaults, **(task_data or {})}
+
+        # Format the command using the safe file path but original title
         formatted_cmd = cmd_template.format(
-            video=video_path,
-            description=shlex.quote(video_title) if video_title else '',
+            video=safe_video_path,
+            description=shlex.quote(video_title),
             account=shlex.quote(platform_data['account_name']),
             sound=shlex.quote(task_data['sound_name']),
             volume=task_data['sound_volume'],
             hashtags=shlex.quote(task_data['hashtags'])
         )
         
-        # Log the formatted command for debugging
         logger.info(f"Formatted upload command: {formatted_cmd}")
-        
-        return formatted_cmd
+        return formatted_cmd, safe_video_path
         
     except KeyError as e:
         logger.error(f"Missing required key in template data: {str(e)}")
