@@ -115,20 +115,30 @@ def check_curl_response(stdout_str, stderr_str):
         (r'SSL certificate problem', True),
         (r'error:', True),
         (r'HTTP/\d\.\d 5\d{2}', True),  # Server errors
-        (r'HTTP/\d\.\d 4\d{2}', True),  # Client errors
-        (r'success|successful', False),  # Success indicators
-        (r'HTTP/\d\.\d 2\d{2}', False)  # Success codes
+        (r'HTTP/\d\.\d 4\d{2}', True)  # Client errors
     ]
     
+    # Check for success patterns
+    success_patterns = [
+        r'HTTP/\d\.\d 2\d{2}',  # Success codes
+        r'success|successful'    # Success indicators
+    ]
+
+    # First check for success patterns
+    for pattern in success_patterns:
+        if re.search(pattern, stdout_str + stderr_str, re.IGNORECASE):
+            return True, ""
+
+    # Then check for error patterns
     for pattern, is_error in error_patterns:
         if re.search(pattern, stdout_str + stderr_str, re.IGNORECASE):
-            if is_error:
-                return False, f"Found error pattern: {pattern}"
-            else:
-                return True, ""
+            return False, f"Found error pattern: {pattern}"
     
-    # If no clear success/error indicators, check if stderr is empty
-    if stderr_str.strip():
+    # Check if stderr contains only Werkzeug logs
+    stderr_lines = stderr_str.strip().split('\n')
+    non_werkzeug_lines = [line for line in stderr_lines if line.strip() and not line.strip().startswith('INFO:werkzeug:')]
+    
+    if non_werkzeug_lines:
         return False, "Unexpected error in stderr"
     
     return True, ""
