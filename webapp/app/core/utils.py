@@ -63,20 +63,12 @@ def cleanup_existing_mp4s():
 def ensure_directory_writable(directory="."):
     """
     Check if a directory is writable
-    
-    Args:
-        directory (str): Directory to check
-        
-    Returns:
-        bool: True if the directory is writable, False otherwise
     """
     try:
-        # Check directory exists and is writable
         if not os.path.exists(directory):
             os.makedirs(directory, exist_ok=True)
             logger.info(f"Created directory: {directory}")
             
-        # Verify we can write to the directory
         test_file = os.path.join(directory, '.write_test')
         try:
             with open(test_file, 'w') as f:
@@ -134,28 +126,28 @@ def check_curl_response(stdout_str, stderr_str):
         if re.search(pattern, stdout_str + stderr_str, re.IGNORECASE):
             return False, f"Found error pattern: {pattern}"
     
-    # Check if stderr contains only Werkzeug logs
+    # Check if stderr contains only acceptable output
     stderr_lines = stderr_str.strip().split('\n')
-    non_werkzeug_lines = [line for line in stderr_lines if line.strip() and not line.strip().startswith('INFO:werkzeug:')]
+    non_acceptable_lines = []
+    for line in stderr_lines:
+        line = line.strip()
+        if line and not any([
+            line.startswith('INFO:werkzeug:'),  # Werkzeug logs
+            line.startswith('  % Total'),       # Curl progress
+            re.match(r'\s*\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+\d+\s+', line),  # Progress numbers
+            '--:--:--' in line,                 # Progress timing
+            'Speed' in line                     # Progress speed
+        ]):
+            non_acceptable_lines.append(line)
     
-    if non_werkzeug_lines:
+    if non_acceptable_lines:
         return False, "Unexpected error in stderr"
     
     return True, ""
 
-def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, validate_output=False):
+def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, validate_output=False, timeout=3600):
     """
     Execute a CURL command with retries and improved error handling
-    
-    Args:
-        curl_command (str): The curl command to execute
-        retries (int): Number of retry attempts
-        retry_delay (int): Delay between retries in seconds
-        clean_before (bool): Whether to clean up existing .mp4 files before execution
-        validate_output (bool): Whether to validate video output after execution
-        
-    Returns:
-        tuple: (success: bool, stdout: str, stderr: str)
     """
     if not ensure_directory_writable():
         return False, "", "Failed to verify directory is writable"
@@ -175,7 +167,7 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
             )
 
             try:
-                stdout, stderr = process.communicate(timeout=1200)
+                stdout, stderr = process.communicate(timeout=timeout)
                 stdout_str = stdout.decode(errors='replace')
                 stderr_str = stderr.decode(errors='replace')
             except subprocess.TimeoutExpired:
@@ -229,14 +221,6 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
 def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
     """
     Get the most recently created MP4 file in the current directory with improved validation.
-    
-    Args:
-        max_retries (int): Maximum number of attempts to find the video file
-        delay (int): Delay in seconds between attempts
-        min_size_bytes (int): Minimum file size to consider valid
-        
-    Returns:
-        str: Path to the video file or None if not found
     """
     start_time = datetime.now()
     
@@ -246,12 +230,9 @@ def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
         
         for video in video_files:
             try:
-                # Check if file is fully written and meets minimum size
                 if os.path.exists(video) and os.path.getsize(video) >= min_size_bytes:
-                    # Try to open the file to ensure it's not being written to
                     try:
                         with open(video, 'rb') as f:
-                            # Read the last byte to ensure file is complete
                             f.seek(-1, 2)
                             f.read(1)
                         valid_videos.append(video)
@@ -278,12 +259,7 @@ def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
     return None
 
 def cleanup_video(video_file):
-    """
-    Clean up a video file with improved error handling and logging
-    
-    Args:
-        video_file (str): Path to the video file to clean up
-    """
+    """Clean up a video file"""
     if not video_file:
         return
 
@@ -292,7 +268,6 @@ def cleanup_video(video_file):
             file_size = os.path.getsize(video_file)
             logger.info(f"Cleaning up video file: {video_file} (size: {file_size} bytes)")
             
-            # Try to ensure file is not in use
             retries = 3
             for i in range(retries):
                 try:
@@ -310,33 +285,14 @@ def cleanup_video(video_file):
         logger.exception(e)
 
 def create_safe_filename(original_path):
-    """
-    Creates a safe temporary filename while preserving the original name for reference.
-    
-    Args:
-        original_path (str): Original file path
-        
-    Returns:
-        tuple: (safe_path, original_name)
-    """
+    """Creates a safe temporary filename"""
     directory = os.path.dirname(original_path) or '.'
     original_name = os.path.basename(original_path)
     safe_name = f"upload_{uuid.uuid4().hex[:8]}.mp4"
     return os.path.join(directory, safe_name), original_name
 
 def format_upload_command(cmd_template, video_file, task_data, platform_data):
-    """
-    Format an upload command with improved parameter handling and safe file operations
-    
-    Args:
-        cmd_template (str): Template string for the command
-        video_file (str): Path to the video file
-        task_data (dict): Task-specific data
-        platform_data (dict): Platform-specific data
-        
-    Returns:
-        tuple: (formatted_command: str, safe_video_path: str)
-    """
+    """Format an upload command"""
     try:
         safe_video_path, original_name = create_safe_filename(video_file)
         try:
@@ -361,10 +317,8 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
         }
         task_data = {**task_defaults, **(task_data or {})}
 
-        # Clean hashtags by removing any empty tags and ensuring proper format
         hashtags = task_data['hashtags']
         if hashtags:
-            # Split by spaces, remove empty strings, ensure # prefix
             tags = [tag.strip() for tag in hashtags.split() if tag.strip()]
             tags = [tag if tag.startswith('#') else f'#{tag}' for tag in tags]
             hashtags = ' '.join(tags)
