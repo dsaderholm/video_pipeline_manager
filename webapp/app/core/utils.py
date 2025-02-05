@@ -5,15 +5,13 @@ import os
 import shlex
 import uuid
 import urllib.parse
+import re
 from datetime import datetime
 from app import logger
 
 def cleanup_existing_mp4s():
-    """
-    Clean up any existing .mp4 files in the current directory
-    """
     try:
-        for file in glob.glob("*.mp4*"):  # This will catch .mp4, .mp4.1, .mp4.2, etc.
+        for file in glob.glob("*.mp4*"):
             try:
                 os.remove(file)
                 logger.info(f"Cleaned up existing file: {file}")
@@ -23,22 +21,11 @@ def cleanup_existing_mp4s():
         logger.error(f"Error during cleanup: {e}")
 
 def ensure_directory_writable(directory="."):
-    """
-    Check if a directory is writable
-    
-    Args:
-        directory (str): Directory to check
-        
-    Returns:
-        bool: True if the directory is writable, False otherwise
-    """
     try:
-        # Check directory exists and is writable
         if not os.path.exists(directory):
             os.makedirs(directory, exist_ok=True)
             logger.info(f"Created directory: {directory}")
             
-        # Verify we can write to the directory
         test_file = os.path.join(directory, '.write_test')
         try:
             with open(test_file, 'w') as f:
@@ -53,40 +40,68 @@ def ensure_directory_writable(directory="."):
         logger.error(f"Error checking directory {directory}: {str(e)}")
         return False
 
-def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False):
+def check_curl_response(stdout_str, stderr_str):
     """
-    Execute a CURL command with retries and improved error handling
+    Check curl response for success/failure indicators
+    Returns: (bool, str) - (success, error_message)
+    """
+    # Check for HTTP response codes
+    http_code_match = re.search(r'HTTP/\d\.\d\s+(\d{3})', stdout_str + stderr_str)
+    if http_code_match:
+        code = int(http_code_match.group(1))
+        if code >= 400:
+            return False, f"HTTP error {code}"
+        if code >= 200 and code < 300:
+            return True, ""
     
-    Args:
-        curl_command (str): The curl command to execute
-        retries (int): Number of retry attempts
-        retry_delay (int): Delay between retries in seconds
-        clean_before (bool): Whether to clean up existing .mp4 files before execution
-        
-    Returns:
-        tuple: (success: bool, stdout: str, stderr: str)
-    """
+    # Check for common curl errors
+    error_patterns = [
+        (r'curl:\s*\(\d+\)', True),  # Curl error codes
+        (r'Connection refused', True),
+        (r'Could not resolve host', True),
+        (r'Failed to connect', True),
+        (r'Operation timed out', True),
+        (r'SSL certificate problem', True),
+        (r'error:', True),
+        (r'HTTP/\d\.\d 5\d{2}', True),  # Server errors
+        (r'HTTP/\d\.\d 4\d{2}', True),  # Client errors
+        (r'success|successful', False),  # Success indicators
+        (r'HTTP/\d\.\d 2\d{2}', False)  # Success codes
+    ]
+    
+    for pattern, is_error in error_patterns:
+        if re.search(pattern, stdout_str + stderr_str, re.IGNORECASE):
+            if is_error:
+                return False, f"Found error pattern: {pattern}"
+            else:
+                return True, ""
+    
+    # If no clear success/error indicators, check if stderr is empty
+    if stderr_str.strip():
+        return False, "Unexpected error in stderr"
+    
+    return True, ""
+
+def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False):
     if not ensure_directory_writable():
         return False, "", "Failed to verify directory is writable"
 
     if clean_before:
         cleanup_existing_mp4s()
 
-    # Always use shell=True for complex curl commands
     for attempt in range(retries):
         try:
             logger.info(f"Attempt {attempt + 1}/{retries}: Executing command: {curl_command}")
             
             process = subprocess.Popen(
                 curl_command,
-                shell=True,  # Always use shell=True for curl commands
+                shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
             )
 
-            # Communicate with timeout
             try:
-                stdout, stderr = process.communicate(timeout=1200)  # 20-minute timeout
+                stdout, stderr = process.communicate(timeout=1200)
                 stdout_str = stdout.decode(errors='replace')
                 stderr_str = stderr.decode(errors='replace')
             except subprocess.TimeoutExpired:
@@ -94,32 +109,26 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False):
                 logger.error("Process timed out")
                 return False, "", "Process timed out"
 
-            # Log output
             if stdout_str:
                 logger.info(f"Stdout: {stdout_str[:1000]}...")
-            
-            # Check if command was successful but taking too long
-            if "200" in stdout_str and attempt < retries - 1:
-                logger.info("Command returned 200 but waiting for file...")
-                time.sleep(retry_delay * 5)  # Wait longer between retries
-                continue
-                
             if stderr_str:
                 logger.warning(f"Stderr: {stderr_str}")
 
-            # Check if command was successful
-            if process.returncode == 0:
+            # Check curl response
+            success, error_msg = check_curl_response(stdout_str, stderr_str)
+            if success:
+                if "200" in stdout_str and attempt < retries - 1:
+                    logger.info("Command returned 200 but waiting for file...")
+                    time.sleep(retry_delay * 5)
+                    continue
                 return True, stdout_str, stderr_str
 
-            logger.error(f"Command failed with return code {process.returncode}")
-            
-            # Specific error handling
-            if "Failed writing header" in stderr_str or "Failed to open" in stderr_str:
-                if attempt < retries - 1:
-                    logger.info("Retrying due to file writing error...")
-                    time.sleep(retry_delay * (attempt + 1))
-                    continue
-                return False, stdout_str, "Failed writing file"
+            logger.error(f"Command failed: {error_msg}")
+            if attempt < retries - 1:
+                retry_delay_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                logger.info(f"Retrying in {retry_delay_time} seconds...")
+                time.sleep(retry_delay_time)
+                continue
 
         except Exception as e:
             logger.error(f"Error executing CURL command (attempt {attempt+1}): {str(e)}")
@@ -132,17 +141,6 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False):
     return False, "", f"Failed after {retries} attempts"
 
 def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
-    """
-    Get the most recently created MP4 file in the current directory with improved validation.
-    
-    Args:
-        max_retries (int): Maximum number of attempts to find the video file
-        delay (int): Delay in seconds between attempts
-        min_size_bytes (int): Minimum file size to consider valid
-        
-    Returns:
-        str: Path to the video file or None if not found
-    """
     start_time = datetime.now()
     
     for attempt in range(max_retries):
@@ -151,12 +149,9 @@ def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
         
         for video in video_files:
             try:
-                # Check if file is fully written and meets minimum size
                 if os.path.exists(video) and os.path.getsize(video) >= min_size_bytes:
-                    # Try to open the file to ensure it's not being written to
                     try:
                         with open(video, 'rb') as f:
-                            # Read the last byte to ensure file is complete
                             f.seek(-1, 2)
                             f.read(1)
                         valid_videos.append(video)
@@ -183,12 +178,6 @@ def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
     return None
 
 def cleanup_video(video_file):
-    """
-    Clean up a video file with improved error handling and logging
-    
-    Args:
-        video_file (str): Path to the video file to clean up
-    """
     if not video_file:
         return
 
@@ -197,7 +186,6 @@ def cleanup_video(video_file):
             file_size = os.path.getsize(video_file)
             logger.info(f"Cleaning up video file: {video_file} (size: {file_size} bytes)")
             
-            # Try to ensure file is not in use
             retries = 3
             for i in range(retries):
                 try:
@@ -215,33 +203,12 @@ def cleanup_video(video_file):
         logger.exception(e)
 
 def create_safe_filename(original_path):
-    """
-    Creates a safe temporary filename while preserving the original name for reference.
-    
-    Args:
-        original_path (str): Original file path
-        
-    Returns:
-        tuple: (safe_path, original_name)
-    """
     directory = os.path.dirname(original_path) or '.'
     original_name = os.path.basename(original_path)
     safe_name = f"upload_{uuid.uuid4().hex[:8]}.mp4"
     return os.path.join(directory, safe_name), original_name
 
 def format_upload_command(cmd_template, video_file, task_data, platform_data):
-    """
-    Format an upload command with improved parameter handling and safe file operations
-    
-    Args:
-        cmd_template (str): Template string for the command
-        video_file (str): Path to the video file
-        task_data (dict): Task-specific data
-        platform_data (dict): Platform-specific data
-        
-    Returns:
-        tuple: (formatted_command: str, safe_video_path: str)
-    """
     try:
         safe_video_path, original_name = create_safe_filename(video_file)
         try:
@@ -266,10 +233,8 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
         }
         task_data = {**task_defaults, **(task_data or {})}
 
-        # Clean hashtags by removing any empty tags and ensuring proper format
         hashtags = task_data['hashtags']
         if hashtags:
-            # Split by spaces, remove empty strings, ensure # prefix
             tags = [tag.strip() for tag in hashtags.split() if tag.strip()]
             tags = [tag if tag.startswith('#') else f'#{tag}' for tag in tags]
             hashtags = ' '.join(tags)
