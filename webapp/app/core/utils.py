@@ -4,6 +4,7 @@ import glob
 import os
 import shlex
 import uuid
+import urllib.parse
 from datetime import datetime
 from app import logger
 
@@ -242,10 +243,7 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
         tuple: (formatted_command: str, safe_video_path: str)
     """
     try:
-        # Create a safe temporary filename for the upload while preserving original name
         safe_video_path, original_name = create_safe_filename(video_file)
-        
-        # Rename the file to the safe name
         try:
             os.rename(video_file, safe_video_path)
             logger.info(f"Renamed '{video_file}' to '{safe_video_path}' for safe upload")
@@ -253,10 +251,8 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
             logger.error(f"Failed to rename video file: {e}")
             return None, None
 
-        # Get the title from the original filename (without .mp4)
         video_title = os.path.splitext(original_name)[0]
         
-        # Ensure all required keys exist with defaults
         platform_defaults = {
             'account_name': 'default_account',
             'default_hashtags': ''
@@ -270,14 +266,21 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
         }
         task_data = {**task_defaults, **(task_data or {})}
 
-        # Format the command using the safe file path but original title
+        # Clean hashtags by removing any empty tags and ensuring proper format
+        hashtags = task_data['hashtags']
+        if hashtags:
+            # Split by spaces, remove empty strings, ensure # prefix
+            tags = [tag.strip() for tag in hashtags.split() if tag.strip()]
+            tags = [tag if tag.startswith('#') else f'#{tag}' for tag in tags]
+            hashtags = ' '.join(tags)
+
         formatted_cmd = cmd_template.format(
             video=safe_video_path,
-            description=shlex.quote(video_title),
-            account=shlex.quote(platform_data['account_name']),
-            sound=shlex.quote(task_data['sound_name']),
+            description=urllib.parse.quote(video_title),
+            account=urllib.parse.quote(platform_data['account_name']),
+            sound=urllib.parse.quote(task_data['sound_name']),
             volume=task_data['sound_volume'],
-            hashtags=shlex.quote(task_data['hashtags'])
+            hashtags=urllib.parse.quote(hashtags)
         )
         
         logger.info(f"Formatted upload command: {formatted_cmd}")
