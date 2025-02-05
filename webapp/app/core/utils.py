@@ -9,9 +9,49 @@ import re
 from datetime import datetime
 from app import logger
 
-def cleanup_existing_mp4s():
+def validate_video_file(file_path, min_size_bytes=1024):
+    """
+    Validate a video file by checking its header and structure
+    """
+    if not os.path.exists(file_path):
+        return False, "File does not exist"
+        
+    if os.path.getsize(file_path) < min_size_bytes:
+        return False, f"File too small (< {min_size_bytes} bytes)"
+        
     try:
-        for file in glob.glob("*.mp4*"):
+        # Check MP4 file signature (first 8 bytes)
+        with open(file_path, 'rb') as f:
+            header = f.read(8)
+            # Valid MP4 signatures: ftyp, mdat, moov, free, wide, skip
+            if not any(sig in header for sig in [b'ftyp', b'mdat', b'moov', b'free', b'wide', b'skip']):
+                return False, "Invalid MP4 header"
+            
+            # Check if file is readable till the end
+            f.seek(-1, 2)
+            f.read(1)
+            
+            # Run ffprobe to check video stream
+            result = subprocess.run(
+                ['ffprobe', '-v', 'error', file_path],
+                stderr=subprocess.PIPE,
+                stdout=subprocess.PIPE
+            )
+            
+            if result.returncode != 0:
+                return False, f"FFprobe validation failed: {result.stderr.decode()}"
+                
+            return True, "Video file is valid"
+            
+    except Exception as e:
+        return False, f"Validation error: {str(e)}"
+
+def cleanup_existing_mp4s():
+    """
+    Clean up any existing .mp4 files in the current directory
+    """
+    try:
+        for file in glob.glob("*.mp4*"):  # This will catch .mp4, .mp4.1, .mp4.2, etc.
             try:
                 os.remove(file)
                 logger.info(f"Cleaned up existing file: {file}")
@@ -21,11 +61,22 @@ def cleanup_existing_mp4s():
         logger.error(f"Error during cleanup: {e}")
 
 def ensure_directory_writable(directory="."):
+    """
+    Check if a directory is writable
+    
+    Args:
+        directory (str): Directory to check
+        
+    Returns:
+        bool: True if the directory is writable, False otherwise
+    """
     try:
+        # Check directory exists and is writable
         if not os.path.exists(directory):
             os.makedirs(directory, exist_ok=True)
             logger.info(f"Created directory: {directory}")
             
+        # Verify we can write to the directory
         test_file = os.path.join(directory, '.write_test')
         try:
             with open(test_file, 'w') as f:
@@ -82,7 +133,20 @@ def check_curl_response(stdout_str, stderr_str):
     
     return True, ""
 
-def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False):
+def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, validate_output=False):
+    """
+    Execute a CURL command with retries and improved error handling
+    
+    Args:
+        curl_command (str): The curl command to execute
+        retries (int): Number of retry attempts
+        retry_delay (int): Delay between retries in seconds
+        clean_before (bool): Whether to clean up existing .mp4 files before execution
+        validate_output (bool): Whether to validate video output after execution
+        
+    Returns:
+        tuple: (success: bool, stdout: str, stderr: str)
+    """
     if not ensure_directory_writable():
         return False, "", "Failed to verify directory is writable"
 
@@ -114,18 +178,30 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False):
             if stderr_str:
                 logger.warning(f"Stderr: {stderr_str}")
 
-            # Check curl response
             success, error_msg = check_curl_response(stdout_str, stderr_str)
             if success:
-                if "200" in stdout_str and attempt < retries - 1:
-                    logger.info("Command returned 200 but waiting for file...")
-                    time.sleep(retry_delay * 5)
-                    continue
+                if validate_output:
+                    video_file = get_latest_video()
+                    if video_file:
+                        is_valid, validation_msg = validate_video_file(video_file)
+                        if not is_valid:
+                            if attempt < retries - 1:
+                                logger.error(f"Video validation failed: {validation_msg}")
+                                time.sleep(retry_delay * (2 ** attempt))
+                                continue
+                            return False, stdout_str, f"Invalid video file: {validation_msg}"
+                    else:
+                        if attempt < retries - 1:
+                            logger.error("No video file found after command execution")
+                            time.sleep(retry_delay * (2 ** attempt))
+                            continue
+                        return False, stdout_str, "No video file generated"
+
                 return True, stdout_str, stderr_str
 
             logger.error(f"Command failed: {error_msg}")
             if attempt < retries - 1:
-                retry_delay_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                retry_delay_time = retry_delay * (2 ** attempt)
                 logger.info(f"Retrying in {retry_delay_time} seconds...")
                 time.sleep(retry_delay_time)
                 continue
@@ -141,6 +217,17 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False):
     return False, "", f"Failed after {retries} attempts"
 
 def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
+    """
+    Get the most recently created MP4 file in the current directory with improved validation.
+    
+    Args:
+        max_retries (int): Maximum number of attempts to find the video file
+        delay (int): Delay in seconds between attempts
+        min_size_bytes (int): Minimum file size to consider valid
+        
+    Returns:
+        str: Path to the video file or None if not found
+    """
     start_time = datetime.now()
     
     for attempt in range(max_retries):
@@ -149,9 +236,12 @@ def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
         
         for video in video_files:
             try:
+                # Check if file is fully written and meets minimum size
                 if os.path.exists(video) and os.path.getsize(video) >= min_size_bytes:
+                    # Try to open the file to ensure it's not being written to
                     try:
                         with open(video, 'rb') as f:
+                            # Read the last byte to ensure file is complete
                             f.seek(-1, 2)
                             f.read(1)
                         valid_videos.append(video)
@@ -178,6 +268,12 @@ def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
     return None
 
 def cleanup_video(video_file):
+    """
+    Clean up a video file with improved error handling and logging
+    
+    Args:
+        video_file (str): Path to the video file to clean up
+    """
     if not video_file:
         return
 
@@ -186,6 +282,7 @@ def cleanup_video(video_file):
             file_size = os.path.getsize(video_file)
             logger.info(f"Cleaning up video file: {video_file} (size: {file_size} bytes)")
             
+            # Try to ensure file is not in use
             retries = 3
             for i in range(retries):
                 try:
@@ -203,12 +300,33 @@ def cleanup_video(video_file):
         logger.exception(e)
 
 def create_safe_filename(original_path):
+    """
+    Creates a safe temporary filename while preserving the original name for reference.
+    
+    Args:
+        original_path (str): Original file path
+        
+    Returns:
+        tuple: (safe_path, original_name)
+    """
     directory = os.path.dirname(original_path) or '.'
     original_name = os.path.basename(original_path)
     safe_name = f"upload_{uuid.uuid4().hex[:8]}.mp4"
     return os.path.join(directory, safe_name), original_name
 
 def format_upload_command(cmd_template, video_file, task_data, platform_data):
+    """
+    Format an upload command with improved parameter handling and safe file operations
+    
+    Args:
+        cmd_template (str): Template string for the command
+        video_file (str): Path to the video file
+        task_data (dict): Task-specific data
+        platform_data (dict): Platform-specific data
+        
+    Returns:
+        tuple: (formatted_command: str, safe_video_path: str)
+    """
     try:
         safe_video_path, original_name = create_safe_filename(video_file)
         try:
@@ -233,8 +351,10 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
         }
         task_data = {**task_defaults, **(task_data or {})}
 
+        # Clean hashtags by removing any empty tags and ensuring proper format
         hashtags = task_data['hashtags']
         if hashtags:
+            # Split by spaces, remove empty strings, ensure # prefix
             tags = [tag.strip() for tag in hashtags.split() if tag.strip()]
             tags = [tag if tag.startswith('#') else f'#{tag}' for tag in tags]
             hashtags = ' '.join(tags)

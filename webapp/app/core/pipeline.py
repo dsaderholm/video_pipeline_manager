@@ -136,7 +136,8 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                     task_logger.info(f"[DRY RUN] Would execute generator: {task_data[-1]}")
                 else:
                     task_logger.info("Executing generator...")
-                    success, stdout, stderr = execute_curl(task_data[-1])
+                    # Added video validation for generator output
+                    success, stdout, stderr = execute_curl(task_data[-1], validate_output=True)
                     if not success:
                         error_msg = f"Generator failed: {stderr}"
                         task_logger.error(error_msg)
@@ -171,7 +172,8 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                         
                         # Apply the utility using the current video file path
                         util_cmd = util[2].format(input=current_video_file)
-                        success, stdout, stderr = execute_curl(util_cmd)
+                        # Added video validation for utility output
+                        success, stdout, stderr = execute_curl(util_cmd, validate_output=True)
                         if not success:
                             error_msg = f"Utility {util[1]} ({index}/{len(utilities)}) failed: {stderr}"
                             task_logger.error(error_msg)
@@ -248,6 +250,7 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                         if not upload_cmd or not safe_video_path:
                             raise Exception("Failed to prepare upload command or safe video path")
                         
+                        # No video validation for uploads - they handle their own validation
                         success, stdout, stderr = execute_curl(upload_cmd)
                         
                         # Restore original filename after upload attempt
