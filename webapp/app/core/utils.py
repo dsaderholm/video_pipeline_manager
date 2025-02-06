@@ -492,23 +492,11 @@ def create_safe_filename(original_path):
 
 def format_upload_command(cmd_template, video_file, task_data, platform_data):
     """Format an upload command"""
-    upload_details = {
-        'video_file': video_file,
-        'task_data': task_data,
-        'platform_data': platform_data
-    }
-    
     try:
         safe_video_path, original_name = create_safe_filename(video_file)
         try:
             os.rename(video_file, safe_video_path)
-            upload_details['safe_video_path'] = safe_video_path
-            log_with_details('INFO', f"Renamed video file for safe upload",
-                details=upload_details)
         except OSError as e:
-            upload_details['error'] = str(e)
-            log_with_details('ERROR', f"Failed to rename video file",
-                details=upload_details)
             return None, None
 
         video_title = os.path.splitext(original_name)[0]
@@ -532,32 +520,21 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
             tags = [tag if tag.startswith('#') else f'#{tag}' for tag in tags]
             hashtags = ' '.join(tags)
 
-        upload_details.update({
-            'video_title': video_title,
-            'formatted_hashtags': hashtags
-        })
+        # Escape spaces in the video file path
+        escaped_video_path = safe_video_path.replace(' ', '\\ ')
 
         formatted_cmd = cmd_template.format(
-            video=safe_video_path,
-            description=urllib.parse.quote(video_title),
-            account=urllib.parse.quote(platform_data['account_name']),
-            sound=urllib.parse.quote(task_data['sound_name']),
+            video=escaped_video_path,
+            description=video_title,  # No encoding needed for form data
+            account=platform_data['account_name'],
+            sound=task_data['sound_name'],
             volume=task_data['sound_volume'],
-            hashtags=urllib.parse.quote(hashtags)
+            hashtags=hashtags
         )
         
-        upload_details['formatted_command'] = formatted_cmd
-        log_with_details('INFO', f"Formatted upload command",
-            details=upload_details)
         return formatted_cmd, safe_video_path
         
     except KeyError as e:
-        upload_details['error'] = f"Missing required key: {str(e)}"
-        log_with_details('ERROR', f"Missing required key in template data",
-            details=upload_details)
         raise
     except Exception as e:
-        upload_details['error'] = str(e)
-        log_with_details('ERROR', f"Error formatting upload command",
-            details=upload_details)
         raise
