@@ -10,9 +10,9 @@ from datetime import datetime
 from app import logger
 from app.core.log_manager import add_log_entry
 
-def log_with_details(level, message, task_id=None, details=None):
+def log_with_details(level, message, task_id=None, details=None, source=None):
     """Helper function to log with structured details"""
-    add_log_entry(level, message, task_id=task_id, details=details, source='utils')
+    add_log_entry(level, message, task_id=task_id, details=details, source=source)
     # Also log to standard logger for console output
     logger_method = getattr(logger, level.lower())
     logger_method(message)

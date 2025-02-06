@@ -128,30 +128,40 @@ def get_logs(limit=100, level=None, task_id=None, since=None):
         return []
 
 def add_log_entry(level, message, task_id=None, details=None, source=None):
-    """Add a new log entry to the database"""
-    try:
-        with sqlite3.connect('pipeline.db') as conn:
-            c = conn.cursor()
-            
-            current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
-            
-            # Add new log entry
-            c.execute('''
-                INSERT INTO logs (timestamp, level, message, task_id, details, source)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (
-                current_time,
-                level,
-                message,
-                task_id,
-                json.dumps(details) if details else None,
-                source
-            ))
-            
-            conn.commit()
-            
-    except Exception as e:
-        print(f"Failed to add log entry: {str(e)}")
+    """Add a new log entry to the database with retries"""
+    max_retries = 3
+    retry_delay = 0.1  # Start with 100ms delay
+    
+    for attempt in range(max_retries):
+        try:
+            with sqlite3.connect('pipeline.db', timeout=5.0) as conn:  # Add 5 second timeout
+                c = conn.cursor()
+                current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+                
+                c.execute('''
+                    INSERT INTO logs (timestamp, level, message, task_id, details, source)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (
+                    current_time,
+                    level,
+                    message,
+                    task_id,
+                    json.dumps(details) if details else None,
+                    source
+                ))
+                
+                conn.commit()
+                return  # Success - exit the function
+                
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e) and attempt < max_retries - 1:
+                time.sleep(retry_delay)
+                retry_delay *= 2  # Exponential backoff
+                continue
+            print(f"Failed to add log entry (attempt {attempt + 1}): {str(e)}")
+        except Exception as e:
+            print(f"Failed to add log entry: {str(e)}")
+            break  # Exit for non-lock errors
 
 def clear_old_logs(days=30):
     """Clear logs older than specified days"""
