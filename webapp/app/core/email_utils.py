@@ -44,12 +44,12 @@ def safely_parse_json(json_str, default=None):
         return default
 
 def get_task_details(task_id):
-    """Get detailed task information for email"""
+    """Get detailed task information including execution data for email"""
     try:
         with sqlite3.connect('pipeline.db') as conn:
             c = conn.cursor()
             
-            # Get task with generator name
+            # Get task with generator name (keeping existing query)
             c.execute("""
                 SELECT t.*, g.name as generator_name 
                 FROM tasks t
@@ -61,8 +61,82 @@ def get_task_details(task_id):
             if not task:
                 logger.warning(f"No task found with ID {task_id}")
                 return None
+            
+            # Get task logs for execution details
+            c.execute("""
+                SELECT timestamp, level, message, details, source
+                FROM logs
+                WHERE task_id = ?
+                ORDER BY timestamp ASC
+            """, (task_id,))
+            logs = c.fetchall()
+            
+            # Process logs to extract key information
+            execution_details = {
+                'start_time': None,
+                'end_time': None,
+                'generation_time': None,
+                'upload_attempts': {},
+                'fallback_usage': [],
+                'warnings': [],
+                'upload_urls': {},
+                'file_details': {},
+                'processing_steps': []
+            }
+            
+            for log in logs:
+                timestamp, level, message, details_json, source = log
+                details = safely_parse_json(details_json, {})
                 
-            # Get utilities information
+                # Track execution timeline
+                if "Task started" in message:
+                    execution_details['start_time'] = timestamp
+                elif "Task completed" in message:
+                    execution_details['end_time'] = timestamp
+                
+                # Track generation time
+                if "Video generation completed" in message:
+                    if details and 'duration' in details:
+                        execution_details['generation_time'] = details['duration']
+                
+                # Track upload attempts and fallbacks
+                if "Attempting upload" in message:
+                    platform = details.get('platform', 'unknown')
+                    execution_details['upload_attempts'][platform] = execution_details['upload_attempts'].get(platform, 0) + 1
+                elif "Using fallback uploader" in message:
+                    execution_details['fallback_usage'].append({
+                        'platform': details.get('platform'),
+                        'reason': details.get('reason'),
+                        'timestamp': timestamp
+                    })
+                
+                # Track warnings
+                if level == 'WARNING':
+                    execution_details['warnings'].append({
+                        'message': message,
+                        'timestamp': timestamp,
+                        'details': details
+                    })
+                
+                # Track upload URLs
+                if "Upload successful" in message and details and 'url' in details:
+                    platform = details.get('platform', 'unknown')
+                    execution_details['upload_urls'][platform] = details['url']
+                
+                # Track file details
+                if "File details" in message and details:
+                    execution_details['file_details'].update(details)
+                
+                # Track processing steps
+                if details and 'step' in details:
+                    execution_details['processing_steps'].append({
+                        'step': details['step'],
+                        'status': details.get('status', 'completed'),
+                        'timestamp': timestamp,
+                        'details': details
+                    })
+            
+            # Get utilities information (keeping existing code)
             utilities = []
             util_ids = safely_parse_json(task[3], [])
             if util_ids:
@@ -70,7 +144,7 @@ def get_task_details(task_id):
                 c.execute(f"SELECT name FROM utilities WHERE id IN ({placeholders})", util_ids)
                 utilities = [u[0] for u in c.fetchall()]
             
-            # Get platform names
+            # Get platform names (keeping existing code)
             platforms = []
             platform_ids = safely_parse_json(task[5], [])
             if platform_ids:
@@ -85,7 +159,7 @@ def get_task_details(task_id):
             return {
                 'id': task[0],
                 'name': task[1],
-                'generator': task[-1],  # generator_name from JOIN
+                'generator': task[-1],
                 'utilities': utilities,
                 'platforms': platforms,
                 'schedule': task[4],
@@ -93,7 +167,8 @@ def get_task_details(task_id):
                 'sound_name': task[7],
                 'sound_volume': task[8],
                 'status': task[9],
-                'created_at': task[11]
+                'created_at': task[11],
+                'execution': execution_details  # New field with detailed execution info
             }
     except Exception as e:
         logger.error(f"Error getting task details: {str(e)}")
@@ -115,25 +190,127 @@ def format_task_info_html(task_info, success, base_url):
     utilities_html = "".join([f"<li class='mb-1'><i class='fas fa-wrench mr-2'></i>{u}</li>" for u in task_info['utilities']]) if task_info['utilities'] else "None"
     platforms_html = "".join([f"<li class='mb-1'><i class='fas fa-share-alt mr-2'></i>{p}</li>" for p in task_info['platforms']]) if task_info['platforms'] else "None"
     
-    # Add action buttons
-    action_buttons = f"""
-    <div style="display: flex; gap: 1rem; justify-content: center; margin-top: 1.5rem;">
-        <a href="{base_url}/#/tasks/{task_info['id']}" 
-           style="background-color: #3b82f6; color: white; padding: 0.5rem 1rem; border-radius: 0.375rem; text-decoration: none; font-weight: 500;">
-            <i class="fas fa-external-link-alt mr-2"></i>View Task
-        </a>
+    # Format execution details
+    execution = task_info.get('execution', {})
+    
+    # Format warnings section
+    warnings_html = ""
+    if execution.get('warnings'):
+        warnings_html = """
+        <div class="section warning-section">
+            <h2 class="section-title">Warnings</h2>
+            <ul class="warning-list">
+        """
+        for warning in execution['warnings']:
+            warning_details = warning.get('details', {})
+            formatted_details = "<br>".join([f"{k}: {v}" for k, v in warning_details.items()]) if warning_details else ""
+            warnings_html += f"""
+                <li class="warning-item">
+                    <span class="warning-time">{warning['timestamp']}</span>
+                    <span class="warning-message">{warning['message']}</span>
+                    {f'<div class="warning-details">{formatted_details}</div>' if formatted_details else ''}
+                </li>
+            """
+        warnings_html += "</ul></div>"
+
+    # Format upload details
+    upload_html = """
+    <div class="section">
+        <h2 class="section-title">Upload Details</h2>
+        <div class="info-grid">
+    """
+    
+    for platform, attempts in execution.get('upload_attempts', {}).items():
+        fallback_info = next((f for f in execution.get('fallback_usage', []) if f['platform'] == platform), None)
+        url = execution.get('upload_urls', {}).get(platform, 'N/A')
+        
+        upload_html += f"""
+            <span class="label">{platform}:</span>
+            <span class="value">
+                <div>Attempts: {attempts}</div>
+                {f'<div class="fallback-info">Used fallback: {fallback_info["reason"]}</div>' if fallback_info else ''}
+                <div>URL: <a href="{url}" target="_blank">{url}</a></div>
+            </span>
+        """
+    upload_html += "</div></div>"
+
+    # Format processing steps
+    steps_html = """
+    <div class="section">
+        <h2 class="section-title">Processing Steps</h2>
+        <div class="timeline">
+    """
+    
+    for step in execution.get('processing_steps', []):
+        step_color = "#22c55e" if step['status'] == 'completed' else "#ef4444"
+        steps_html += f"""
+            <div class="timeline-item" style="border-left-color: {step_color}">
+                <div class="timeline-header">
+                    <span class="step-name">{step['step']}</span>
+                    <span class="step-time">{step['timestamp']}</span>
+                </div>
+                <div class="step-status">{step['status']}</div>
+            </div>
+        """
+    steps_html += "</div></div>"
+
+    # Add file details if available
+    file_details_html = ""
+    if execution.get('file_details'):
+        file_details_html = """
+        <div class="section">
+            <h2 class="section-title">File Details</h2>
+            <div class="info-grid">
+        """
+        for key, value in execution['file_details'].items():
+            file_details_html += f"""
+                <span class="label">{key}:</span>
+                <span class="value">{value}</span>
+            """
+        file_details_html += "</div></div>"
+
+    # Add execution timing
+    timing_html = """
+    <div class="section">
+        <h2 class="section-title">Execution Timeline</h2>
+        <div class="info-grid">
+    """
+    if execution.get('start_time'):
+        timing_html += f"""
+            <span class="label">Started:</span>
+            <span class="value">{execution['start_time']}</span>
+        """
+    if execution.get('end_time'):
+        timing_html += f"""
+            <span class="label">Completed:</span>
+            <span class="value">{execution['end_time']}</span>
+        """
+    if execution.get('generation_time'):
+        timing_html += f"""
+            <span class="label">Generation Time:</span>
+            <span class="value">{execution['generation_time']} seconds</span>
+        """
+    timing_html += "</div></div>"
+
+    # Update the CSS to include new styles
+    additional_styles = """
+        .warning-section { background-color: #2d3748; border-radius: 0.375rem; padding: 1rem; margin-top: 1rem; }
+        .warning-list { list-style: none; padding: 0; }
+        .warning-item { margin-bottom: 1rem; padding: 0.5rem; border-left: 3px solid #f59e0b; }
+        .warning-time { color: #9ca3af; font-size: 0.875rem; display: block; }
+        .warning-message { color: #f3f4f6; display: block; margin: 0.25rem 0; }
+        .warning-details { color: #9ca3af; font-size: 0.875rem; margin-top: 0.25rem; }
+        .timeline { border-left: 2px solid #374151; padding-left: 1.5rem; margin: 1rem 0; }
+        .timeline-item { position: relative; margin-bottom: 1.5rem; }
+        .timeline-item::before { content: ''; position: absolute; left: -1.75rem; top: 0; width: 1rem; height: 1rem; border-radius: 50%; background: #1f2937; border: 2px solid; }
+        .timeline-header { display: flex; justify-content: space-between; align-items: center; }
+        .step-name { font-weight: 500; color: #f3f4f6; }
+        .step-time { color: #9ca3af; font-size: 0.875rem; }
+        .step-status { color: #d1d5db; margin-top: 0.25rem; font-size: 0.875rem; }
+        .fallback-info { color: #f59e0b; font-size: 0.875rem; margin: 0.25rem 0; }
     """
 
-    if not success:
-        action_buttons += f"""
-        <a href="{base_url}/#/logs/{task_info['id']}" 
-           style="background-color: #ef4444; color: white; padding: 0.5rem 1rem; border-radius: 0.375rem; text-decoration: none; font-weight: 500;">
-            <i class="fas fa-exclamation-circle mr-2"></i>View Logs
-        </a>
-        """
-    
-    action_buttons += "</div>"
-    
+    # Combine the original template with the new sections
     return f"""
     <html>
     <head>
@@ -146,69 +323,15 @@ def format_task_info_html(task_info, success, base_url):
                 margin: 0;
             }}
             .container {{
-                max-width: 600px;
+                max-width: 800px;  /* Increased from 600px to accommodate more content */
                 margin: 0 auto;
                 background-color: #1f2937;
                 border-radius: 0.5rem;
                 padding: 2rem;
                 border: 1px solid #374151;
             }}
-            .header {{
-                text-align: center;
-                margin-bottom: 2rem;
-                padding-bottom: 1rem;
-                border-bottom: 1px solid #374151;
-            }}
-            .title {{
-                color: #fc4828;
-                font-size: 1.5rem;
-                font-weight: 600;
-                margin: 0;
-            }}
-            .status-badge {{
-                display: inline-block;
-                padding: 0.25rem 0.75rem;
-                border-radius: 9999px;
-                background-color: {status_color};
-                color: white;
-                font-size: 0.875rem;
-                margin-top: 1rem;
-            }}
-            .section {{
-                margin-bottom: 1.5rem;
-            }}
-            .section-title {{
-                color: #fc4828;
-                font-size: 1.1rem;
-                font-weight: 500;
-                margin-bottom: 0.75rem;
-            }}
-            .info-grid {{
-                display: grid;
-                grid-template-columns: auto 1fr;
-                gap: 0.5rem;
-                margin-bottom: 1rem;
-            }}
-            .label {{
-                color: #9ca3af;
-                font-weight: 500;
-            }}
-            .value {{
-                color: #f3f4f6;
-            }}
-            ul {{
-                list-style: none;
-                padding: 0;
-                margin: 0;
-            }}
-            .footer {{
-                text-align: center;
-                margin-top: 2rem;
-                padding-top: 1rem;
-                border-top: 1px solid #374151;
-                color: #9ca3af;
-                font-size: 0.875rem;
-            }}
+            /* ... (keep existing styles) ... */
+            {additional_styles}
         </style>
     </head>
     <body>
@@ -220,6 +343,8 @@ def format_task_info_html(task_info, success, base_url):
                     {task_info['status'].upper()}
                 </div>
             </div>
+
+            {timing_html}
 
             <div class="section">
                 <h2 class="section-title">Task Details</h2>
@@ -249,6 +374,12 @@ def format_task_info_html(task_info, success, base_url):
                 </div>
             </div>
 
+            {file_details_html}
+            
+            {steps_html}
+            
+            {upload_html}
+
             <div class="section">
                 <h2 class="section-title">Publishing</h2>
                 <div class="info-grid">
@@ -265,11 +396,23 @@ def format_task_info_html(task_info, success, base_url):
                 </div>
             </div>
 
-            {action_buttons}
+            {warnings_html if execution.get('warnings') else ''}
+
+            <div class="action-buttons">
+                <a href="{base_url}/#/tasks/{task_info['id']}" 
+                   class="button primary">
+                    <i class="fas fa-external-link-alt mr-2"></i>View Task
+                </a>
+                
+                <a href="{base_url}/#/logs/{task_info['id']}" 
+                   class="button secondary">
+                    <i class="fas fa-list mr-2"></i>View Logs
+                </a>
+            </div>
             
             <div class="footer">
                 This is an automated notification from your Video Pipeline Manager.<br>
-                {' Check the application logs for error details.' if not success else ''}
+                {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             </div>
         </div>
     </body>

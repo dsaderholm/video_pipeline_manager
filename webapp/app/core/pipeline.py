@@ -404,7 +404,7 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
 
                 # Process uploads using the new schema
                 c.execute("""
-                    SELECT p.id, p.name, p.uploader_curl, tpa.account_name, p.default_hashtags
+                    SELECT p.id, p.name, p.uploader_curl, tpa.account_name, p.default_hashtags, p.fallback_curl, p.fallback_curl_2
                     FROM task_platform_accounts tpa
                     JOIN platforms p ON tpa.platform_id = p.id
                     WHERE tpa.task_id = ?
@@ -418,7 +418,7 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                         details=upload_base_details)
                     
                     for platform_data in platform_data_list:
-                        platform_id, platform_name, upload_curl, account_name, default_hashtags = platform_data
+                        platform_id, platform_name, upload_curl, account_name, default_hashtags, fallback_curl, fallback_curl_2 = platform_data
                         
                         platform_details = {
                             **upload_base_details,
@@ -457,23 +457,37 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                         
                         platform_details['safe_video_path'] = safe_video_path
                         
-                        # Execute upload
+                        # Try primary upload
                         success, stdout, stderr = execute_curl(upload_cmd)
-                        
-                        # Restore original filename after upload attempt
-                        try:
-                            if os.path.exists(safe_video_path):
-                                os.rename(safe_video_path, current_video_file)
-                                platform_details['filename_restored'] = True
-                        except OSError as e:
-                            error_msg = f"Failed to restore original filename: {e}"
-                            platform_details['filename_restore_error'] = str(e)
-                            log_with_task_details('ERROR', error_msg,
+
+                        # If primary fails, try fallback
+                        if not success and fallback_curl:
+                            log_with_task_details('INFO', f"Primary upload failed, attempting fallback for {platform_name}",
                                 task_id=task_id,
                                 details=platform_details)
-                        
+                            fallback_cmd, _ = format_upload_command(
+                                fallback_curl,
+                                current_video_file,
+                                task_dict,
+                                platform_dict
+                            )
+                            success, stdout, stderr = execute_curl(fallback_cmd)
+
+                        # If fallback fails, try secondary fallback
+                        if not success and fallback_curl_2:
+                            log_with_task_details('INFO', f"Primary fallback failed, attempting secondary fallback for {platform_name}",
+                                task_id=task_id,
+                                details=platform_details)
+                            fallback_cmd_2, _ = format_upload_command(
+                                fallback_curl_2,
+                                current_video_file,
+                                task_dict,
+                                platform_dict
+                            )
+                            success, stdout, stderr = execute_curl(fallback_cmd_2)
+
                         if not success:
-                            error_msg = f"Upload to {platform_name} failed: {stderr}"
+                            error_msg = f"All upload attempts failed for {platform_name}: {stderr}"
                             platform_details.update({
                                 'stdout': stdout,
                                 'stderr': stderr
