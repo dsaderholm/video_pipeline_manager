@@ -15,12 +15,8 @@ def log_with_task_details(level, message, task_id, details=None):
     if details is None:
         details = {}
     details['task_id'] = task_id
+    # Only use utils.log_with_details to avoid duplication
     log_with_details(level, message, task_id=task_id, details=details, source='pipeline')
-    
-    # Also log to task-specific logger for console output
-    logger_instance = logging.getLogger(f'task_{task_id}')
-    logger_method = getattr(logger_instance, level.lower())
-    logger_method(message)
 
 def create_logger_with_task_id(task_id):
     """Create a logger that attaches task_id to all records"""
