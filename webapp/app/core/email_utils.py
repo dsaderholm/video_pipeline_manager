@@ -182,152 +182,191 @@ def get_task_details(task_id):
         return None
 
 def format_task_info_html(task_info, success, base_url=None):
-    """Format task information as HTML matching web UI style"""
+    """Format comprehensive task information as HTML"""
     if not task_info:
         return """
         <html>
-        <body style='font-family: sans-serif; color: #333;'>
+        <body style='font-family: Inter, sans-serif; background-color: #111827; color: #f3f4f6;'>
             <h2>Task Status Update</h2>
             <p>The task has {status}, but detailed information is not available.</p>
         </body>
         </html>
         """.format(status="completed successfully" if success else "failed")
-        
-    status_color = "#22c55e" if success else "#ef4444"
-    utilities_html = "".join([f"<li>{u}</li>" for u in task_info['utilities']]) if task_info['utilities'] else "None"
-    platforms_html = "".join([f"<li>{p}</li>" for p in task_info['platforms']]) if task_info['platforms'] else "None"
     
+    # Format utilities with all available info
+    utilities_html = ""
+    for util in task_info['utilities']:
+        utilities_html += f"""
+            <li class="utility-item">
+                <div class="util-name">{util['name']}</div>
+            </li>
+        """
+    if not utilities_html:
+        utilities_html = "<li>None</li>"
+
+    # Format platforms with all available info
+    platforms_html = ""
+    for platform in task_info['platforms']:
+        platforms_html += f"""
+            <li class="platform-item">
+                <div class="platform-name">{platform['name']}</div>
+                <div class="platform-account">Account: {platform['account_name']}</div>
+                <div class="platform-hashtags">Default Hashtags: {platform.get('default_hashtags', 'None')}</div>
+            </li>
+        """
+    if not platforms_html:
+        platforms_html = "<li>None</li>"
+
     # Get execution details
     execution = task_info.get('execution', {})
     
     # Format execution timeline
-    timeline_html = ""
+    timeline_html = "<div class='timeline'>"
     if execution.get('start_time'):
         timeline_html += f"<div>Started: {execution['start_time']}</div>"
     if execution.get('end_time'):
         timeline_html += f"<div>Completed: {execution['end_time']}</div>"
     if execution.get('generation_time'):
         timeline_html += f"<div>Generation Time: {execution['generation_time']} seconds</div>"
+    timeline_html += "</div>"
 
     # Format upload attempts
     upload_html = ""
     if execution.get('upload_attempts'):
-        upload_html = "<h2>Upload Details</h2><div class='info-grid'>"
         for platform, attempts in execution['upload_attempts'].items():
             fallback_info = next((f for f in execution.get('fallback_usage', []) if f['platform'] == platform), None)
             url = execution.get('upload_urls', {}).get(platform, 'N/A')
-            
             upload_html += f"""
-                <div>
-                    {platform}:
-                    Attempts: {attempts}
-                    {f'<div>Used fallback: {fallback_info["reason"]}</div>' if fallback_info else ''}
-                    {f'<div>URL: {url}</div>' if url != 'N/A' else ''}
+                <div class="upload-attempt">
+                    <h3>{platform}</h3>
+                    <div>Attempts: {attempts}</div>
+                    {f'<div class="fallback-info">Used fallback: {fallback_info["reason"]}</div>' if fallback_info else ''}
+                    <div>Upload URL: {url}</div>
                 </div>
             """
-        upload_html += "</div>"
-
-    # Format file details
-    file_details_html = ""
-    if execution.get('file_details'):
-        file_details_html = "<h2>File Details</h2><div class='info-grid'>"
-        for key, value in execution['file_details'].items():
-            file_details_html += f"<div>{key}: {value}</div>"
-        file_details_html += "</div>"
-
-    # Format warnings
-    warnings_html = ""
-    if execution.get('warnings'):
-        warnings_html = "<h2>Warnings</h2><div class='info-grid'>"
-        for warning in execution['warnings']:
-            warnings_html += f"""
-                <div>
-                    {warning['timestamp']}: {warning['message']}
-                    {f"<div>Details: {warning['details']}</div>" if warning.get('details') else ""}
-                </div>
-            """
-        warnings_html += "</div>"
-
-    # Format processing steps
-    steps_html = ""
-    if execution.get('processing_steps'):
-        steps_html = "<h2>Processing Steps</h2><div class='info-grid'>"
-        for step in execution['processing_steps']:
-            steps_html += f"""
-                <div>
-                    {step['timestamp']}: {step['step']} - {step['status']}
-                </div>
-            """
-        steps_html += "</div>"
 
     return f"""
     <html>
     <head>
         <style>
             body {{
-                font-family: sans-serif;
-                color: #333;
-                padding: 1rem;
+                font-family: Inter, sans-serif;
+                background-color: #111827;
+                color: #f3f4f6;
+                padding: 2rem;
                 margin: 0;
+                line-height: 1.5;
             }}
-            h1 {{
-                color: #1a1a1a;
-                font-size: 1.5rem;
+            h1, h2, h3 {{
+                color: #fc4828;
                 margin-bottom: 1rem;
             }}
-            h2 {{
-                color: #1a1a1a;
-                font-size: 1.2rem;
-                margin-top: 1rem;
-            }}
-            .info-grid {{
-                margin-bottom: 1rem;
+            h1 {{ font-size: 1.5rem; }}
+            h2 {{ font-size: 1.2rem; margin-top: 1.5rem; }}
+            h3 {{ font-size: 1.1rem; color: #f3f4f6; }}
+            .section {{
+                background: rgba(31, 41, 55, 0.5);
+                border: 1px solid #374151;
+                border-radius: 0.5rem;
+                padding: 1.5rem;
+                margin-bottom: 1.5rem;
             }}
             ul {{
                 list-style: none;
                 padding: 0;
                 margin: 0;
             }}
+            li {{
+                margin-bottom: 0.75rem;
+            }}
+            .utility-item, .platform-item {{
+                background: rgba(31, 41, 55, 0.3);
+                padding: 0.75rem;
+                border-radius: 0.375rem;
+                margin-bottom: 0.5rem;
+            }}
+            .timeline {{
+                border-left: 2px solid #374151;
+                padding-left: 1rem;
+                margin: 1rem 0;
+            }}
+            .timeline div {{
+                margin-bottom: 0.5rem;
+            }}
+            .upload-attempt {{
+                background: rgba(31, 41, 55, 0.3);
+                padding: 1rem;
+                border-radius: 0.375rem;
+                margin-bottom: 1rem;
+            }}
+            .fallback-info {{
+                color: #fbbf24;
+                margin: 0.5rem 0;
+            }}
+            .details-line {{
+                margin: 0.5rem 0;
+            }}
         </style>
     </head>
     <body>
-        <h1>Video Pipeline Pro</h1>
-        <div>{task_info['name']}</div>
-
-        <h2>Task Details</h2>
-        <div class="info-grid">
-            ID: {task_info['id']} Created: {task_info['created_at']}
+        <h1>Video Pipeline Pro - Task Report</h1>
+        
+        <div class="section">
+            <h2>Task Overview</h2>
+            <div class="details-line">Name: {task_info['name']}</div>
+            <div class="details-line">ID: {task_info['id']}</div>
+            <div class="details-line">Created: {task_info['created_at']}</div>
+            <div class="details-line">Status: {task_info['status']}</div>
+            {timeline_html}
         </div>
 
-        {timeline_html if timeline_html else ""}
-
-        <h2>Video Generation</h2>
-        <div class="info-grid">
-            Generator: {task_info['generator']}
-            Sound: {task_info['sound_name'] or 'Not specified'} (Volume: {task_info['sound_volume']})
-            Utilities:
+        <div class="section">
+            <h2>Video Generation</h2>
+            <div class="details-line">Generator: {task_info['generator_name']}</div>
+            <div class="details-line">Sound: {task_info['sound_name']}</div>
+            <h3>Utilities:</h3>
             <ul>
                 {utilities_html}
             </ul>
         </div>
 
-        {file_details_html}
-        {steps_html}
-        {upload_html}
-
-        <h2>Publishing</h2>
-        <div class="info-grid">
-            Platforms:
+        <div class="section">
+            <h2>Publishing Configuration</h2>
+            <div class="details-line">Schedule: {task_info['schedule']}</div>
+            <div class="details-line">Hashtags: {task_info['hashtags']}</div>
+            <h3>Target Platforms:</h3>
             <ul>
                 {platforms_html}
             </ul>
         </div>
 
-        {warnings_html}
+        {f'''
+        <div class="section">
+            <h2>Upload Results</h2>
+            {upload_html}
+        </div>
+        ''' if upload_html else ''}
 
-        <div>Schedule: {task_info['schedule']} Hashtags: {task_info['hashtags'] or 'None'}</div>
-        <div>This is an automated notification from your Video Pipeline Manager.</div>
-        <div>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
+        {f'''
+        <div class="section">
+            <h2>File Details</h2>
+            {execution.get('file_details', 'No file details available')}
+        </div>
+        ''' if execution.get('file_details') else ''}
+
+        {f'''
+        <div class="section">
+            <h2>Warnings & Issues</h2>
+            <ul>
+                {chr(10).join(f'<li>{w["message"]}</li>' for w in execution.get('warnings', []))}
+            </ul>
+        </div>
+        ''' if execution.get('warnings') else ''}
+
+        <div class="footer section">
+            <div>This is an automated notification from your Video Pipeline Manager.</div>
+            <div>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
+        </div>
     </body>
     </html>
     """
