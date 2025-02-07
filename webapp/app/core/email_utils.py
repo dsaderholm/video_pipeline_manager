@@ -194,7 +194,7 @@ def format_task_info_html(task_info, success, base_url=None):
         </html>
         """.format(status="completed successfully" if success else "failed")
     
-    # Format utilities list (utilities are strings)
+    # Format utilities list
     utilities_html = ""
     for util in task_info['utilities']:
         utilities_html += f"""
@@ -205,7 +205,7 @@ def format_task_info_html(task_info, success, base_url=None):
     if not utilities_html:
         utilities_html = "<li>None</li>"
 
-    # Format platforms list (platforms are strings in format "platform_name (account_name)")
+    # Format platforms list
     platforms_html = ""
     for platform in task_info['platforms']:
         platforms_html += f"""
@@ -311,18 +311,9 @@ def format_task_info_html(task_info, success, base_url=None):
         <h1>Video Pipeline Pro - Task Report</h1>
         
         <div class="section">
-            <h2>Task Overview</h2>
-            <div class="details-line">Name: {task_info['name']}</div>
-            <div class="details-line">ID: {task_info['id']}</div>
-            <div class="details-line">Created: {task_info['created_at']}</div>
-            <div class="details-line">Status: {task_info['status']}</div>
-            {timeline_html}
-        </div>
-
-        <div class="section">
             <h2>Video Generation</h2>
             <div class="details-line">Generator: {task_info.get('generator', 'N/A')}</div>
-            <div class="details-line">Sound: {task_info.get('sound_name', 'N/A')}</div>
+            <div class="details-line">Sound: {task_info.get('sound_name', 'N/A')} (Volume: {task_info.get('sound_volume', 'N/A')})</div>
             <h3>Utilities:</h3>
             <ul>
                 {utilities_html}
@@ -332,11 +323,20 @@ def format_task_info_html(task_info, success, base_url=None):
         <div class="section">
             <h2>Publishing Configuration</h2>
             <div class="details-line">Schedule: {task_info.get('schedule', 'N/A')}</div>
-            <div class="details-line">Hashtags: {task_info.get('hashtags', 'N/A')}</div>
+            <div class="details-line">Hashtags: {task_info.get('hashtags', '').replace(',', ' #') if task_info.get('hashtags') else 'None'}</div>
             <h3>Target Platforms:</h3>
             <ul>
                 {platforms_html}
             </ul>
+        </div>
+
+        <div class="section">
+            <h2>Task Overview</h2>
+            <div class="details-line">Name: {task_info['name']}</div>
+            <div class="details-line">ID: {task_info['id']}</div>
+            <div class="details-line">Created: {task_info['created_at']}</div>
+            <div class="details-line">Status: {task_info['status']}</div>
+            {timeline_html}
         </div>
 
         {f'''
