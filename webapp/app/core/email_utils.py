@@ -154,17 +154,15 @@ def get_task_details(task_id):
                 c.execute(f"SELECT name FROM utilities WHERE id IN ({placeholders})", util_ids)
                 utilities = [u[0] for u in c.fetchall()]
             
-            # Get platform names (keeping existing code)
+            # Get platforms and their account names
             platforms = []
-            platform_ids = safely_parse_json(task[5], [])
-            if platform_ids:
-                placeholders = ','.join('?' * len(platform_ids))
-                c.execute(f"""
-                    SELECT platform, account_name 
-                    FROM platform_accounts 
-                    WHERE id IN ({placeholders})
-                """, platform_ids)
-                platforms = [f"{p[0]} ({p[1]})" for p in c.fetchall()]
+            c.execute("""
+                SELECT p.name, tpa.account_name 
+                FROM task_platform_accounts tpa
+                JOIN platforms p ON tpa.platform_id = p.id
+                WHERE tpa.task_id = ?
+            """, (task_id,))
+            platforms = [f"{p[0]} ({p[1]})" for p in c.fetchall()]
             
             return {
                 'id': task[0],
