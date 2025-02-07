@@ -194,25 +194,23 @@ def format_task_info_html(task_info, success, base_url=None):
         </html>
         """.format(status="completed successfully" if success else "failed")
     
-    # Format utilities with all available info
+    # Format utilities list (utilities are strings)
     utilities_html = ""
     for util in task_info['utilities']:
         utilities_html += f"""
             <li class="utility-item">
-                <div class="util-name">{util['name']}</div>
+                <div class="util-name">{util}</div>
             </li>
         """
     if not utilities_html:
         utilities_html = "<li>None</li>"
 
-    # Format platforms with all available info
+    # Format platforms list (platforms are strings in format "platform_name (account_name)")
     platforms_html = ""
     for platform in task_info['platforms']:
         platforms_html += f"""
             <li class="platform-item">
-                <div class="platform-name">{platform['name']}</div>
-                <div class="platform-account">Account: {platform['account_name']}</div>
-                <div class="platform-hashtags">Default Hashtags: {platform.get('default_hashtags', 'None')}</div>
+                <div class="platform-name">{platform}</div>
             </li>
         """
     if not platforms_html:
@@ -323,8 +321,8 @@ def format_task_info_html(task_info, success, base_url=None):
 
         <div class="section">
             <h2>Video Generation</h2>
-            <div class="details-line">Generator: {task_info['generator_name']}</div>
-            <div class="details-line">Sound: {task_info['sound_name']}</div>
+            <div class="details-line">Generator: {task_info.get('generator', 'N/A')}</div>
+            <div class="details-line">Sound: {task_info.get('sound_name', 'N/A')}</div>
             <h3>Utilities:</h3>
             <ul>
                 {utilities_html}
@@ -333,8 +331,8 @@ def format_task_info_html(task_info, success, base_url=None):
 
         <div class="section">
             <h2>Publishing Configuration</h2>
-            <div class="details-line">Schedule: {task_info['schedule']}</div>
-            <div class="details-line">Hashtags: {task_info['hashtags']}</div>
+            <div class="details-line">Schedule: {task_info.get('schedule', 'N/A')}</div>
+            <div class="details-line">Hashtags: {task_info.get('hashtags', 'N/A')}</div>
             <h3>Target Platforms:</h3>
             <ul>
                 {platforms_html}
@@ -351,7 +349,7 @@ def format_task_info_html(task_info, success, base_url=None):
         {f'''
         <div class="section">
             <h2>File Details</h2>
-            {execution.get('file_details', 'No file details available')}
+            <pre>{json.dumps(execution.get('file_details', {}), indent=2)}</pre>
         </div>
         ''' if execution.get('file_details') else ''}
 
