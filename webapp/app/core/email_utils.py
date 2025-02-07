@@ -183,7 +183,6 @@ def get_task_details(task_id):
         return None
 
 def format_task_info_html(task_info, success, base_url=None):
-    """Format comprehensive task information as HTML"""
     if not task_info:
         return """
         <html>
@@ -229,6 +228,10 @@ def format_task_info_html(task_info, success, base_url=None):
         timeline_html += f"<div>Generation Time: {execution['generation_time']} seconds</div>"
     timeline_html += "</div>"
 
+    # Format sound information
+    sound_html = f"Sound: {task_info.get('sound_name', 'N/A')}"
+    volume_html = f"Volume: {task_info.get('sound_volume', 'N/A')}"
+
     # Format upload attempts
     upload_html = ""
     if execution.get('upload_attempts'):
@@ -269,6 +272,11 @@ def format_task_info_html(task_info, success, base_url=None):
                 border-radius: 0.5rem;
                 padding: 1.5rem;
                 margin-bottom: 1.5rem;
+            }}
+            .sound-volume {{
+                display: flex;
+                gap: 1rem;
+                margin-bottom: 0.5rem;
             }}
             ul {{
                 list-style: none;
@@ -313,7 +321,10 @@ def format_task_info_html(task_info, success, base_url=None):
         <div class="section">
             <h2>Video Generation</h2>
             <div class="details-line">Generator: {task_info.get('generator', 'N/A')}</div>
-            <div class="details-line">Sound: {task_info.get('sound_name', 'N/A')} (Volume: {task_info.get('sound_volume', 'N/A')})</div>
+            <div class="sound-volume">
+                <div class="details-line">{sound_html}</div>
+                <div class="details-line">{volume_html}</div>
+            </div>
             <h3>Utilities:</h3>
             <ul>
                 {utilities_html}
@@ -323,7 +334,7 @@ def format_task_info_html(task_info, success, base_url=None):
         <div class="section">
             <h2>Publishing Configuration</h2>
             <div class="details-line">Schedule: {task_info.get('schedule', 'N/A')}</div>
-            <div class="details-line">Hashtags: {task_info.get('hashtags', '').replace(',', ' #') if task_info.get('hashtags') else 'None'}</div>
+            <div class="details-line">Hashtags: {task_info.get('hashtags', 'N/A')}</div>
             <h3>Target Platforms:</h3>
             <ul>
                 {platforms_html}
