@@ -89,24 +89,24 @@ def get_task_details(task_id):
                 details = safely_parse_json(details_json, {})
                 
                 # Track execution timeline
-                if "Task started" in message:
+                if "Starting video pipeline" in message:
                     execution_details['start_time'] = timestamp
-                elif "Task completed" in message:
+                elif "Task completed successfully" in message:
                     execution_details['end_time'] = timestamp
                 
                 # Track generation time
-                if "Video generation completed" in message:
-                    if details and 'duration' in details:
-                        execution_details['generation_time'] = details['duration']
+                if "Generator completed successfully" in message:
+                    if details:
+                        execution_details['generation_time'] = details.get('duration_seconds')
                 
                 # Track upload attempts and fallbacks
-                if "Attempting upload" in message:
-                    platform = details.get('platform', 'unknown')
+                if "Processing upload for platform" in message:
+                    platform = details.get('platform', {}).get('name', 'unknown')
                     execution_details['upload_attempts'][platform] = execution_details['upload_attempts'].get(platform, 0) + 1
-                elif "Using fallback uploader" in message:
+                elif "Primary upload failed, attempting fallback" in message:
                     execution_details['fallback_usage'].append({
-                        'platform': details.get('platform'),
-                        'reason': details.get('reason'),
+                        'platform': details.get('platform', {}).get('name'),
+                        'reason': details.get('stderr', 'Primary upload failed'),
                         'timestamp': timestamp
                     })
                 
@@ -118,20 +118,27 @@ def get_task_details(task_id):
                         'details': details
                     })
                 
-                # Track upload URLs
-                if "Upload successful" in message and details and 'url' in details:
-                    platform = details.get('platform', 'unknown')
-                    execution_details['upload_urls'][platform] = details['url']
-                
-                # Track file details
-                if "File details" in message and details:
+                # Track file details from validation
+                if "Video file validation successful" in message:
                     execution_details['file_details'].update(details)
                 
                 # Track processing steps
-                if details and 'step' in details:
+                if any(step_msg in message for step_msg in [
+                    "Executing generator",
+                    "Running utility",
+                    "Processing upload for platform"
+                ]):
+                    step_name = None
+                    if "Executing generator" in message:
+                        step_name = "Video Generation"
+                    elif "Running utility" in message:
+                        step_name = f"Utility: {details.get('current_utility', {}).get('name', 'Unknown')}"
+                    elif "Processing upload for platform" in message:
+                        step_name = f"Upload: {details.get('platform', {}).get('name', 'Unknown')}"
+                    
                     execution_details['processing_steps'].append({
-                        'step': details['step'],
-                        'status': details.get('status', 'completed'),
+                        'step': step_name,
+                        'status': 'failed' if level == 'ERROR' else 'completed',
                         'timestamp': timestamp,
                         'details': details
                     })
@@ -174,7 +181,7 @@ def get_task_details(task_id):
         logger.error(f"Error getting task details: {str(e)}")
         return None
 
-def format_task_info_html(task_info, success, base_url):
+def format_task_info_html(task_info, success, base_url=None):
     """Format task information as HTML matching web UI style"""
     if not task_info:
         return """
@@ -186,235 +193,141 @@ def format_task_info_html(task_info, success, base_url):
         </html>
         """.format(status="completed successfully" if success else "failed")
         
-    status_color = "#22c55e" if success else "#ef4444"  # green-500 or red-500
-    utilities_html = "".join([f"<li class='mb-1'><i class='fas fa-wrench mr-2'></i>{u}</li>" for u in task_info['utilities']]) if task_info['utilities'] else "None"
-    platforms_html = "".join([f"<li class='mb-1'><i class='fas fa-share-alt mr-2'></i>{p}</li>" for p in task_info['platforms']]) if task_info['platforms'] else "None"
+    status_color = "#22c55e" if success else "#ef4444"
+    utilities_html = "".join([f"<li>{u}</li>" for u in task_info['utilities']]) if task_info['utilities'] else "None"
+    platforms_html = "".join([f"<li>{p}</li>" for p in task_info['platforms']]) if task_info['platforms'] else "None"
     
-    # Format execution details
+    # Get execution details
     execution = task_info.get('execution', {})
     
-    # Format warnings section
-    warnings_html = ""
-    if execution.get('warnings'):
-        warnings_html = """
-        <div class="section warning-section">
-            <h2 class="section-title">Warnings</h2>
-            <ul class="warning-list">
-        """
-        for warning in execution['warnings']:
-            warning_details = warning.get('details', {})
-            formatted_details = "<br>".join([f"{k}: {v}" for k, v in warning_details.items()]) if warning_details else ""
-            warnings_html += f"""
-                <li class="warning-item">
-                    <span class="warning-time">{warning['timestamp']}</span>
-                    <span class="warning-message">{warning['message']}</span>
-                    {f'<div class="warning-details">{formatted_details}</div>' if formatted_details else ''}
-                </li>
-            """
-        warnings_html += "</ul></div>"
+    # Format execution timeline
+    timeline_html = ""
+    if execution.get('start_time'):
+        timeline_html += f"<div>Started: {execution['start_time']}</div>"
+    if execution.get('end_time'):
+        timeline_html += f"<div>Completed: {execution['end_time']}</div>"
+    if execution.get('generation_time'):
+        timeline_html += f"<div>Generation Time: {execution['generation_time']} seconds</div>"
 
-    # Format upload details
-    upload_html = """
-    <div class="section">
-        <h2 class="section-title">Upload Details</h2>
-        <div class="info-grid">
-    """
-    
-    for platform, attempts in execution.get('upload_attempts', {}).items():
-        fallback_info = next((f for f in execution.get('fallback_usage', []) if f['platform'] == platform), None)
-        url = execution.get('upload_urls', {}).get(platform, 'N/A')
-        
-        upload_html += f"""
-            <span class="label">{platform}:</span>
-            <span class="value">
-                <div>Attempts: {attempts}</div>
-                {f'<div class="fallback-info">Used fallback: {fallback_info["reason"]}</div>' if fallback_info else ''}
-                <div>URL: <a href="{url}" target="_blank">{url}</a></div>
-            </span>
-        """
-    upload_html += "</div></div>"
-
-    # Format processing steps
-    steps_html = """
-    <div class="section">
-        <h2 class="section-title">Processing Steps</h2>
-        <div class="timeline">
-    """
-    
-    for step in execution.get('processing_steps', []):
-        step_color = "#22c55e" if step['status'] == 'completed' else "#ef4444"
-        steps_html += f"""
-            <div class="timeline-item" style="border-left-color: {step_color}">
-                <div class="timeline-header">
-                    <span class="step-name">{step['step']}</span>
-                    <span class="step-time">{step['timestamp']}</span>
+    # Format upload attempts
+    upload_html = ""
+    if execution.get('upload_attempts'):
+        upload_html = "<h2>Upload Details</h2><div class='info-grid'>"
+        for platform, attempts in execution['upload_attempts'].items():
+            fallback_info = next((f for f in execution.get('fallback_usage', []) if f['platform'] == platform), None)
+            url = execution.get('upload_urls', {}).get(platform, 'N/A')
+            
+            upload_html += f"""
+                <div>
+                    {platform}:
+                    Attempts: {attempts}
+                    {f'<div>Used fallback: {fallback_info["reason"]}</div>' if fallback_info else ''}
+                    {f'<div>URL: {url}</div>' if url != 'N/A' else ''}
                 </div>
-                <div class="step-status">{step['status']}</div>
-            </div>
-        """
-    steps_html += "</div></div>"
+            """
+        upload_html += "</div>"
 
-    # Add file details if available
+    # Format file details
     file_details_html = ""
     if execution.get('file_details'):
-        file_details_html = """
-        <div class="section">
-            <h2 class="section-title">File Details</h2>
-            <div class="info-grid">
-        """
+        file_details_html = "<h2>File Details</h2><div class='info-grid'>"
         for key, value in execution['file_details'].items():
-            file_details_html += f"""
-                <span class="label">{key}:</span>
-                <span class="value">{value}</span>
+            file_details_html += f"<div>{key}: {value}</div>"
+        file_details_html += "</div>"
+
+    # Format warnings
+    warnings_html = ""
+    if execution.get('warnings'):
+        warnings_html = "<h2>Warnings</h2><div class='info-grid'>"
+        for warning in execution['warnings']:
+            warnings_html += f"""
+                <div>
+                    {warning['timestamp']}: {warning['message']}
+                    {f"<div>Details: {warning['details']}</div>" if warning.get('details') else ""}
+                </div>
             """
-        file_details_html += "</div></div>"
+        warnings_html += "</div>"
 
-    # Add execution timing
-    timing_html = """
-    <div class="section">
-        <h2 class="section-title">Execution Timeline</h2>
-        <div class="info-grid">
-    """
-    if execution.get('start_time'):
-        timing_html += f"""
-            <span class="label">Started:</span>
-            <span class="value">{execution['start_time']}</span>
-        """
-    if execution.get('end_time'):
-        timing_html += f"""
-            <span class="label">Completed:</span>
-            <span class="value">{execution['end_time']}</span>
-        """
-    if execution.get('generation_time'):
-        timing_html += f"""
-            <span class="label">Generation Time:</span>
-            <span class="value">{execution['generation_time']} seconds</span>
-        """
-    timing_html += "</div></div>"
+    # Format processing steps
+    steps_html = ""
+    if execution.get('processing_steps'):
+        steps_html = "<h2>Processing Steps</h2><div class='info-grid'>"
+        for step in execution['processing_steps']:
+            steps_html += f"""
+                <div>
+                    {step['timestamp']}: {step['step']} - {step['status']}
+                </div>
+            """
+        steps_html += "</div>"
 
-    # Update the CSS to include new styles
-    additional_styles = """
-        .warning-section { background-color: #2d3748; border-radius: 0.375rem; padding: 1rem; margin-top: 1rem; }
-        .warning-list { list-style: none; padding: 0; }
-        .warning-item { margin-bottom: 1rem; padding: 0.5rem; border-left: 3px solid #f59e0b; }
-        .warning-time { color: #9ca3af; font-size: 0.875rem; display: block; }
-        .warning-message { color: #f3f4f6; display: block; margin: 0.25rem 0; }
-        .warning-details { color: #9ca3af; font-size: 0.875rem; margin-top: 0.25rem; }
-        .timeline { border-left: 2px solid #374151; padding-left: 1.5rem; margin: 1rem 0; }
-        .timeline-item { position: relative; margin-bottom: 1.5rem; }
-        .timeline-item::before { content: ''; position: absolute; left: -1.75rem; top: 0; width: 1rem; height: 1rem; border-radius: 50%; background: #1f2937; border: 2px solid; }
-        .timeline-header { display: flex; justify-content: space-between; align-items: center; }
-        .step-name { font-weight: 500; color: #f3f4f6; }
-        .step-time { color: #9ca3af; font-size: 0.875rem; }
-        .step-status { color: #d1d5db; margin-top: 0.25rem; font-size: 0.875rem; }
-        .fallback-info { color: #f59e0b; font-size: 0.875rem; margin: 0.25rem 0; }
-    """
-
-    # Combine the original template with the new sections
     return f"""
     <html>
     <head>
         <style>
             body {{
                 font-family: sans-serif;
-                background-color: #111827;
-                color: #f3f4f6;
-                padding: 2rem;
+                color: #333;
+                padding: 1rem;
                 margin: 0;
             }}
-            .container {{
-                max-width: 800px;  /* Increased from 600px to accommodate more content */
-                margin: 0 auto;
-                background-color: #1f2937;
-                border-radius: 0.5rem;
-                padding: 2rem;
-                border: 1px solid #374151;
+            h1 {{
+                color: #1a1a1a;
+                font-size: 1.5rem;
+                margin-bottom: 1rem;
             }}
-            /* ... (keep existing styles) ... */
-            {additional_styles}
+            h2 {{
+                color: #1a1a1a;
+                font-size: 1.2rem;
+                margin-top: 1rem;
+            }}
+            .info-grid {{
+                margin-bottom: 1rem;
+            }}
+            ul {{
+                list-style: none;
+                padding: 0;
+                margin: 0;
+            }}
         </style>
     </head>
     <body>
-        <div class="container">
-            <div class="header">
-                <h1 class="title">Video Pipeline Pro</h1>
-                <div class="status-badge">
-                    <i class="fas {('fa-check' if success else 'fa-exclamation-triangle')} mr-2"></i>
-                    {task_info['status'].upper()}
-                </div>
-            </div>
+        <h1>Video Pipeline Pro</h1>
+        <div>{task_info['name']}</div>
 
-            {timing_html}
-
-            <div class="section">
-                <h2 class="section-title">Task Details</h2>
-                <div class="info-grid">
-                    <span class="label">Name:</span>
-                    <span class="value">{task_info['name']}</span>
-                    <span class="label">ID:</span>
-                    <span class="value">{task_info['id']}</span>
-                    <span class="label">Created:</span>
-                    <span class="value">{task_info['created_at']}</span>
-                </div>
-            </div>
-
-            <div class="section">
-                <h2 class="section-title">Video Generation</h2>
-                <div class="info-grid">
-                    <span class="label">Generator:</span>
-                    <span class="value">{task_info['generator']}</span>
-                    <span class="label">Sound:</span>
-                    <span class="value">{task_info['sound_name'] or 'Not specified'} (Volume: {task_info['sound_volume']})</span>
-                    <span class="label">Utilities:</span>
-                    <span class="value">
-                        <ul>
-                            {utilities_html}
-                        </ul>
-                    </span>
-                </div>
-            </div>
-
-            {file_details_html}
-            
-            {steps_html}
-            
-            {upload_html}
-
-            <div class="section">
-                <h2 class="section-title">Publishing</h2>
-                <div class="info-grid">
-                    <span class="label">Platforms:</span>
-                    <span class="value">
-                        <ul>
-                            {platforms_html}
-                        </ul>
-                    </span>
-                    <span class="label">Schedule:</span>
-                    <span class="value">{task_info['schedule']}</span>
-                    <span class="label">Hashtags:</span>
-                    <span class="value">{task_info['hashtags'] or 'None'}</span>
-                </div>
-            </div>
-
-            {warnings_html if execution.get('warnings') else ''}
-
-            <div class="action-buttons">
-                <a href="{base_url}/#/tasks/{task_info['id']}" 
-                   class="button primary">
-                    <i class="fas fa-external-link-alt mr-2"></i>View Task
-                </a>
-                
-                <a href="{base_url}/#/logs/{task_info['id']}" 
-                   class="button secondary">
-                    <i class="fas fa-list mr-2"></i>View Logs
-                </a>
-            </div>
-            
-            <div class="footer">
-                This is an automated notification from your Video Pipeline Manager.<br>
-                {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-            </div>
+        <h2>Task Details</h2>
+        <div class="info-grid">
+            ID: {task_info['id']} Created: {task_info['created_at']}
         </div>
+
+        {timeline_html if timeline_html else ""}
+
+        <h2>Video Generation</h2>
+        <div class="info-grid">
+            Generator: {task_info['generator']}
+            Sound: {task_info['sound_name'] or 'Not specified'} (Volume: {task_info['sound_volume']})
+            Utilities:
+            <ul>
+                {utilities_html}
+            </ul>
+        </div>
+
+        {file_details_html}
+        {steps_html}
+        {upload_html}
+
+        <h2>Publishing</h2>
+        <div class="info-grid">
+            Platforms:
+            <ul>
+                {platforms_html}
+            </ul>
+        </div>
+
+        {warnings_html}
+
+        <div>Schedule: {task_info['schedule']} Hashtags: {task_info['hashtags'] or 'None'}</div>
+        <div>This is an automated notification from your Video Pipeline Manager.</div>
+        <div>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
     </body>
     </html>
     """
@@ -474,7 +387,31 @@ def send_notification(to_emails, subject, message_html):
 def send_task_completion_notification(task_id, task_name, to_email, success=True):
     """Send a notification about task completion status with detailed information"""
     try:
-        status = "Completed Successfully" if success else "Failed"
+        task_info = get_task_details(task_id)
+        if not task_info:
+            logger.warning(f"No task info found for task {task_id}")
+            return False
+
+        # Determine the detailed status
+        execution = task_info.get('execution', {})
+        used_fallbacks = bool(execution.get('fallback_usage'))
+        preview_mode = task_info.get('status') == 'preview'
+        retry_count = len(execution.get('upload_attempts', {})) - 1 if execution.get('upload_attempts') else 0
+        
+        # Build a descriptive status
+        if not success:
+            status = "Failed"
+        elif preview_mode:
+            status = "Preview Generated"
+        elif used_fallbacks:
+            status = "Completed with Fallbacks"
+        else:
+            status = "Completed Successfully"
+
+        # Add retry info if relevant
+        if retry_count > 0:
+            status += f" (After {retry_count} retries)"
+
         subject = f"Video Pipeline Task {status}: {task_name}"
         
         # Handle multiple email recipients
@@ -483,8 +420,6 @@ def send_task_completion_notification(task_id, task_name, to_email, success=True
             logger.warning(f"No valid email recipients for task {task_id}")
             return False
             
-        task_info = get_task_details(task_id)
-        
         config = load_smtp_config()
         if not config:
             return False
