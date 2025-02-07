@@ -7,6 +7,9 @@ import smtplib
 from datetime import datetime
 from app import logger
 
+def get_db_path():
+    return os.path.join('webapp', 'database', 'pipeline.db')
+
 def load_smtp_config():
     """Load SMTP configuration from environment variables"""
     required_vars = [
@@ -46,7 +49,7 @@ def safely_parse_json(json_str, default=None):
 def get_task_details(task_id):
     """Get detailed task information including execution data for email"""
     try:
-        with sqlite3.connect('pipeline.db') as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             c = conn.cursor()
             
             # Get task with generator name (keeping existing query)

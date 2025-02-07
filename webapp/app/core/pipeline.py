@@ -10,6 +10,9 @@ from app.core.utils import execute_curl, get_latest_video, cleanup_video, format
 from app.core.email_utils import send_task_completion_notification
 from flask import current_app
 
+def get_db_path():
+    return os.path.join('webapp', 'database', 'pipeline.db')
+
 def log_with_task_details(level, message, task_id, details=None):
     """Helper function to log with task ID and structured details"""
     if details is None:
@@ -38,7 +41,7 @@ def check_and_set_lock():
     }
     
     try:
-        with sqlite3.connect('pipeline.db') as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             c = conn.cursor()
             c.execute("""
                 CREATE TABLE IF NOT EXISTS task_lock (
@@ -101,7 +104,7 @@ def release_lock():
     }
     
     try:
-        with sqlite3.connect('pipeline.db') as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             c = conn.cursor()
             
             c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
@@ -182,7 +185,7 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
         return False if dry_run else None
     
     try:
-        with sqlite3.connect('pipeline.db') as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             c = conn.cursor()
             
             if not (dry_run or preview_mode):

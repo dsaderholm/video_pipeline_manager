@@ -2,12 +2,15 @@ import sqlite3
 import os
 import sys
 
+def get_db_path():
+    return os.path.join('webapp', 'database', 'pipeline.db')
+
 # Add parent directory to Python path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def reset_locks():
     try:
-        with sqlite3.connect('pipeline.db') as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             c = conn.cursor()
             c.execute('''
                 UPDATE task_lock 

@@ -8,6 +8,9 @@ import time
 import glob
 from app.timezone import localize_timestamp
 
+def get_db_path():
+    return os.path.join('webapp', 'database', 'pipeline.db')
+
 # Create blueprint and logger
 tasks_bp = Blueprint('tasks', __name__)
 logger = logging.getLogger(__name__)
@@ -184,7 +187,7 @@ def get_task_details(task_id, conn):
 
 @tasks_bp.route('/api/tasks', methods=['GET'])
 def get_tasks():
-    with sqlite3.connect('pipeline.db') as conn:
+    with sqlite3.connect(get_db_path()) as conn:
         tasks = []
         c = conn.cursor()
         
@@ -207,7 +210,7 @@ def retry_with_backoff(task_id):
     """Retry task with exponential backoff"""
     scheduler = current_app.scheduler
     
-    with sqlite3.connect('pipeline.db') as conn:
+    with sqlite3.connect(get_db_path()) as conn:
         c = conn.cursor()
         c.execute("SELECT retry_count FROM tasks WHERE id = ?", (task_id,))
         result = c.fetchone()
@@ -253,7 +256,7 @@ def create_task():
     if not is_valid:
         return jsonify({'success': False, 'message': error_message}), 400
     
-    with sqlite3.connect('pipeline.db') as conn:
+    with sqlite3.connect(get_db_path()) as conn:
         try:
             conn.execute('BEGIN')
             c = conn.cursor()
@@ -319,7 +322,7 @@ def create_task():
 def delete_task(id):
     scheduler = current_app.scheduler
     
-    with sqlite3.connect('pipeline.db') as conn:
+    with sqlite3.connect(get_db_path()) as conn:
         try:
             conn.execute('BEGIN')
             c = conn.cursor()
@@ -367,7 +370,7 @@ def delete_task(id):
 def run_task(id):
     try:
         # First verify task exists and is not already running
-        with sqlite3.connect('pipeline.db') as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             c = conn.cursor()
             c.execute("SELECT id, status FROM tasks WHERE id = ?", (id,))
             task = c.fetchone()
@@ -415,7 +418,7 @@ def preview_task(id):
         # Run cleanup before generating new preview
         cleanup_preview_dir()
         
-        with sqlite3.connect('pipeline.db') as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             conn.isolation_level = None  # Enable autocommit mode
             c = conn.cursor()
             
@@ -494,7 +497,7 @@ def preview_task(id):
 
             # Only proceed if file exists and is stable
             if os.path.exists(preview_path) and file_size > 0:
-                with sqlite3.connect('pipeline.db') as conn:
+                with sqlite3.connect(get_db_path()) as conn:
                     c = conn.cursor()
                     c.execute("""
                         UPDATE tasks 
@@ -514,7 +517,7 @@ def preview_task(id):
     except Exception as e:
         logger.error(f"Error generating preview for task {id}: {str(e)}")
         # Update task status on error
-        with sqlite3.connect('pipeline.db') as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             c = conn.cursor()
             c.execute("""
                 UPDATE tasks 
@@ -584,7 +587,7 @@ def download_preview(id):
 def dry_run_task(id):
     try:
         # First verify task exists
-        with sqlite3.connect('pipeline.db') as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             c = conn.cursor()
             c.execute("SELECT id, status FROM tasks WHERE id = ?", (id,))
             task = c.fetchone()

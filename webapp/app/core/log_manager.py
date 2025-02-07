@@ -7,6 +7,9 @@ from datetime import datetime
 import pytz
 from app.timezone import get_timezone
 
+def get_db_path():
+    return os.path.join('webapp', 'database', 'pipeline.db')
+
 class DatabaseLogHandler(logging.Handler):
     def __init__(self):
         super().__init__()
@@ -15,7 +18,7 @@ class DatabaseLogHandler(logging.Handler):
     def initialize(self):
         """Initialize the logs table in the database"""
         try:
-            with sqlite3.connect('pipeline.db') as conn:
+            with sqlite3.connect(get_db_path()) as conn:
                 c = conn.cursor()
                 
                 # Drop the existing logs table if it exists
@@ -44,7 +47,7 @@ class DatabaseLogHandler(logging.Handler):
     def emit(self, record):
         """Add a log record to the database"""
         try:
-            with sqlite3.connect('pipeline.db') as conn:
+            with sqlite3.connect(get_db_path()) as conn:
                 c = conn.cursor()
                 
                 # Get current timestamp with microseconds
@@ -79,7 +82,7 @@ db_log_handler = DatabaseLogHandler()
 def get_logs(limit=100, level=None, task_id=None, since=None):
     """Retrieve logs with optional filtering"""
     try:
-        with sqlite3.connect('pipeline.db') as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             c = conn.cursor()
             
             query = "SELECT * FROM logs"
@@ -135,7 +138,7 @@ def add_log_entry(level, message, task_id=None, details=None, source=None):
     
     for attempt in range(max_retries):
         try:
-            with sqlite3.connect('pipeline.db', timeout=5.0) as conn:  # Add 5 second timeout
+            with sqlite3.connect(get_db_path(), timeout=5.0) as conn:  # Add 5 second timeout
                 c = conn.cursor()
                 current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
                 
@@ -167,7 +170,7 @@ def add_log_entry(level, message, task_id=None, details=None, source=None):
 def clear_old_logs(days=30):
     """Clear logs older than specified days"""
     try:
-        with sqlite3.connect('pipeline.db') as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             c = conn.cursor()
             c.execute('''
                 DELETE FROM logs 
@@ -181,7 +184,7 @@ def clear_old_logs(days=30):
 def init_logs():
     """Initialize the logs table in the database"""
     try:
-        with sqlite3.connect('pipeline.db') as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             c = conn.cursor()
             
             # Drop the existing logs table if it exists

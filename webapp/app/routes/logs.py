@@ -5,6 +5,9 @@ from app.core.log_manager import get_logs, clear_old_logs
 from app.timezone import localize_timestamp, get_timezone
 import pytz
 
+def get_db_path():
+    return os.path.join('webapp', 'database', 'pipeline.db')
+
 # Create blueprint
 logs_bp = Blueprint('logs', __name__, url_prefix='')
 

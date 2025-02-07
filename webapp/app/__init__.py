@@ -100,7 +100,8 @@ def init_scheduler(app):
         if event.job_id.startswith('task_'):
             try:
                 task_id = int(event.job_id.split('_')[1])
-                with sqlite3.connect('pipeline.db') as conn:
+                db_path = os.path.join('webapp', 'database', 'pipeline.db')
+                with sqlite3.connect(db_path) as conn:
                     c = conn.cursor()
                     c.execute("UPDATE tasks SET status = 'failed' WHERE id = ?", (task_id,))
                     conn.commit()
@@ -131,7 +132,8 @@ def init_scheduler(app):
 
     # Log all existing tasks
     try:
-        with sqlite3.connect('pipeline.db') as conn:
+        db_path = os.path.join('webapp', 'database', 'pipeline.db')
+        with sqlite3.connect(db_path) as conn:
             c = conn.cursor()
             c.execute("SELECT id, name, schedule FROM tasks WHERE status != 'completed'")
             tasks = c.fetchall()

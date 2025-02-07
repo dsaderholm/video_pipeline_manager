@@ -5,7 +5,8 @@ from app import logger
 
 def init_db():
     try:
-        with sqlite3.connect('pipeline.db') as conn:
+        db_path = os.path.join('webapp', 'database', 'pipeline.db')
+        with sqlite3.connect(db_path) as conn:
             c = conn.cursor()
             
             # Create generators table

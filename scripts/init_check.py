@@ -2,18 +2,22 @@ import sqlite3
 import os
 import sys
 
+def get_db_path():
+    return os.path.join('webapp', 'database', 'pipeline.db')
+
 # Add parent directory to Python path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def verify_database():
     try:
         # Check if database exists
-        if not os.path.exists('pipeline.db'):
+        db_path = get_db_path()
+        if not os.path.exists(db_path):
             print("Database file doesn't exist. It will be created on first run.")
             return True
         
         # Try to connect and verify tables
-        with sqlite3.connect('pipeline.db') as conn:
+        with sqlite3.connect(get_db_path()) as conn:
             c = conn.cursor()
             
             # Check tables

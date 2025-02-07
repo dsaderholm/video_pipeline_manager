@@ -13,6 +13,8 @@ services:
       - PYTHONPATH=/app
       - FLASK_APP=webapp.main:app
       - PYTHONDONTWRITEBYTECODE=1  # Prevents writing .pyc files
+    volumes:
+      - video_pipeline_manager_db_data:/app/webapp/database  # Mount the volume here
     restart: unless-stopped
     networks:
       video_generation:
@@ -22,3 +24,6 @@ networks:
   video_generation:
     external: true
     name: "Video Generation"
+
+volumes:
+  video_pipeline_manager_db_data:  # Define the volume
