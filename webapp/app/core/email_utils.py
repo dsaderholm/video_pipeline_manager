@@ -52,7 +52,7 @@ def get_task_details(task_id):
         with sqlite3.connect(get_db_path()) as conn:
             c = conn.cursor()
             
-            # Get task with generator name (keeping existing query)
+            # Get task with generator name
             c.execute("""
                 SELECT t.*, g.name as generator_name 
                 FROM tasks t
@@ -74,7 +74,7 @@ def get_task_details(task_id):
             """, (task_id,))
             logs = c.fetchall()
             
-            # Process logs to extract key information
+            # Process logs to extract key information (keeping existing execution_details code)
             execution_details = {
                 'start_time': None,
                 'end_time': None,
@@ -124,29 +124,8 @@ def get_task_details(task_id):
                 # Track file details from validation
                 if "Video file validation successful" in message:
                     execution_details['file_details'].update(details)
-                
-                # Track processing steps
-                if any(step_msg in message for step_msg in [
-                    "Executing generator",
-                    "Running utility",
-                    "Processing upload for platform"
-                ]):
-                    step_name = None
-                    if "Executing generator" in message:
-                        step_name = "Video Generation"
-                    elif "Running utility" in message:
-                        step_name = f"Utility: {details.get('current_utility', {}).get('name', 'Unknown')}"
-                    elif "Processing upload for platform" in message:
-                        step_name = f"Upload: {details.get('platform', {}).get('name', 'Unknown')}"
-                    
-                    execution_details['processing_steps'].append({
-                        'step': step_name,
-                        'status': 'failed' if level == 'ERROR' else 'completed',
-                        'timestamp': timestamp,
-                        'details': details
-                    })
-            
-            # Get utilities information (keeping existing code)
+
+            # Get utilities information
             utilities = []
             util_ids = safely_parse_json(task[3], [])
             if util_ids:
@@ -164,19 +143,34 @@ def get_task_details(task_id):
             """, (task_id,))
             platforms = [f"{p[0]} ({p[1]})" for p in c.fetchall()]
             
+            # Note: task columns are:
+            # 0: id
+            # 1: name
+            # 2: generator_id
+            # 3: utilities
+            # 4: schedule
+            # 5: hashtags
+            # 6: sound_name
+            # 7: sound_volume
+            # 8: status
+            # 9: email_notify
+            # 10: retry_count
+            # 11: created_at
+            # 12: generator_name (from JOIN)
+            
             return {
                 'id': task[0],
                 'name': task[1],
-                'generator': task[-1],
+                'generator': task[-1],  # This is generator_name from the JOIN
                 'utilities': utilities,
                 'platforms': platforms,
                 'schedule': task[4],
-                'hashtags': task[6],
-                'sound_name': task[7],
-                'sound_volume': task[8],
-                'status': task[9],
+                'hashtags': task[5],
+                'sound_name': task[6],  # This maps to the correct sound_name field
+                'sound_volume': task[7],  # This maps to the correct sound_volume field
+                'status': task[8],
                 'created_at': task[11],
-                'execution': execution_details  # New field with detailed execution info
+                'execution': execution_details
             }
     except Exception as e:
         logger.error(f"Error getting task details: {str(e)}")
