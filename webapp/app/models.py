@@ -12,7 +12,7 @@ def init_db():
             # Create generators table
             c.execute('''
                 CREATE TABLE IF NOT EXISTS generators (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id INTEGER PRIMARY KEY,
                     name TEXT NOT NULL,
                     generator_curl TEXT NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -22,17 +22,17 @@ def init_db():
             # Create utilities table
             c.execute('''
                 CREATE TABLE IF NOT EXISTS utilities (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id INTEGER PRIMARY KEY,
                     name TEXT NOT NULL,
                     utility_curl TEXT NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             
-            # Create platforms table (renamed from platform_accounts and simplified)
+            # Create platforms table
             c.execute('''
                 CREATE TABLE IF NOT EXISTS platforms (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id INTEGER PRIMARY KEY,
                     name TEXT NOT NULL,
                     uploader_curl TEXT NOT NULL,
                     fallback_curl TEXT,
@@ -45,7 +45,7 @@ def init_db():
             # Create task_platform_accounts junction table
             c.execute('''
                 CREATE TABLE IF NOT EXISTS task_platform_accounts (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id INTEGER PRIMARY KEY,
                     task_id INTEGER NOT NULL,
                     platform_id INTEGER NOT NULL,
                     account_name TEXT NOT NULL,
@@ -54,10 +54,10 @@ def init_db():
                 )
             ''')
             
-            # Create tasks table (removed platforms field since it's now in junction table)
+            # Create tasks table
             c.execute('''
                 CREATE TABLE IF NOT EXISTS tasks (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id INTEGER PRIMARY KEY,
                     name TEXT NOT NULL,
                     generator_id INTEGER,
                     utilities TEXT,
@@ -128,7 +128,7 @@ def init_db():
                     # Remove the platforms column from tasks table
                     c.execute('''
                         CREATE TABLE tasks_new (
-                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            id INTEGER PRIMARY KEY,
                             name TEXT NOT NULL,
                             generator_id INTEGER,
                             utilities TEXT,
