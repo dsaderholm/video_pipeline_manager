@@ -272,7 +272,7 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                         task_id=task_id,
                         details=generator_details)
                         
-                    success, stdout, stderr = execute_curl(task_data[-1], validate_output=True)
+                    success, stdout, stderr = execute_curl(task_data[-1], validate_output=True, mode='generator')
                     if not success:
                         error_msg = f"Generator failed: {stderr}"
                         log_with_task_details('ERROR', error_msg,
@@ -343,7 +343,7 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                         util_cmd = util[2].format(input=current_video_file)
                         utility_details['command'] = util_cmd
                         
-                        success, stdout, stderr = execute_curl(util_cmd, validate_output=True)
+                        success, stdout, stderr = execute_curl(util_cmd, validate_output=True, mode='utility')
                         if not success:
                             error_msg = f"Utility failed: {stderr}"
                             utility_details.update({
@@ -493,7 +493,7 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                         current_stderr = ""
 
                         # Try primary upload
-                        success, stdout, stderr = execute_curl(upload_cmd)
+                        success, stdout, stderr = execute_curl(upload_cmd, mode='uploader')
                         current_stdout, current_stderr = stdout, stderr
 
                         # If primary fails, try fallback
@@ -507,7 +507,7 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                                 task_dict,
                                 platform_dict
                             )
-                            success, stdout, stderr = execute_curl(fallback_cmd)
+                            success, stdout, stderr = execute_curl(fallback_cmd, mode='uploader')
                             if success:
                                 current_stdout, current_stderr = stdout, stderr
 
@@ -522,7 +522,7 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                                 task_dict,
                                 platform_dict
                             )
-                            success, stdout, stderr = execute_curl(fallback_cmd_2)
+                            success, stdout, stderr = execute_curl(fallback_cmd_2, mode='uploader')
                             if success:
                                 current_stdout, current_stderr = stdout, stderr
 

@@ -427,7 +427,7 @@ def send_notification(to_emails, subject, message_html):
         logger.error(f"Failed to send email notifications: {str(e)}")
         return False
 
-def send_task_completion_notification(task_id, task_name, to_email, success=True):
+def send_task_completion_notification(task_id, task_name, to_email, success=True, platforms=None):
     """Send a notification about task completion status with detailed information"""
     try:
         task_info = get_task_details(task_id)
@@ -454,6 +454,10 @@ def send_task_completion_notification(task_id, task_name, to_email, success=True
         # Add retry info if relevant
         if retry_count > 0:
             status += f" (After {retry_count} retries)"
+
+        # Add platforms info if provided
+        if platforms:
+            status += f" - Uploaded to {', '.join(platforms)}"
 
         subject = f"Video Pipeline Task {status}: {task_name}"
         

@@ -76,9 +76,9 @@ def parse_curl_response(stdout_str, stderr_str):
     
     return response
 
-def check_curl_response(stdout_str, stderr_str):
-    """Enhanced curl response checking with better error handling"""
-    # If stderr is empty or only contains progress info, consider it successful
+def check_generator_response(stdout_str, stderr_str):
+    """Check if generator successfully created a video file"""
+    # If stderr only contains progress info, consider it successful
     if not stderr_str.strip() or all(
         line.startswith(('* ', '  % Total', '100', 'Warning: ')) 
         for line in stderr_str.strip().split('\n')
@@ -91,7 +91,6 @@ def check_curl_response(stdout_str, stderr_str):
         r'Connection refused',
         r'Could not resolve host',
         r'Operation timed out',
-        r'The requested URL returned error: ([45]\d{2})',
         r'Failed to connect'
     ]
     
@@ -99,75 +98,69 @@ def check_curl_response(stdout_str, stderr_str):
         if re.search(pattern, stderr_str, re.IGNORECASE):
             return False, stderr_str
     
-    # If no clear error is found, consider it successful
     return True, ""
 
-# def check_curl_response(stdout_str, stderr_str):
-    # """Enhanced curl response checking with better error handling"""
-    # response = parse_curl_response(stdout_str, stderr_str)
+def check_utility_response(stdout_str, stderr_str):
+    """Check if utility successfully processed the video"""
+    # If stderr only contains progress info, consider it successful
+    if not stderr_str.strip() or all(
+        line.startswith(('* ', '  % Total', '100', 'Warning: ')) 
+        for line in stderr_str.strip().split('\n')
+    ):
+        return True, ""
+        
+    # Check for explicit error messages
+    error_patterns = [
+        r'curl:\s*\(\d+\)',
+        r'Connection refused',
+        r'Could not resolve host',
+        r'Operation timed out',
+        r'Failed to connect',
+        r'HTTP/[0-9.]+ 5[0-9]{2}',  # Still check for 500s but don't look for JSON errors
+        r'500 Internal Server Error'
+    ]
     
-    # Log the complete response for debugging
-    # log_with_details('DEBUG', "Curl response analysis", details={
-        # 'stdout_preview': stdout_str[:1000],
-        # 'stderr_preview': stderr_str[:1000],
-        # 'parsed_response': response
-    # })
+    for pattern in error_patterns:
+        if re.search(pattern, stderr_str + stdout_str, re.IGNORECASE):
+            return False, stderr_str or stdout_str
     
-    # Check for explicitly successful download
-    # if 'Downloaded' in stderr_str or 'saved' in stderr_str:
-        # return True, ""
-    
-    # Check for known success patterns
-    # if response['status_code']:
-        # if response['status_code'] >= 500:
-            # return False, f"Server error: HTTP {response['status_code']}"
-        # if response['status_code'] >= 400:
-            # return False, f"Client error: HTTP {response['status_code']}"
-        # if response['status_code'] >= 200 and response['status_code'] < 300:
-            # Additional platform-specific success validation
-            # for platform, data in response.get('platform_specific', {}).items():
-                # if platform == 'tiktok' and 'error_code' in data:
-                    # return False, f"TikTok API error: {data.get('error_message', 'Unknown error')}"
-                # if platform == 'instagram' and 'error_type' in data:
-                    # return False, f"Instagram API error: {data['error_type']}"
-                # if platform == 'youtube' and 'error' in data:
-                    # return False, f"YouTube API error: {data['error']}"
-            # return True, ""
-    
-    # Check common error patterns
-    # error_patterns = [
-        # (r'curl:\s*\(\d+\)', "Curl error"),
-        # (r'Connection refused', "Connection refused"),
-        # (r'Could not resolve host', "DNS resolution failed"),
-        # (r'Operation timed out', "Request timed out"),
-        # (r'SSL certificate problem', "SSL verification failed"),
-        # (r'The requested URL returned error: ([45]\d{2})', "HTTP error {0}"),
-        # (r'Failed to connect', "Connection failed"),
-        # (r'error:', "Generic error")
-    # ]
-    
-    # for pattern, error_msg in error_patterns:
-        # match = re.search(pattern, stdout_str + stderr_str, re.IGNORECASE)
-        # if match:
-            # if len(match.groups()) > 0:
-                # return False, error_msg.format(*match.groups())
-            # return False, error_msg
-    
-    # If no error is found in stderr and it only contains progress info, consider it successful
-    # if not stderr_str.strip() or all(
-        # line.startswith(('* ', '  % Total', '100  ', 'Warning: ')) 
-        # for line in stderr_str.strip().split('\n')
-    # ):
-        # return True, ""
-    
-    # return False, "Unknown error occurred"
+    return True, ""
 
-def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, validate_output=False, timeout=3600):
-    """Enhanced curl execution with better error handling and retry logic"""
+def check_uploader_response(stdout_str, stderr_str):
+    """Check if upload was successful"""
+    # First check stdout for JSON responses
+    try:
+        json_response = json.loads(stdout_str)
+        if isinstance(json_response, dict):
+            if 'error' in json_response or 'detail' in json_response:
+                error_msg = json_response.get('error') or json_response.get('detail')
+                return False, error_msg
+            if 'success' in json_response or 'video_id' in json_response:
+                return True, ""
+    except json.JSONDecodeError:
+        pass
+
+    # Check for HTTP errors
+    error_patterns = [
+        r'HTTP/[0-9.]+ 5[0-9]{2}',
+        r'500 Internal Server Error',
+        r'The requested URL returned error: ([45]\d{2})',
+        r'server error: 5\d{2}'
+    ]
+    
+    for pattern in error_patterns:
+        if re.search(pattern, stderr_str + stdout_str, re.IGNORECASE):
+            return False, stdout_str or stderr_str
+
+    return True, ""
+
+def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, validate_output=False, timeout=3600, mode='uploader'):
+    """Enhanced curl execution with better error handling"""
     execution_details = {
         'command': curl_command,
         'attempts': [],
-        'start_time': datetime.now().isoformat()
+        'start_time': datetime.now().isoformat(),
+        'mode': mode
     }
     
     if clean_before:
@@ -197,12 +190,19 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
                 'stderr_length': len(stderr_str)
             })
             
-            success, error_msg = check_curl_response(stdout_str, stderr_str)
+            # Use appropriate response checker based on mode
+            if mode == 'generator':
+                success, error_msg = check_generator_response(stdout_str, stderr_str)
+            elif mode == 'utility':
+                success, error_msg = check_utility_response(stdout_str, stderr_str)
+            else:  # uploader mode
+                success, error_msg = check_uploader_response(stdout_str, stderr_str)
+                
             attempt_details['success'] = success
             attempt_details['error_message'] = error_msg
             
             if success:
-                if validate_output:
+                if validate_output and mode == 'generator':
                     video_file = get_latest_video()
                     if not video_file:
                         if attempt < retries - 1:
