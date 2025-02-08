@@ -9,7 +9,7 @@ if __name__ == '__main__':
             logger.info(f"Route: {rule}")
         
         # Run the app with debug mode on
-        app.run(host='0.0.0.0', port=5000, debug=True)
+        app.run(host='0.0.0.0', port=5000, debug=False)
     except Exception as e:
         logger.error(f"Failed to start application: {str(e)}")
         raise

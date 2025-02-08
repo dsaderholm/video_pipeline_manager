@@ -78,63 +78,89 @@ def parse_curl_response(stdout_str, stderr_str):
 
 def check_curl_response(stdout_str, stderr_str):
     """Enhanced curl response checking with better error handling"""
-    response = parse_curl_response(stdout_str, stderr_str)
-    
-    # Log the complete response for debugging
-    log_with_details('DEBUG', "Curl response analysis", details={
-        'stdout_preview': stdout_str[:1000],
-        'stderr_preview': stderr_str[:1000],
-        'parsed_response': response
-    })
-    
-    # Check for explicitly successful download
-    if 'Downloaded' in stderr_str or 'saved' in stderr_str:
-        return True, ""
-    
-    # Check for known success patterns
-    if response['status_code']:
-        if response['status_code'] >= 500:
-            return False, f"Server error: HTTP {response['status_code']}"
-        if response['status_code'] >= 400:
-            return False, f"Client error: HTTP {response['status_code']}"
-        if response['status_code'] >= 200 and response['status_code'] < 300:
-            # Additional platform-specific success validation
-            for platform, data in response.get('platform_specific', {}).items():
-                if platform == 'tiktok' and 'error_code' in data:
-                    return False, f"TikTok API error: {data.get('error_message', 'Unknown error')}"
-                if platform == 'instagram' and 'error_type' in data:
-                    return False, f"Instagram API error: {data['error_type']}"
-                if platform == 'youtube' and 'error' in data:
-                    return False, f"YouTube API error: {data['error']}"
-            return True, ""
-    
-    # Check common error patterns
-    error_patterns = [
-        (r'curl:\s*\(\d+\)', "Curl error"),
-        (r'Connection refused', "Connection refused"),
-        (r'Could not resolve host', "DNS resolution failed"),
-        (r'Operation timed out', "Request timed out"),
-        (r'SSL certificate problem', "SSL verification failed"),
-        (r'The requested URL returned error: ([45]\d{2})', "HTTP error {0}"),
-        (r'Failed to connect', "Connection failed"),
-        (r'error:', "Generic error")
-    ]
-    
-    for pattern, error_msg in error_patterns:
-        match = re.search(pattern, stdout_str + stderr_str, re.IGNORECASE)
-        if match:
-            if len(match.groups()) > 0:
-                return False, error_msg.format(*match.groups())
-            return False, error_msg
-    
-    # If no error is found in stderr and it only contains progress info, consider it successful
+    # If stderr is empty or only contains progress info, consider it successful
     if not stderr_str.strip() or all(
-        line.startswith(('* ', '  % Total', '100  ', 'Warning: ')) 
+        line.startswith(('* ', '  % Total', '100', 'Warning: ')) 
         for line in stderr_str.strip().split('\n')
     ):
         return True, ""
+        
+    # Check for explicit error messages
+    error_patterns = [
+        r'curl:\s*\(\d+\)',
+        r'Connection refused',
+        r'Could not resolve host',
+        r'Operation timed out',
+        r'The requested URL returned error: ([45]\d{2})',
+        r'Failed to connect'
+    ]
     
-    return False, "Unknown error occurred"
+    for pattern in error_patterns:
+        if re.search(pattern, stderr_str, re.IGNORECASE):
+            return False, stderr_str
+    
+    # If no clear error is found, consider it successful
+    return True, ""
+
+# def check_curl_response(stdout_str, stderr_str):
+    # """Enhanced curl response checking with better error handling"""
+    # response = parse_curl_response(stdout_str, stderr_str)
+    
+    # Log the complete response for debugging
+    # log_with_details('DEBUG', "Curl response analysis", details={
+        # 'stdout_preview': stdout_str[:1000],
+        # 'stderr_preview': stderr_str[:1000],
+        # 'parsed_response': response
+    # })
+    
+    # Check for explicitly successful download
+    # if 'Downloaded' in stderr_str or 'saved' in stderr_str:
+        # return True, ""
+    
+    # Check for known success patterns
+    # if response['status_code']:
+        # if response['status_code'] >= 500:
+            # return False, f"Server error: HTTP {response['status_code']}"
+        # if response['status_code'] >= 400:
+            # return False, f"Client error: HTTP {response['status_code']}"
+        # if response['status_code'] >= 200 and response['status_code'] < 300:
+            # Additional platform-specific success validation
+            # for platform, data in response.get('platform_specific', {}).items():
+                # if platform == 'tiktok' and 'error_code' in data:
+                    # return False, f"TikTok API error: {data.get('error_message', 'Unknown error')}"
+                # if platform == 'instagram' and 'error_type' in data:
+                    # return False, f"Instagram API error: {data['error_type']}"
+                # if platform == 'youtube' and 'error' in data:
+                    # return False, f"YouTube API error: {data['error']}"
+            # return True, ""
+    
+    # Check common error patterns
+    # error_patterns = [
+        # (r'curl:\s*\(\d+\)', "Curl error"),
+        # (r'Connection refused', "Connection refused"),
+        # (r'Could not resolve host', "DNS resolution failed"),
+        # (r'Operation timed out', "Request timed out"),
+        # (r'SSL certificate problem', "SSL verification failed"),
+        # (r'The requested URL returned error: ([45]\d{2})', "HTTP error {0}"),
+        # (r'Failed to connect', "Connection failed"),
+        # (r'error:', "Generic error")
+    # ]
+    
+    # for pattern, error_msg in error_patterns:
+        # match = re.search(pattern, stdout_str + stderr_str, re.IGNORECASE)
+        # if match:
+            # if len(match.groups()) > 0:
+                # return False, error_msg.format(*match.groups())
+            # return False, error_msg
+    
+    # If no error is found in stderr and it only contains progress info, consider it successful
+    # if not stderr_str.strip() or all(
+        # line.startswith(('* ', '  % Total', '100  ', 'Warning: ')) 
+        # for line in stderr_str.strip().split('\n')
+    # ):
+        # return True, ""
+    
+    # return False, "Unknown error occurred"
 
 def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, validate_output=False, timeout=3600):
     """Enhanced curl execution with better error handling and retry logic"""
