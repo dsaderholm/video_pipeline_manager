@@ -77,17 +77,21 @@ def parse_curl_response(stdout_str, stderr_str):
     return response
 
 def check_curl_response(stdout_str, stderr_str):
-    """Enhanced curl response checking with better error detection"""
+    """Enhanced curl response checking with better error handling"""
     response = parse_curl_response(stdout_str, stderr_str)
     
-    # Always log the complete response for debugging
+    # Log the complete response for debugging
     log_with_details('DEBUG', "Curl response analysis", details={
         'stdout_preview': stdout_str[:1000],
         'stderr_preview': stderr_str[:1000],
         'parsed_response': response
     })
     
-    # Check for known success patterns first
+    # Check for explicitly successful download
+    if 'Downloaded' in stderr_str or 'saved' in stderr_str:
+        return True, ""
+    
+    # Check for known success patterns
     if response['status_code']:
         if response['status_code'] >= 500:
             return False, f"Server error: HTTP {response['status_code']}"
@@ -123,15 +127,9 @@ def check_curl_response(stdout_str, stderr_str):
                 return False, error_msg.format(*match.groups())
             return False, error_msg
     
-    # If we have a response body that indicates success, return true
-    if response['body']:
-        body_str = str(response['body']).lower()
-        if any(success_key in body_str for success_key in ['success', 'ok', 'video_id', 'media_id', 'share_url']):
-            return True, ""
-    
-    # If no clear error indicators and stderr is clean or only contains progress info
+    # If no error is found in stderr and it only contains progress info, consider it successful
     if not stderr_str.strip() or all(
-        line.startswith(('* ', '  % Total', '100   ', 'Warning: '))
+        line.startswith(('* ', '  % Total', '100  ', 'Warning: ')) 
         for line in stderr_str.strip().split('\n')
     ):
         return True, ""
