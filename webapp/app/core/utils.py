@@ -398,6 +398,52 @@ def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
         details=search_details)
     return None
 
+def cleanup_video(video_file):
+    """Clean up a video file with improved error handling"""
+    if not video_file:
+        return
+
+    cleanup_details = {
+        'video_file': video_file,
+        'exists': False,
+        'size': None,
+        'success': False
+    }
+
+    try:
+        if os.path.exists(video_file):
+            cleanup_details['exists'] = True
+            file_size = os.path.getsize(video_file)
+            cleanup_details['size'] = file_size
+            
+            log_with_details('INFO', f"Cleaning up video file: {video_file}",
+                details=cleanup_details)
+            
+            retries = 3
+            for i in range(retries):
+                try:
+                    os.remove(video_file)
+                    cleanup_details['success'] = True
+                    cleanup_details['attempts'] = i + 1
+                    log_with_details('INFO', f"Successfully removed video file",
+                        details=cleanup_details)
+                    break
+                except PermissionError as e:
+                    if i < retries - 1:
+                        cleanup_details['current_attempt'] = i + 1
+                        cleanup_details['error'] = str(e)
+                        log_with_details('WARNING', f"Permission error, retrying...",
+                            details=cleanup_details)
+                        time.sleep(1)
+                        continue
+                    raise
+                    
+    except Exception as e:
+        cleanup_details['error'] = str(e)
+        cleanup_details['success'] = False
+        log_with_details('ERROR', f"Error removing video file",
+            details=cleanup_details)
+
 def create_safe_filename(original_path):
     """Create a safe temporary filename for uploads"""
     directory = os.path.dirname(original_path) or '.'
