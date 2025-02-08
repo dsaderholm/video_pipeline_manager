@@ -2,24 +2,43 @@ import sqlite3
 import json
 import time
 import os
+import sys
 import logging
 import shutil
+import threading
 from datetime import datetime
 from app import logger
 from app.core.utils import execute_curl, get_latest_video, cleanup_video, format_upload_command, log_with_details
 from app.core.email_utils import send_task_completion_notification
 from flask import current_app
 
+# Global lock for database operations
+db_lock = threading.Lock()
+
 def get_db_path():
     return os.path.join('webapp', 'database', 'pipeline.db')
+
+def get_db_connection(timeout=30.0):
+    """Get a database connection with timeout and proper settings"""
+    conn = sqlite3.connect(get_db_path(), timeout=timeout)
+    conn.execute("PRAGMA journal_mode=WAL")  # Write-Ahead Logging for better concurrency
+    conn.execute("PRAGMA busy_timeout=30000")  # 30 second timeout
+    return conn
 
 def log_with_task_details(level, message, task_id, details=None):
     """Helper function to log with task ID and structured details"""
     if details is None:
         details = {}
     details['task_id'] = task_id
-    # Only use utils.log_with_details to avoid duplication
-    log_with_details(level, message, task_id=task_id, details=details, source='pipeline')
+    
+    # Use a separate connection for logging to avoid deadlocks
+    try:
+        with get_db_connection() as log_conn:
+            log_with_details(level, message, task_id=task_id, details=details, source='pipeline')
+    except sqlite3.OperationalError as e:
+        # If logging fails, write to stderr as fallback
+        print(f"ERROR: Failed to log to database: {str(e)}", file=sys.stderr)
+        print(f"{level}: {message} (Task {task_id})", file=sys.stderr)
 
 def create_logger_with_task_id(task_id):
     """Create a logger that attaches task_id to all records"""
@@ -40,97 +59,96 @@ def check_and_set_lock():
         'timestamp': datetime.now().isoformat()
     }
     
-    try:
-        with sqlite3.connect(get_db_path()) as conn:
-            c = conn.cursor()
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS task_lock (
-                    id INTEGER PRIMARY KEY,
-                    locked INTEGER DEFAULT 0,
-                    task_id INTEGER,
-                    locked_at TIMESTAMP
-                )
-            """)
-            conn.commit()
-            
-            c.execute("INSERT OR IGNORE INTO task_lock (id, locked) VALUES (1, 0)")
-            conn.commit()
-            
-            c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
-            current_lock = c.fetchone()
-            lock_details['current_state'] = {
-                'locked': bool(current_lock[0]),
-                'task_id': current_lock[1],
-                'locked_at': current_lock[2]
-            }
-            
-            c.execute("""
-                UPDATE task_lock 
-                SET locked = 0, task_id = NULL, locked_at = NULL 
-                WHERE locked = 1 
-                AND datetime(locked_at, '+30 minutes') < datetime('now')
-            """)
-            
-            c.execute("""
-                UPDATE task_lock 
-                SET locked = 1, task_id = NULL, locked_at = datetime('now')
-                WHERE id = 1 AND locked = 0
-            """)
-            conn.commit()
-            
-            acquired = c.rowcount > 0
-            lock_details['acquired'] = acquired
-            
-            if acquired:
-                log_with_details('INFO', "Successfully acquired pipeline lock",
+    with db_lock:  # Use thread lock for atomic operation
+        try:
+            conn = get_db_connection()
+            with conn:
+                c = conn.cursor()
+                
+                # Create lock table if it doesn't exist
+                c.execute("""
+                    CREATE TABLE IF NOT EXISTS task_lock (
+                        id INTEGER PRIMARY KEY,
+                        locked INTEGER DEFAULT 0,
+                        task_id INTEGER,
+                        locked_at TIMESTAMP
+                    )
+                """)
+                
+                # Insert default lock record if not exists
+                c.execute("INSERT OR IGNORE INTO task_lock (id, locked) VALUES (1, 0)")
+                
+                # Clear stale locks (older than 30 minutes)
+                c.execute("""
+                    UPDATE task_lock 
+                    SET locked = 0, task_id = NULL, locked_at = NULL 
+                    WHERE locked = 1 
+                    AND datetime(locked_at, '+30 minutes') < datetime('now')
+                """)
+                
+                # Try to acquire lock
+                c.execute("""
+                    UPDATE task_lock 
+                    SET locked = 1, task_id = NULL, locked_at = datetime('now')
+                    WHERE id = 1 AND locked = 0
+                """)
+                
+                acquired = c.rowcount > 0
+                lock_details['acquired'] = acquired
+                
+                log_with_task_details('INFO', 
+                    "Successfully acquired pipeline lock" if acquired else "Failed to acquire pipeline lock",
+                    task_id=None,
                     details=lock_details)
-            else:
-                log_with_details('INFO', "Failed to acquire pipeline lock - another task is running",
-                    details=lock_details)
-            
-            return acquired
-            
-    except Exception as e:
-        lock_details['error'] = str(e)
-        log_with_details('ERROR', f"Error managing pipeline lock",
-            details=lock_details)
-        raise
+                
+                return acquired
+                
+        except Exception as e:
+            lock_details['error'] = str(e)
+            log_with_task_details('ERROR', f"Error managing pipeline lock", 
+                task_id=None,
+                details=lock_details)
+            raise
 
 def release_lock():
-    """Release the task lock"""
-    lock_details = {
-        'operation': 'release',
-        'timestamp': datetime.now().isoformat()
-    }
+    """Release the task lock with improved error handling"""
+    with db_lock:
+        try:
+            conn = get_db_connection()
+            with conn:
+                c = conn.cursor()
+                c.execute("""
+                    UPDATE task_lock 
+                    SET locked = 0, task_id = NULL, locked_at = NULL 
+                    WHERE id = 1
+                """)
+        except Exception as e:
+            # Log error but don't raise - we want to ensure the lock is released
+            log_with_task_details('ERROR', f"Error releasing pipeline lock: {str(e)}", 
+                task_id=None,
+                details={'error': str(e)})
+
+def update_task_status(task_id, status, conn=None):
+    """Update task status with retry logic"""
+    should_close_conn = False
+    if conn is None:
+        conn = get_db_connection()
+        should_close_conn = True
     
     try:
-        with sqlite3.connect(get_db_path()) as conn:
-            c = conn.cursor()
-            
-            c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
-            current_lock = c.fetchone()
-            lock_details['previous_state'] = {
-                'locked': bool(current_lock[0]),
-                'task_id': current_lock[1],
-                'locked_at': current_lock[2]
-            }
-            
-            c.execute("""
-                UPDATE task_lock 
-                SET locked = 0, task_id = NULL, locked_at = NULL 
-                WHERE id = 1
-            """)
-            conn.commit()
-            
-            lock_details['released'] = True
-            log_with_details('INFO', "Released pipeline lock",
-                details=lock_details)
-            
-    except Exception as e:
-        lock_details['error'] = str(e)
-        log_with_details('ERROR', f"Error releasing pipeline lock",
-            details=lock_details)
-        raise
+        for attempt in range(3):  # Retry up to 3 times
+            try:
+                with conn:
+                    c = conn.cursor()
+                    c.execute("UPDATE tasks SET status=? WHERE id=?", (status, task_id))
+                return True
+            except sqlite3.OperationalError as e:
+                if attempt == 2:  # Last attempt
+                    raise
+                time.sleep(1)  # Wait before retry
+    finally:
+        if should_close_conn:
+            conn.close()
 
 def get_preview_dir():
     """Get the absolute path to the previews directory"""
@@ -177,6 +195,16 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
     
     current_video_file = None
     safe_video_path = None
+    conn = None
+    
+    if not (dry_run or preview_mode):
+        # Update task status to running
+        try:
+            update_task_status(task_id, 'running')
+        except Exception as e:
+            log_with_task_details('ERROR', f"Failed to update task status", 
+                task_id=task_id,
+                details={'error': str(e), **pipeline_details})
     
     if not (dry_run or preview_mode) and not check_and_set_lock():
         log_with_task_details('INFO', "Another task is currently running. Task will retry later.",
@@ -185,7 +213,8 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
         return False if dry_run else None
     
     try:
-        with sqlite3.connect(get_db_path()) as conn:
+        conn = get_db_connection()
+        with conn:
             c = conn.cursor()
             
             if not (dry_run or preview_mode):
@@ -358,8 +387,7 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                         task_id=task_id,
                         details=preview_details)
                         
-                    c.execute("UPDATE tasks SET status='completed' WHERE id=?", (task_id,))
-                    conn.commit()
+                    update_task_status(task_id, 'completed', conn)
                     preview_details['status_updated'] = True
                     
                     log_with_task_details('INFO', "Preview task completed",
@@ -420,6 +448,8 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                         task_id=task_id,
                         details=upload_base_details)
                     
+                    uploaded_platforms = []  # Track successful uploads
+                    
                     for platform_data in platform_data_list:
                         platform_id, platform_name, upload_curl, account_name, default_hashtags, fallback_curl, fallback_curl_2 = platform_data
                         
@@ -432,17 +462,16 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                                 'has_default_hashtags': bool(default_hashtags)
                             }
                         }
-                        
+
                         log_with_task_details('INFO', f"Processing upload for platform",
                             task_id=task_id,
                             details=platform_details)
-                        
-                        # Create platform_dict for format_upload_command
+
                         platform_dict = {
                             'account_name': account_name,
                             'default_hashtags': default_hashtags
                         }
-                        
+
                         # Format the upload command with all required parameters
                         upload_cmd, safe_video_path = format_upload_command(
                             upload_curl,
@@ -450,24 +479,28 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                             task_dict,
                             platform_dict
                         )
-                        
+
                         if not upload_cmd or not safe_video_path:
                             error_msg = "Failed to prepare upload command or safe video path"
                             log_with_task_details('ERROR', error_msg,
                                 task_id=task_id,
                                 details=platform_details)
-                            raise Exception(error_msg)
-                        
+                            continue  # Skip this platform but continue with others
+
                         platform_details['safe_video_path'] = safe_video_path
-                        
+                        success = False
+                        current_stdout = ""
+                        current_stderr = ""
+
                         # Try primary upload
                         success, stdout, stderr = execute_curl(upload_cmd)
+                        current_stdout, current_stderr = stdout, stderr
 
                         # If primary fails, try fallback
                         if not success and fallback_curl:
                             log_with_task_details('INFO', f"Primary upload failed, attempting fallback for {platform_name}",
                                 task_id=task_id,
-                                details=platform_details)
+                                details={'primary_error': stderr, **platform_details})
                             fallback_cmd, _ = format_upload_command(
                                 fallback_curl,
                                 current_video_file,
@@ -475,12 +508,14 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                                 platform_dict
                             )
                             success, stdout, stderr = execute_curl(fallback_cmd)
+                            if success:
+                                current_stdout, current_stderr = stdout, stderr
 
                         # If fallback fails, try secondary fallback
                         if not success and fallback_curl_2:
-                            log_with_task_details('INFO', f"Primary fallback failed, attempting secondary fallback for {platform_name}",
+                            log_with_task_details('INFO', f"Fallback upload failed, attempting secondary fallback for {platform_name}",
                                 task_id=task_id,
-                                details=platform_details)
+                                details={'fallback_error': stderr, **platform_details})
                             fallback_cmd_2, _ = format_upload_command(
                                 fallback_curl_2,
                                 current_video_file,
@@ -488,57 +523,73 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                                 platform_dict
                             )
                             success, stdout, stderr = execute_curl(fallback_cmd_2)
+                            if success:
+                                current_stdout, current_stderr = stdout, stderr
 
-                        if not success:
-                            error_msg = f"All upload attempts failed for {platform_name}: {stderr}"
-                            platform_details.update({
-                                'stdout': stdout,
-                                'stderr': stderr
-                            })
+                        if success:
+                            uploaded_platforms.append(platform_name)
+                            log_with_task_details('INFO', f"Successfully uploaded to {platform_name}",
+                                task_id=task_id,
+                                details={
+                                    'stdout': current_stdout,
+                                    'stderr': current_stderr,
+                                    **platform_details
+                                })
+                        else:
+                            error_msg = f"All upload attempts failed for {platform_name}: {current_stderr}"
                             log_with_task_details('ERROR', error_msg,
                                 task_id=task_id,
-                                details=platform_details)
-                            raise Exception(error_msg)
-                            
-                        log_with_task_details('INFO', f"Successfully uploaded to platform",
-                            task_id=task_id,
-                            details=platform_details)
-                
-                # Update task status and send notification
-                completion_details = {
-                    **pipeline_details,
-                    'status': 'completed'
-                }
-                
-                c.execute("UPDATE tasks SET status='completed' WHERE id=?", (task_id,))
-                conn.commit()
-                completion_details['status_updated'] = True
-                
-                if task_data[9]:  # If email notifications are enabled
-                    c.execute("SELECT id, name, email_notify FROM tasks WHERE id=?", (task_id,))
-                    task_info = c.fetchone()
-                    if task_info and task_info[2]:  # email_notify contains the email address
-                        send_task_completion_notification(task_id, task_info[1], task_info[2], success=True)
-                        completion_details['notification_sent'] = True
-                    log_with_task_details('INFO', "Sent completion notification",
-                        task_id=task_id,
-                        details=completion_details)
-                
-                # Clean up video file unless it's a preview that we want to keep
-                if current_video_file and not preview_mode:
-                    cleanup_video(current_video_file)
-                    if safe_video_path and os.path.exists(safe_video_path):
-                        cleanup_video(safe_video_path)
-                    completion_details['videos_cleaned'] = True
-                    log_with_task_details('INFO', "Cleaned up temporary video files",
-                        task_id=task_id,
-                        details=completion_details)
-                
-                log_with_task_details('INFO', "Task completed successfully",
-                    task_id=task_id,
-                    details=completion_details)
-                return True
+                                details={
+                                    'stdout': current_stdout,
+                                    'stderr': current_stderr,
+                                    **platform_details
+                                })
+                            # Don't raise exception, continue with other platforms
 
+                    # After all platforms are processed
+                    if not uploaded_platforms:
+                        raise Exception("Failed to upload to any platform")
+
+                    # Update task status and send notification for successful uploads
+                    completion_details = {
+                        **pipeline_details,
+                        'status': 'completed',
+                        'uploaded_platforms': uploaded_platforms
+                    }
+
+                    update_task_status(task_id, 'completed', conn)
+                    completion_details['status_updated'] = True
+
+                    if task_data[9]:  # If email notifications are enabled
+                        try:
+                            c.execute("SELECT id, name, email_notify FROM tasks WHERE id=?", (task_id,))
+                            task_info = c.fetchone()
+                            if task_info and task_info[2]:  # email_notify contains the email address
+                                send_task_completion_notification(
+                                    task_id, 
+                                    task_info[1], 
+                                    task_info[2], 
+                                    success=True,
+                                    platforms=uploaded_platforms
+                                )
+                                completion_details['notification_sent'] = True
+                        except Exception as e:
+                            log_with_task_details('ERROR', f"Failed to send completion notification",
+                                task_id=task_id,
+                                details={'error': str(e), **completion_details})
+
+                    # Clean up video files
+                    if current_video_file:
+                        cleanup_video(current_video_file)
+                        if safe_video_path and os.path.exists(safe_video_path):
+                            cleanup_video(safe_video_path)
+                        completion_details['videos_cleaned'] = True
+
+                    log_with_task_details('INFO', "Task completed successfully",
+                        task_id=task_id,
+                        details=completion_details)
+                    return True
+                
             except Exception as e:
                 error_details = {
                     **pipeline_details,
@@ -546,27 +597,34 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                     'error_type': type(e).__name__
                 }
                 
-                log_with_task_details('ERROR', f"Pipeline error",
+                log_with_task_details('ERROR', f"Pipeline error: {str(e)}",
                     task_id=task_id,
                     details=error_details)
                     
-                # Clean up any remaining safe video path if exists
-                if safe_video_path and os.path.exists(safe_video_path):
-                    try:
-                        os.rename(safe_video_path, current_video_file)
-                        error_details['filename_restored'] = True
-                    except OSError as restore_error:
-                        error_details['filename_restore_error'] = str(restore_error)
+                # Update task status to failed
+                try:
+                    update_task_status(task_id, 'failed', conn)
+                except Exception as status_error:
+                    log_with_task_details('ERROR', f"Failed to update task status after error",
+                        task_id=task_id,
+                        details={'error': str(status_error), **error_details})
+                
                 raise
                 
             finally:
-                # Always try to restore original filename if safe path exists
+                # Clean up any remaining files
+                if current_video_file and not preview_mode:
+                    cleanup_video(current_video_file)
                 if safe_video_path and os.path.exists(safe_video_path):
                     try:
                         os.rename(safe_video_path, current_video_file)
                     except OSError:
                         pass
-    
+                
+                # Always release the lock for real runs
+                if not (dry_run or preview_mode):
+                    release_lock()
+                    
     except Exception as e:
         error_details = {
             **pipeline_details,
@@ -574,15 +632,14 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
             'error_type': type(e).__name__
         }
         
-        log_with_task_details('ERROR', f"Task failed",
+        log_with_task_details('ERROR', f"Task failed: {str(e)}",
             task_id=task_id,
             details=error_details)
         
         # Send failure notification if email notifications are enabled
         if not (dry_run or preview_mode):
             try:
-                c.execute("SELECT id, name, email_notify FROM tasks WHERE id=?", (task_id,))
-                task_info = c.fetchone()
+                task_info = c.execute("SELECT id, name, email_notify FROM tasks WHERE id=?", (task_id,)).fetchone()
                 if task_info and task_info[2]:
                     send_task_completion_notification(task_id, task_info[1], task_info[2], success=False)
                     error_details['failure_notification_sent'] = True
@@ -593,11 +650,6 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                     details=error_details)
         
         raise
-        
     finally:
-        # Always release the lock for real runs
-        if not (dry_run or preview_mode):
-            release_lock()
-            log_with_task_details('INFO', "Released pipeline lock",
-                task_id=task_id,
-                details=pipeline_details)
+        if conn:
+            conn.close()
