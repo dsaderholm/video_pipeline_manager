@@ -18,11 +18,12 @@ db_lock = threading.Lock()
 def get_db_path():
     return os.path.join('webapp', 'database', 'pipeline.db')
 
-def get_db_connection(timeout=30.0):
+def get_db_connection(timeout=60.0):
     """Get a database connection with timeout and proper settings"""
     conn = sqlite3.connect(get_db_path(), timeout=timeout)
     conn.execute("PRAGMA journal_mode=WAL")  # Write-Ahead Logging for better concurrency
-    conn.execute("PRAGMA busy_timeout=30000")  # 30 second timeout
+    conn.execute("PRAGMA busy_timeout=60000")  # 60 second timeout
+    conn.execute("PRAGMA synchronous=NORMAL")  # Slightly less durability for better concurrency
     return conn
 
 def log_with_task_details(level, message, task_id, details=None):

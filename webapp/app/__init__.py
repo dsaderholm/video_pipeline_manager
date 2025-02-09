@@ -115,6 +115,14 @@ def init_scheduler(app):
     scheduler = APScheduler()
     app.config['SCHEDULER_API_ENABLED'] = True
     app.config['SCHEDULER_TIMEZONE'] = os.getenv('TIMEZONE', 'UTC')
+    
+    # Add these lines:
+    app.config['SCHEDULER_JOB_DEFAULTS'] = {
+        'coalesce': True,
+        'max_instances': 1,
+        'misfire_grace_time': 60
+    }
+    
     scheduler.init_app(app)
 
     # Add event listeners
