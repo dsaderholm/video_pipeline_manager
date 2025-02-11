@@ -79,7 +79,7 @@ class DatabaseLogHandler(logging.Handler):
 # Create a single instance of the database log handler
 db_log_handler = DatabaseLogHandler()
 
-def get_logs(limit=100, level=None, task_id=None, since=None):
+def get_logs(limit=100, level=None, task_id=None, since=None, processing_status=None):
     """Retrieve logs with optional filtering"""
     try:
         with sqlite3.connect(get_db_path()) as conn:
@@ -103,6 +103,17 @@ def get_logs(limit=100, level=None, task_id=None, since=None):
                 conditions.append("timestamp > ?")
                 params.append(utc_since.strftime('%Y-%m-%d %H:%M:%S'))
             
+            # Handle processing_status which could be a single string or a list
+            if processing_status:
+                if isinstance(processing_status, str):
+                    conditions.append("task_id IN (SELECT id FROM tasks WHERE processing_status = ?)")
+                    params.append(processing_status)
+                elif isinstance(processing_status, list):
+                    # Convert list to a comma-separated string for SQL IN clause
+                    conditions.append("task_id IN (SELECT id FROM tasks WHERE processing_status IN ({}))"
+                                      .format(','.join(['?']*len(processing_status))))
+                    params.extend(processing_status)
+            
             if conditions:
                 query += " WHERE " + " AND ".join(conditions)
             
@@ -110,11 +121,15 @@ def get_logs(limit=100, level=None, task_id=None, since=None):
             query += " ORDER BY timestamp DESC LIMIT ?"
             params.append(limit)
             
+            # Add extensive logging for debugging
+            print(f"Executing query: {query}")
+            print(f"With parameters: {params}")
+            
             c.execute(query, params)
             logs = c.fetchall()
             
             # Convert to list of dictionaries
-            return [{
+            log_results = [{
                 'id': log[0],
                 'timestamp': datetime.strptime(log[1], '%Y-%m-%d %H:%M:%S.%f')
                     .replace(tzinfo=pytz.UTC)
@@ -127,9 +142,19 @@ def get_logs(limit=100, level=None, task_id=None, since=None):
                 'source': log[6]
             } for log in logs]
             
+            # More debugging information
+            print(f"Retrieved {len(log_results)} log entries")
+            
+            return log_results
+            
     except Exception as e:
+        # Log the full exception details
+        import traceback
         print(f"Failed to retrieve logs: {str(e)}")
-        return []
+        print(traceback.format_exc())
+        
+        # Reraise the exception to be caught by the caller
+        raise
 
 def add_log_entry(level, message, task_id=None, details=None, source=None):
     """Add a new log entry to the database with retries"""

@@ -51,14 +51,21 @@ def get_log_entries():
             processing_status=processing_status
         )
         
+        # Explicitly ensure logs is a list
+        if logs is None:
+            logs = []
+        
         return jsonify({
             'logs': logs,
             'count': len(logs)
         })
         
     except Exception as e:
+        logger.error(f"Failed to fetch logs: {str(e)}", exc_info=True)
         return jsonify({
-            'error': str(e)
+            'error': f'Failed to fetch logs: {str(e)}',
+            'logs': [],
+            'count': 0
         }), 500
 
 @logs_bp.route('/api/logs/clear', methods=['POST'])
