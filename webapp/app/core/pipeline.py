@@ -658,3 +658,6 @@ def process_scheduled_uploads():
             except Exception as e:
                 log_with_task_details('ERROR', f"Scheduled upload failed for task {task_id}: {str(e)}",
                     task_id=task_id)
+
+    except Exception as e:
+        logger.error(f"Error in scheduled uploads: {str(e)}")
