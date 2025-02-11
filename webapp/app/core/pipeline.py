@@ -112,7 +112,7 @@ def check_and_set_lock():
             raise
 
 def release_lock():
-    """Release the task lock with improved error handling"""
+    """Release the task lock"""
     with db_lock:
         try:
             conn = get_db_connection()
@@ -130,23 +130,16 @@ def release_lock():
                 details={'error': str(e)})
 
 def update_task_status(task_id, status, conn=None):
-    """Update task status with retry logic"""
+    """Update task status"""
     should_close_conn = False
     if conn is None:
         conn = get_db_connection()
         should_close_conn = True
     
     try:
-        for attempt in range(3):  # Retry up to 3 times
-            try:
-                with conn:
-                    c = conn.cursor()
-                    c.execute("UPDATE tasks SET status=? WHERE id=?", (status, task_id))
-                return True
-            except sqlite3.OperationalError as e:
-                if attempt == 2:  # Last attempt
-                    raise
-                time.sleep(1)  # Wait before retry
+        with conn:
+            c = conn.cursor()
+            c.execute("UPDATE tasks SET status=? WHERE id=?", (status, task_id))
     finally:
         if should_close_conn:
             conn.close()
@@ -180,22 +173,31 @@ def get_preview_dir():
             details=preview_details)
         raise
 
+def cleanup_files(video_files):
+    """Cleanup multiple video files with error handling"""
+    for file in video_files:
+        if file and os.path.exists(file):
+            try:
+                cleanup_video(file)
+            except Exception as e:
+                log_with_details('ERROR', f"Failed to cleanup file {file}: {str(e)}",
+                    details={'file': file, 'error': str(e)})
+
 def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
     """Main pipeline process for generating, processing, and uploading videos"""
     pipeline_details = {
         'task_id': task_id,
         'mode': 'dry_run' if dry_run else 'preview' if preview_mode else 'normal',
-        'start_time': datetime.now().isoformat(),
-        'preview_mode': preview_mode,
-        'dry_run': dry_run
+        'start_time': datetime.now().isoformat()
     }
     
     log_with_task_details('INFO', f"Starting video pipeline",
         task_id=task_id,
         details=pipeline_details)
     
+    # Track files to clean up
+    files_to_cleanup = set()
     current_video_file = None
-    safe_video_path = None
     conn = None
     
     if not (dry_run or preview_mode):
@@ -215,6 +217,7 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
     
     try:
         conn = get_db_connection()
+        
         with conn:
             c = conn.cursor()
             
@@ -226,7 +229,7 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
             c.execute("""
                 SELECT t.id, t.name, t.generator_id, t.utilities, t.schedule, 
                        t.hashtags, t.sound_name, t.sound_volume, t.status, 
-                       t.email_notify, t.retry_count, t.created_at,
+                       t.email_notify, t.created_at,
                        g.generator_curl 
                 FROM tasks t
                 JOIN generators g ON t.generator_id = g.id
@@ -240,15 +243,6 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                     details=pipeline_details)
                 return False if dry_run else None
 
-            pipeline_details['task'] = {
-                'id': task_data[0],
-                'name': task_data[1],
-                'generator_id': task_data[2],
-                'has_utilities': bool(task_data[3]),
-                'status': task_data[8],
-                'email_notify': task_data[9]
-            }
-
             task_dict = {
                 'id': task_data[0],
                 'name': task_data[1],
@@ -258,7 +252,7 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
             }
 
             try:
-                # Generate initial video
+                # Generate video
                 generator_details = {
                     **pipeline_details,
                     'generator_curl': task_data[-1]
@@ -293,12 +287,13 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                             details=generator_details)
                         raise Exception(error_msg)
                         
+                    files_to_cleanup.add(current_video_file)
                     generator_details['current_video_file'] = current_video_file
                     log_with_task_details('INFO', f"Video file generated",
                         task_id=task_id,
                         details=generator_details)
-                
-                # Apply utilities in sequence
+
+                # Apply utilities
                 if task_data[3]:  # utilities JSON string
                     utilities = json.loads(task_data[3])
                     utilities_details = {
@@ -420,10 +415,6 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                             details=dry_run_details)
                     return True
 
-                # Skip uploads for preview mode
-                if preview_mode:
-                    return None
-
                 # Process uploads
                 upload_base_details = {
                     **pipeline_details,
@@ -434,7 +425,6 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                     task_id=task_id,
                     details=upload_base_details)
 
-                # Process uploads using the new schema
                 c.execute("""
                     SELECT p.id, p.name, p.uploader_curl, tpa.account_name, p.default_hashtags, p.fallback_curl, p.fallback_curl_2
                     FROM task_platform_accounts tpa
@@ -460,7 +450,9 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                                 'id': platform_id,
                                 'name': platform_name,
                                 'account': account_name,
-                                'has_default_hashtags': bool(default_hashtags)
+                                'has_default_hashtags': bool(default_hashtags),
+                                'has_fallback': bool(fallback_curl),
+                                'has_fallback_2': bool(fallback_curl_2)
                             }
                         }
 
@@ -468,27 +460,33 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                             task_id=task_id,
                             details=platform_details)
 
+                        # Create a copy of the video for this platform
+                        platform_video_file = f"{os.path.splitext(current_video_file)[0]}_{platform_name}.mp4"
+                        shutil.copy2(current_video_file, platform_video_file)
+                        files_to_cleanup.add(platform_video_file)
+
                         platform_dict = {
                             'account_name': account_name,
                             'default_hashtags': default_hashtags
                         }
 
-                        # Format the upload command with all required parameters
+                        # Try primary upload
                         upload_cmd, safe_video_path = format_upload_command(
                             upload_curl,
-                            current_video_file,
+                            platform_video_file,
                             task_dict,
                             platform_dict
                         )
 
-                        if not upload_cmd or not safe_video_path:
-                            error_msg = "Failed to prepare upload command or safe video path"
-                            log_with_task_details('ERROR', error_msg,
+                        if safe_video_path:
+                            files_to_cleanup.add(safe_video_path)
+
+                        if not upload_cmd:
+                            log_with_task_details('ERROR', f"Failed to prepare upload command for {platform_name}",
                                 task_id=task_id,
                                 details=platform_details)
-                            continue  # Skip this platform but continue with others
+                            continue
 
-                        platform_details['safe_video_path'] = safe_video_path
                         success = False
                         current_stdout = ""
                         current_stderr = ""
@@ -502,12 +500,17 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                             log_with_task_details('INFO', f"Primary upload failed, attempting fallback for {platform_name}",
                                 task_id=task_id,
                                 details={'primary_error': stderr, **platform_details})
-                            fallback_cmd, _ = format_upload_command(
+                            
+                            fallback_cmd, fallback_safe_path = format_upload_command(
                                 fallback_curl,
-                                current_video_file,
+                                platform_video_file,
                                 task_dict,
                                 platform_dict
                             )
+                            
+                            if fallback_safe_path:
+                                files_to_cleanup.add(fallback_safe_path)
+                                
                             success, stdout, stderr = execute_curl(fallback_cmd, mode='uploader')
                             if success:
                                 current_stdout, current_stderr = stdout, stderr
@@ -517,12 +520,17 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                             log_with_task_details('INFO', f"Fallback upload failed, attempting secondary fallback for {platform_name}",
                                 task_id=task_id,
                                 details={'fallback_error': stderr, **platform_details})
-                            fallback_cmd_2, _ = format_upload_command(
+                            
+                            fallback_cmd_2, fallback_safe_path_2 = format_upload_command(
                                 fallback_curl_2,
-                                current_video_file,
+                                platform_video_file,
                                 task_dict,
                                 platform_dict
                             )
+                            
+                            if fallback_safe_path_2:
+                                files_to_cleanup.add(fallback_safe_path_2)
+                                
                             success, stdout, stderr = execute_curl(fallback_cmd_2, mode='uploader')
                             if success:
                                 current_stdout, current_stderr = stdout, stderr
@@ -545,13 +553,12 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                                     'stderr': current_stderr,
                                     **platform_details
                                 })
-                            # Don't raise exception, continue with other platforms
 
                     # After all platforms are processed
                     if not uploaded_platforms:
                         raise Exception("Failed to upload to any platform")
 
-                    # Update task status and send notification for successful uploads
+                    # Update task status and send notification
                     completion_details = {
                         **pipeline_details,
                         'status': 'completed',
@@ -563,34 +570,24 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
 
                     if task_data[9]:  # If email notifications are enabled
                         try:
-                            c.execute("SELECT id, name, email_notify FROM tasks WHERE id=?", (task_id,))
-                            task_info = c.fetchone()
-                            if task_info and task_info[2]:  # email_notify contains the email address
-                                send_task_completion_notification(
-                                    task_id, 
-                                    task_info[1], 
-                                    task_info[2], 
-                                    success=True,
-                                    platforms=uploaded_platforms
-                                )
-                                completion_details['notification_sent'] = True
+                            send_task_completion_notification(
+                                task_id, 
+                                task_data[1], 
+                                task_data[9], 
+                                success=True,
+                                platforms=uploaded_platforms
+                            )
+                            completion_details['notification_sent'] = True
                         except Exception as e:
                             log_with_task_details('ERROR', f"Failed to send completion notification",
                                 task_id=task_id,
                                 details={'error': str(e), **completion_details})
 
-                    # Clean up video files
-                    if current_video_file:
-                        cleanup_video(current_video_file)
-                        if safe_video_path and os.path.exists(safe_video_path):
-                            cleanup_video(safe_video_path)
-                        completion_details['videos_cleaned'] = True
-
                     log_with_task_details('INFO', "Task completed successfully",
                         task_id=task_id,
                         details=completion_details)
                     return True
-                
+
             except Exception as e:
                 error_details = {
                     **pipeline_details,
@@ -610,22 +607,24 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                         task_id=task_id,
                         details={'error': str(status_error), **error_details})
                 
+                # Send failure notification
+                if task_data[9] and not (dry_run or preview_mode):
+                    try:
+                        send_task_completion_notification(
+                            task_id,
+                            task_data[1],
+                            task_data[9],
+                            success=False
+                        )
+                        error_details['failure_notification_sent'] = True
+                    except Exception as notify_error:
+                        error_details['notification_error'] = str(notify_error)
+                        log_with_task_details('ERROR', f"Failed to send error notification",
+                            task_id=task_id,
+                            details=error_details)
+                
                 raise
                 
-            finally:
-                # Clean up any remaining files
-                if current_video_file and not preview_mode:
-                    cleanup_video(current_video_file)
-                if safe_video_path and os.path.exists(safe_video_path):
-                    try:
-                        os.rename(safe_video_path, current_video_file)
-                    except OSError:
-                        pass
-                
-                # Always release the lock for real runs
-                if not (dry_run or preview_mode):
-                    release_lock()
-                    
     except Exception as e:
         error_details = {
             **pipeline_details,
@@ -636,21 +635,15 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
         log_with_task_details('ERROR', f"Task failed: {str(e)}",
             task_id=task_id,
             details=error_details)
-        
-        # Send failure notification if email notifications are enabled
-        if not (dry_run or preview_mode):
-            try:
-                task_info = c.execute("SELECT id, name, email_notify FROM tasks WHERE id=?", (task_id,)).fetchone()
-                if task_info and task_info[2]:
-                    send_task_completion_notification(task_id, task_info[1], task_info[2], success=False)
-                    error_details['failure_notification_sent'] = True
-            except Exception as notify_error:
-                error_details['notification_error'] = str(notify_error)
-                log_with_task_details('ERROR', f"Failed to send error notification",
-                    task_id=task_id,
-                    details=error_details)
-        
         raise
+        
     finally:
+        # Clean up all tracked files
+        cleanup_files(files_to_cleanup)
+        
+        # Always release the lock for real runs
+        if not (dry_run or preview_mode):
+            release_lock()
+            
         if conn:
             conn.close()
