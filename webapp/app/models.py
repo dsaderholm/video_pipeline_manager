@@ -54,7 +54,7 @@ def init_db():
                 )
             ''')
             
-            # Create tasks table
+            # Create tasks table with new columns
             c.execute('''
                 CREATE TABLE IF NOT EXISTS tasks (
                     id INTEGER PRIMARY KEY,
@@ -68,6 +68,8 @@ def init_db():
                     status TEXT DEFAULT 'pending',
                     email_notify TEXT,
                     retry_count INTEGER DEFAULT 0,
+                    processing_status TEXT DEFAULT 'pending',
+                    processed_video_path TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(generator_id) REFERENCES generators(id)
                 )
@@ -139,6 +141,8 @@ def init_db():
                             status TEXT DEFAULT 'pending',
                             email_notify TEXT,
                             retry_count INTEGER DEFAULT 0,
+                            processing_status TEXT DEFAULT 'pending',
+                            processed_video_path TEXT,
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             FOREIGN KEY(generator_id) REFERENCES generators(id)
                         )
@@ -147,7 +151,7 @@ def init_db():
                         INSERT INTO tasks_new 
                         SELECT id, name, generator_id, utilities, schedule, 
                                hashtags, sound_name, sound_volume, status, 
-                               email_notify, retry_count, created_at 
+                               email_notify, retry_count, 'pending', NULL, created_at 
                         FROM tasks
                     ''')
                     c.execute('DROP TABLE tasks')
@@ -156,6 +160,23 @@ def init_db():
             except Exception as e:
                 logger.error(f"Migration error: {str(e)}")
                 # Continue with initialization even if migration fails
+            
+            # Add new columns to tasks table if they don't exist
+            try:
+                # Check if processing_status column exists
+                c.execute("SELECT processing_status FROM tasks LIMIT 1")
+            except sqlite3.OperationalError:
+                # Add processing_status column
+                c.execute("ALTER TABLE tasks ADD COLUMN processing_status TEXT DEFAULT 'pending'")
+                logger.info("Added processing_status column to tasks table")
+
+            try:
+                # Check if processed_video_path column exists
+                c.execute("SELECT processed_video_path FROM tasks LIMIT 1")
+            except sqlite3.OperationalError:
+                # Add processed_video_path column
+                c.execute("ALTER TABLE tasks ADD COLUMN processed_video_path TEXT")
+                logger.info("Added processed_video_path column to tasks table")
             
             conn.commit()
             logger.info("Database tables verified/initialized successfully")

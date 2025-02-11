@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, request, render_template
 import json
+import os
 from datetime import datetime, timedelta
 from app.core.log_manager import get_logs, clear_old_logs
 from app.timezone import localize_timestamp, get_timezone
@@ -27,6 +28,7 @@ def get_log_entries():
         level = request.args.get('level')
         task_id = request.args.get('task_id')
         since = request.args.get('since')  # Expected format: YYYY-MM-DD HH:MM:SS
+        processing_status = request.args.get('processing_status')  # New filter
         
         # Convert since to datetime if provided
         since_dt = None
@@ -40,12 +42,13 @@ def get_log_entries():
                     'error': 'Invalid date format. Expected YYYY-MM-DD HH:MM:SS'
                 }), 400
         
-        # Get logs with filters
+        # Add processing_status to log fetching
         logs = get_logs(
             limit=limit,
             level=level,
             task_id=task_id,
-            since=since_dt
+            since=since_dt,
+            processing_status=processing_status
         )
         
         return jsonify({
@@ -83,15 +86,34 @@ def clear_logs():
 def get_task_logs(task_id):
     """Get all logs for a specific task"""
     try:
+        processing_status = request.args.get('processing_status')  # Optional filter
+        
         logs = get_logs(
             limit=1000,  # Higher limit for task-specific logs
-            task_id=task_id
+            task_id=task_id,
+            processing_status=processing_status
         )
+        
+        # Get task's current status and processing_status
+        import sqlite3
+        with sqlite3.connect(get_db_path()) as conn:
+            c = conn.cursor()
+            c.execute("""
+                SELECT status, processing_status 
+                FROM tasks 
+                WHERE id = ?
+            """, (task_id,))
+            result = c.fetchone()
+            current_status = {
+                'status': result[0] if result else None,
+                'processing_status': result[1] if result else None
+            }
         
         return jsonify({
             'task_id': task_id,
             'logs': logs,
-            'count': len(logs)
+            'count': len(logs),
+            'current_status': current_status
         })
         
     except Exception as e:
@@ -111,6 +133,7 @@ def get_log_stats():
             'total_count': len(recent_logs),
             'by_level': {},
             'by_hour': {},
+            'by_processing_status': {},  # New stat
             'recent_errors': []
         }
         
@@ -124,6 +147,12 @@ def get_log_stats():
             level = log['level']
             stats['by_level'][level] = stats['by_level'].get(level, 0) + 1
             
+            # Count by processing status if present
+            if 'processing_status' in log and log['processing_status']:
+                proc_status = log['processing_status']
+                stats['by_processing_status'][proc_status] = \
+                    stats['by_processing_status'].get(proc_status, 0) + 1
+            
             # Count by hour for recent logs
             try:
                 # Parse the timestamp (already localized by get_logs)
@@ -135,15 +164,151 @@ def get_log_stats():
                 
                 # Collect recent errors
                 if level in ['ERROR', 'CRITICAL'] and log_time > hour_ago:
-                    stats['recent_errors'].append({
+                    error_entry = {
                         'timestamp': log['timestamp'],
                         'message': log['message'],
                         'task_id': log['task_id']
-                    })
+                    }
+                    if 'processing_status' in log:
+                        error_entry['processing_status'] = log['processing_status']
+                    stats['recent_errors'].append(error_entry)
             except ValueError:
                 continue
         
+        # Get current task processing stats
+        import sqlite3
+        with sqlite3.connect(get_db_path()) as conn:
+            c = conn.cursor()
+            c.execute("""
+                SELECT processing_status, COUNT(*) 
+                FROM tasks 
+                WHERE status != 'completed'
+                GROUP BY processing_status
+            """)
+            current_tasks = dict(c.fetchall())
+            stats['current_tasks'] = {
+                'pending': current_tasks.get('pending', 0),
+                'processed': current_tasks.get('processed', 0),
+                'failed': current_tasks.get('failed', 0)
+            }
+        
         return jsonify(stats)
+        
+    except Exception as e:
+        return jsonify({
+            'error': str(e)
+        }), 500
+
+@logs_bp.route('/api/logs/processing', methods=['GET'])
+def get_processing_logs():
+    """Get logs specifically for video processing"""
+    try:
+        hours = int(request.args.get('hours', 24))
+        if hours < 1 or hours > 168:  # Max 1 week
+            return jsonify({
+                'error': 'Hours must be between 1 and 168'
+            }), 400
+            
+        since = datetime.now() - timedelta(hours=hours)
+        
+        logs = get_logs(
+            limit=1000,
+            since=since,
+            processing_status=request.args.get('status')
+        )
+        
+        # Group logs by task and status
+        tasks = {}
+        for log in logs:
+            task_id = log.get('task_id')
+            if task_id:
+                if task_id not in tasks:
+                    tasks[task_id] = {
+                        'logs': [],
+                        'processing_status': log.get('processing_status'),
+                        'last_update': log['timestamp']
+                    }
+                tasks[task_id]['logs'].append(log)
+                
+        return jsonify({
+            'tasks': tasks,
+            'count': len(tasks)
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'error': str(e)
+        }), 500
+
+@logs_bp.route('/api/logs/night-processing', methods=['GET'])
+def get_night_processing_logs():
+    """Get logs for night processing activities"""
+    try:
+        days = int(request.args.get('days', 1))
+        if days < 1 or days > 7:  # Max 1 week
+            return jsonify({
+                'error': 'Days must be between 1 and 7'
+            }), 400
+            
+        since = datetime.now() - timedelta(days=days)
+        
+        # Get all processing-related logs
+        logs = get_logs(
+            limit=1000,
+            since=since,
+            processing_status=['pending', 'processed', 'failed']
+        )
+        
+        # Group by night
+        nights = {}
+        local_tz = pytz.timezone(get_timezone())
+        night_start = datetime.strptime(os.getenv('NIGHT_PROCESSING_START', '22:00'), '%H:%M').time()
+        night_end = datetime.strptime(os.getenv('NIGHT_PROCESSING_END', '06:00'), '%H:%M').time()
+        
+        for log in logs:
+            log_time = datetime.strptime(log['timestamp'], '%Y-%m-%d %H:%M:%S')
+            log_time = local_tz.localize(log_time)
+            
+            # Check if log is within night processing window
+            current_time = log_time.time()
+            is_night = False
+            if night_start < night_end:
+                is_night = night_start <= current_time <= night_end
+            else:  # Crosses midnight
+                is_night = current_time >= night_start or current_time <= night_end
+                
+            if is_night:
+                # Use date of the start of the night
+                if current_time < night_end:
+                    night_date = (log_time - timedelta(days=1)).date()
+                else:
+                    night_date = log_time.date()
+                    
+                night_key = night_date.isoformat()
+                if night_key not in nights:
+                    nights[night_key] = {
+                        'logs': [],
+                        'tasks_processed': set(),
+                        'tasks_failed': set()
+                    }
+                    
+                nights[night_key]['logs'].append(log)
+                
+                if log.get('task_id'):
+                    if log.get('processing_status') == 'failed':
+                        nights[night_key]['tasks_failed'].add(log['task_id'])
+                    elif log.get('processing_status') == 'processed':
+                        nights[night_key]['tasks_processed'].add(log['task_id'])
+        
+        # Convert sets to lists for JSON serialization
+        for night in nights.values():
+            night['tasks_processed'] = list(night['tasks_processed'])
+            night['tasks_failed'] = list(night['tasks_failed'])
+        
+        return jsonify({
+            'nights': nights,
+            'count': len(nights)
+        })
         
     except Exception as e:
         return jsonify({

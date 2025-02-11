@@ -173,7 +173,9 @@ def get_task_details(task_id, conn):
         'status': task[8],
         'email_notify': task[9],
         'retry_count': task[10],
-        'created_at': localize_timestamp(task[11]),
+        'processing_status': task[11],
+        'processed_video_path': task[12],
+        'created_at': localize_timestamp(task[13]),
         'platforms': [{
             'id': p[0],
             'name': p[1],
@@ -220,7 +222,8 @@ def retry_with_backoff(task_id):
             c.execute("""
                 UPDATE tasks 
                 SET status = 'failed', 
-                    retry_count = 0
+                    retry_count = 0,
+                    processing_status = 'failed'
                 WHERE id = ?
             """, (task_id,))
             conn.commit()
@@ -241,7 +244,8 @@ def retry_with_backoff(task_id):
         c.execute("""
             UPDATE tasks 
             SET retry_count = ?,
-                status = 'retrying'
+                status = 'retrying',
+                processing_status = 'pending'
             WHERE id = ?
         """, (retry_count + 1, task_id))
         conn.commit()
@@ -265,8 +269,9 @@ def create_task():
             utilities_json = json.dumps(data.get('utilities', []))
             c.execute('''INSERT INTO tasks 
                         (name, generator_id, utilities, schedule, 
-                         hashtags, sound_name, sound_volume, email_notify, retry_count)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)''',
+                         hashtags, sound_name, sound_volume, email_notify, retry_count,
+                         processing_status)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending')''',
                      (data['name'], data['generator_id'], utilities_json,
                       data['schedule'], data.get('hashtags'),
                       data.get('sound_name'), data.get('sound_volume', 'background'),
@@ -369,6 +374,9 @@ def delete_task(id):
 @tasks_bp.route('/api/tasks/<int:id>/run', methods=['POST'])
 def run_task(id):
     try:
+        # Set flag for manual run
+        setattr(current_app, 'manual_run', True)
+        
         # First verify task exists and is not already running
         with sqlite3.connect(get_db_path()) as conn:
             c = conn.cursor()
@@ -398,12 +406,19 @@ def run_task(id):
                 
         from app.core.pipeline import process_video_pipeline
         process_video_pipeline(id)
+        
+        # Reset manual run flag
+        setattr(current_app, 'manual_run', False)
+        
         return jsonify({
             'success': True,
             'message': 'Task started successfully'
         })
+        
     except Exception as e:
         logger.error(f"Error running task {id}: {str(e)}")
+        # Reset manual run flag
+        setattr(current_app, 'manual_run', False)
         # If task fails due to lock, trigger retry mechanism
         retry_with_backoff(id)
         return jsonify({
@@ -426,7 +441,7 @@ def preview_task(id):
             c.execute("BEGIN IMMEDIATE")
             
             # Now check this specific task - within transaction
-            c.execute("SELECT id, status FROM tasks WHERE id = ?", (id,))
+            c.execute("SELECT id, status, processing_status FROM tasks WHERE id = ?", (id,))
             task = c.fetchone()
             
             if not task:
@@ -436,11 +451,11 @@ def preview_task(id):
                     'message': f'Task {id} not found'
                 }), 404
                 
-            if task[1] == 'previewing':
+            if task[1] == 'previewing' or task[2] == 'processing':
                 c.execute("COMMIT")
                 return jsonify({
                     'success': False,
-                    'message': 'Preview already in progress'
+                    'message': 'Preview or processing already in progress'
                 }), 409
 
             # Clean up any existing preview files for this task
@@ -465,7 +480,8 @@ def preview_task(id):
             # Update task status for preview within transaction
             c.execute("""
                 UPDATE tasks 
-                SET status = 'previewing'
+                SET status = 'previewing',
+                    processing_status = 'pending'
                 WHERE id = ?
             """, (id,))
             
@@ -501,7 +517,8 @@ def preview_task(id):
                     c = conn.cursor()
                     c.execute("""
                         UPDATE tasks 
-                        SET status = 'completed'
+                        SET status = 'completed',
+                            processing_status = 'completed'
                         WHERE id = ?
                     """, (id,))
                     conn.commit()
@@ -521,7 +538,8 @@ def preview_task(id):
             c = conn.cursor()
             c.execute("""
                 UPDATE tasks 
-                SET status = 'failed'
+                SET status = 'failed',
+                    processing_status = 'failed'
                 WHERE id = ?
             """, (id,))
             conn.commit()
@@ -608,6 +626,114 @@ def dry_run_task(id):
             
     except Exception as e:
         logger.error(f"Error dry running task {id}: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        }), 500
+
+@tasks_bp.route('/api/tasks/<int:id>/generate', methods=['POST'])
+def generate_task(id):
+    """Manual generation of video content regardless of schedule"""
+    try:
+        # Set flag for manual run
+        setattr(current_app, 'manual_run', True)
+        
+        with sqlite3.connect(get_db_path()) as conn:
+            c = conn.cursor()
+            c.execute("SELECT id, status, processing_status FROM tasks WHERE id = ?", (id,))
+            task = c.fetchone()
+            
+            if not task:
+                return jsonify({
+                    'success': False,
+                    'message': f'Task {id} not found'
+                }), 404
+            
+            if task[1] == 'running' or task[2] == 'processing':
+                return jsonify({
+                    'success': False,
+                    'message': f'Task {id} is already being processed'
+                }), 409
+
+        from app.core.pipeline import process_video_generation
+        video_path = process_video_generation(id)
+        
+        # Reset manual run flag
+        setattr(current_app, 'manual_run', False)
+        
+        if video_path:
+            return jsonify({
+                'success': True,
+                'message': 'Video generation completed successfully',
+                'video_path': video_path
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'message': 'Video generation failed'
+            }), 500
+            
+    except Exception as e:
+        logger.error(f"Error generating video for task {id}: {str(e)}")
+        # Reset manual run flag
+        setattr(current_app, 'manual_run', False)
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        }), 500
+
+@tasks_bp.route('/api/tasks/<int:id>/upload', methods=['POST'])
+def upload_task(id):
+    """Manual upload of processed video content"""
+    try:
+        with sqlite3.connect(get_db_path()) as conn:
+            c = conn.cursor()
+            c.execute("""
+                SELECT id, status, processing_status, processed_video_path 
+                FROM tasks WHERE id = ?
+            """, (id,))
+            task = c.fetchone()
+            
+            if not task:
+                return jsonify({
+                    'success': False,
+                    'message': f'Task {id} not found'
+                }), 404
+            
+            if task[1] == 'running':
+                return jsonify({
+                    'success': False,
+                    'message': f'Task {id} is currently running'
+                }), 409
+                
+            if task[2] != 'processed':
+                return jsonify({
+                    'success': False,
+                    'message': f'Task {id} has not been processed yet'
+                }), 400
+                
+            if not task[3] or not os.path.exists(task[3]):
+                return jsonify({
+                    'success': False,
+                    'message': f'Processed video not found for task {id}'
+                }), 404
+
+        from app.core.pipeline import process_video_upload
+        success = process_video_upload(id)
+        
+        if success:
+            return jsonify({
+                'success': True,
+                'message': 'Upload completed successfully'
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'message': 'Upload failed'
+            }), 500
+            
+    except Exception as e:
+        logger.error(f"Error uploading task {id}: {str(e)}")
         return jsonify({
             'success': False,
             'message': str(e)

@@ -9,6 +9,7 @@ import sqlite3
 import time
 from datetime import datetime, timedelta
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
+from apscheduler.triggers.cron import CronTrigger
 
 # Load environment variables from .env file
 load_dotenv()
@@ -138,6 +139,24 @@ def init_scheduler(app):
         next_run_time=datetime.now() + timedelta(minutes=1)
     )
 
+    # Add night processing job - runs every 15 minutes
+    from app.core.pipeline import process_night_queue
+    scheduler.add_job(
+        id='night_processing',
+        func=process_night_queue,
+        trigger=CronTrigger(minute='*/15'),
+        name='Night Video Processing'
+    )
+
+    # Add scheduled uploads job - runs every minute
+    from app.core.pipeline import process_scheduled_uploads
+    scheduler.add_job(
+        id='scheduled_uploads',
+        func=process_scheduled_uploads,
+        trigger=CronTrigger(minute='*'),
+        name='Scheduled Video Uploads'
+    )
+
     # Log all existing tasks
     try:
         db_path = os.path.join('webapp', 'database', 'pipeline.db')
@@ -169,9 +188,12 @@ def create_app():
     
     # Create previews directory if it doesn't exist
     previews_dir = os.path.join(APP_ROOT, 'previews')
-    if not os.path.exists(previews_dir):
-        os.makedirs(previews_dir)
-        logger.info("Created previews directory")
+    processed_dir = os.path.join(APP_ROOT, 'processed_videos')
+    
+    for directory in [previews_dir, processed_dir]:  # Update this line
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+            logger.info(f"Created directory: {directory}")
     
     with app.app_context():
         # Initialize log manager

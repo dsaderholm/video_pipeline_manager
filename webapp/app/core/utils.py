@@ -7,12 +7,28 @@ import uuid
 import urllib.parse
 import re
 import json
+import shutil
 from datetime import datetime
 from app import logger
 import sys
 
+def ensure_processed_videos_dir():
+    """Ensure the processed videos directory exists"""
+    videos_dir = 'processed_videos'
+    os.makedirs(videos_dir, exist_ok=True)
+    return videos_dir
+
+def get_processed_video_path(task_id):
+    """Get the permanent path for a processed video"""
+    videos_dir = ensure_processed_videos_dir()
+    return os.path.join(videos_dir, f'task_{task_id}_{int(time.time())}.mp4')
+
 def log_with_details(level, message, task_id=None, details=None, source=None):
     """Helper function to log with structured details"""
+    if details is None:
+        details = {}
+    details['task_id'] = task_id
+    
     try:
         from app.core.log_manager import add_log_entry
         add_log_entry(level, message, task_id=task_id, details=details, source=source)
@@ -116,7 +132,7 @@ def check_utility_response(stdout_str, stderr_str):
         r'Could not resolve host',
         r'Operation timed out',
         r'Failed to connect',
-        r'HTTP/[0-9.]+ 5[0-9]{2}',  # Still check for 500s but don't look for JSON errors
+        r'HTTP/[0-9.]+ 5[0-9]{2}',
         r'500 Internal Server Error'
     ]
     
@@ -251,7 +267,8 @@ def validate_video_file(file_path, min_size_bytes=1024):
     validation_details = {
         'file_path': file_path,
         'min_size_bytes': min_size_bytes,
-        'checks': []
+        'checks': [],
+        'is_processed': file_path.startswith('processed_videos/')
     }
     
     def add_check(name, result, message=None):
@@ -352,6 +369,7 @@ def cleanup_existing_mp4s():
     }
     
     try:
+        # Clean up temporary MP4 files (not in processed_videos)
         for file in glob.glob("*.mp4*"):
             cleanup_details['files_found'].append(file)
             try:
@@ -386,18 +404,22 @@ def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
     }
     
     for attempt in range(max_retries):
+        # Search both in current directory and processed_videos
         video_files = glob.glob("*.mp4")
+        processed_files = glob.glob(os.path.join('processed_videos', '*.mp4'))
+        all_files = video_files + processed_files
+        
         search_details.update({
             'attempt': attempt + 1,
-            'found_files': len(video_files),
-            'files': video_files
+            'found_files': len(all_files),
+            'files': all_files
         })
         
         log_with_details('INFO', f"Searching for valid video files (attempt {attempt + 1}/{max_retries})",
             details=search_details)
         
         valid_videos = []
-        for video in video_files:
+        for video in all_files:
             try:
                 if os.path.exists(video) and os.path.getsize(video) >= min_size_bytes:
                     is_valid, _ = validate_video_file(video)
@@ -450,7 +472,8 @@ def cleanup_video(video_file):
         'video_file': video_file,
         'exists': False,
         'size': None,
-        'success': False
+        'success': False,
+        'is_processed': video_file.startswith('processed_videos/')
     }
 
     try:
@@ -465,6 +488,13 @@ def cleanup_video(video_file):
             retries = 3
             for i in range(retries):
                 try:
+                    # If it's a processed video and not marked for deletion, keep it
+                    if cleanup_details['is_processed']:
+                        cleanup_details['skipped'] = True
+                        log_with_details('INFO', f"Skipping processed video file",
+                            details=cleanup_details)
+                        break
+                    
                     os.remove(video_file)
                     cleanup_details['success'] = True
                     cleanup_details['attempts'] = i + 1
@@ -487,6 +517,29 @@ def cleanup_video(video_file):
         log_with_details('ERROR', f"Error removing video file",
             details=cleanup_details)
 
+def cleanup_processed_video(video_path):
+    """Clean up a processed video while maintaining the directory"""
+    if not video_path or not os.path.exists(video_path):
+        return
+        
+    cleanup_details = {
+        'video_path': video_path,
+        'is_processed': video_path.startswith('processed_videos/'),
+        'exists': os.path.exists(video_path)
+    }
+    
+    try:
+        # Only remove if it's in the processed_videos directory
+        if cleanup_details['is_processed']:
+            os.remove(video_path)
+            cleanup_details['success'] = True
+            log_with_details('INFO', "Cleaned up processed video",
+                details=cleanup_details)
+    except Exception as e:
+        cleanup_details['error'] = str(e)
+        log_with_details('ERROR', f"Failed to clean up processed video: {str(e)}",
+            details=cleanup_details)
+
 def create_safe_filename(original_path):
     """Create a safe temporary filename for uploads"""
     directory = os.path.dirname(original_path) or '.'
@@ -499,7 +552,8 @@ def create_safe_filename(original_path):
         'directory': directory,
         'original_name': original_name,
         'safe_name': safe_name,
-        'safe_path': safe_path
+        'safe_path': safe_path,
+        'is_processed': original_path.startswith('processed_videos/')
     }
     
     log_with_details('INFO', f"Created safe filename",
@@ -511,9 +565,13 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
     try:
         safe_video_path, original_name = create_safe_filename(video_file)
         try:
-            os.rename(video_file, safe_video_path)
+            # For processed videos, make a copy instead of moving
+            if video_file.startswith('processed_videos/'):
+                shutil.copy2(video_file, safe_video_path)
+            else:
+                os.rename(video_file, safe_video_path)
         except OSError as e:
-            log_with_details('ERROR', f"Failed to rename video file: {str(e)}", 
+            log_with_details('ERROR', f"Failed to prepare video file: {str(e)}", 
                 details={
                     'video_file': video_file,
                     'safe_path': safe_video_path,
