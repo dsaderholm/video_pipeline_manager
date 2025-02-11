@@ -291,28 +291,47 @@ def validate_video_file(file_path, min_size_bytes=1024):
             f.read(1)
             add_check('read_check', True)
             
-            # Run ffprobe to check video stream
+            # Create a temporary file with a safe name for ffprobe
+            temp_dir = os.path.dirname(file_path) or '.'
+            temp_name = f"temp_validate_{uuid.uuid4().hex[:8]}.mp4"
+            temp_path = os.path.join(temp_dir, temp_name)
+            
             try:
-                result = subprocess.run(
-                    ['ffprobe', '-v', 'error', file_path],
-                    stderr=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    timeout=30
-                )
+                # Copy the file with a safe name
+                shutil.copy2(file_path, temp_path)
+                validation_details['temp_path'] = temp_path
                 
-                ffprobe_success = result.returncode == 0
-                add_check('ffprobe_check', ffprobe_success, 
-                         result.stderr.decode() if result.stderr else None)
-                
-                if not ffprobe_success:
-                    log_with_details('ERROR', "Video file validation failed: FFprobe validation error",
+                # Run ffprobe on the temp file
+                try:
+                    result = subprocess.run(
+                        ['ffprobe', '-v', 'error', '-i', temp_path],
+                        stderr=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        timeout=30
+                    )
+                    
+                    ffprobe_success = result.returncode == 0
+                    add_check('ffprobe_check', ffprobe_success, 
+                             result.stderr.decode() if result.stderr else None)
+                    
+                    if not ffprobe_success:
+                        log_with_details('ERROR', "Video file validation failed: FFprobe validation error",
+                            details=validation_details)
+                        return False, f"FFprobe validation failed: {result.stderr.decode()}"
+                    
+                except subprocess.TimeoutExpired:
+                    log_with_details('ERROR', "Video file validation failed: FFprobe timeout",
                         details=validation_details)
-                    return False, f"FFprobe validation failed: {result.stderr.decode()}"
-                
-            except subprocess.TimeoutExpired:
-                log_with_details('ERROR', "Video file validation failed: FFprobe timeout",
-                    details=validation_details)
-                return False, "FFprobe validation timed out"
+                    return False, "FFprobe validation timed out"
+                    
+            finally:
+                # Clean up temp file
+                try:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                except Exception as e:
+                    log_with_details('WARNING', f"Failed to remove temporary validation file: {str(e)}",
+                        details={'temp_path': temp_path, 'error': str(e)})
             
             log_with_details('INFO', "Video file validation successful",
                 details=validation_details)
