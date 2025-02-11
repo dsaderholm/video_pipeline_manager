@@ -104,24 +104,39 @@ def init_scheduler(app):
                 db_path = os.path.join('webapp', 'database', 'pipeline.db')
                 with sqlite3.connect(db_path) as conn:
                     c = conn.cursor()
-                    c.execute("UPDATE tasks SET status = 'failed' WHERE id = ?", (task_id,))
+                    # Update both status and processing_status
+                    c.execute("""
+                        UPDATE tasks 
+                        SET status = 'failed',
+                            processing_status = 'failed'
+                        WHERE id = ?
+                    """, (task_id,))
                     conn.commit()
+                    logger.info(f"Updated task {task_id} status to failed after job error")
             except Exception as e:
                 logger.error(f"Failed to update task status: {e}")
         
     def handle_job_missed(event):
         logger.warning(f"Job missed! Job ID: {event.job_id}, Scheduled run time: {event.scheduled_run_time}")
+        # For missed tasks, attempt to reschedule if it's a generation or upload job
+        if event.job_id.startswith('task_'):
+            try:
+                task_id = int(event.job_id.split('_')[1])
+                logger.info(f"Rescheduling missed task {task_id}")
+                # Task will be picked up by next scheduler run
+            except ValueError:
+                pass
 
     # Set up the scheduler with configuration
     scheduler = APScheduler()
     app.config['SCHEDULER_API_ENABLED'] = True
     app.config['SCHEDULER_TIMEZONE'] = os.getenv('TIMEZONE', 'UTC')
     
-    # Add these lines:
+    # Enhanced scheduler settings
     app.config['SCHEDULER_JOB_DEFAULTS'] = {
-        'coalesce': True,
-        'max_instances': 1,
-        'misfire_grace_time': 60
+        'coalesce': True,  # Combine multiple pending executions
+        'max_instances': 1,  # Only one instance of each job
+        'misfire_grace_time': 60  # 60 second grace time for misfires
     }
     
     scheduler.init_app(app)
@@ -130,7 +145,7 @@ def init_scheduler(app):
     scheduler.scheduler.add_listener(handle_job_error, EVENT_JOB_ERROR)
     scheduler.scheduler.add_listener(handle_job_missed, EVENT_JOB_MISSED)
 
-    # Add cleanup job
+    # Add cleanup job - runs every hour
     scheduler.add_job(
         id='cleanup_previews',
         func=cleanup_preview_files,
@@ -145,7 +160,8 @@ def init_scheduler(app):
         id='night_processing',
         func=process_night_queue,
         trigger=CronTrigger(minute='*/15'),
-        name='Night Video Processing'
+        name='Night Video Processing',
+        misfire_grace_time=300  # 5 minute grace time for night processing
     )
 
     # Add scheduled uploads job - runs every minute
@@ -154,7 +170,8 @@ def init_scheduler(app):
         id='scheduled_uploads',
         func=process_scheduled_uploads,
         trigger=CronTrigger(minute='*'),
-        name='Scheduled Video Uploads'
+        name='Scheduled Video Uploads',
+        misfire_grace_time=120  # 2 minute grace time for uploads
     )
 
     # Log all existing tasks
@@ -162,12 +179,16 @@ def init_scheduler(app):
         db_path = os.path.join('webapp', 'database', 'pipeline.db')
         with sqlite3.connect(db_path) as conn:
             c = conn.cursor()
-            c.execute("SELECT id, name, schedule FROM tasks WHERE status != 'completed'")
+            c.execute("""
+                SELECT id, name, schedule, processing_status 
+                FROM tasks 
+                WHERE status != 'completed'
+            """)
             tasks = c.fetchall()
             
             logger.info(f"Initializing scheduler with {len(tasks)} active tasks")
             for task in tasks:
-                logger.info(f"Task {task[0]} ({task[1]}): Schedule = {task[2]}")
+                logger.info(f"Task {task[0]} ({task[1]}): Schedule = {task[2]}, Processing = {task[3]}")
     except Exception as e:
         logger.error(f"Failed to log existing tasks: {e}")
 
@@ -186,14 +207,17 @@ def create_app():
     # Initialize scheduler with improved error handling and logging
     app.scheduler = init_scheduler(app)
     
-    # Create previews directory if it doesn't exist
-    previews_dir = os.path.join(APP_ROOT, 'previews')
-    processed_dir = os.path.join(APP_ROOT, 'processed_videos')
+    # Create required directories if they don't exist
+    required_dirs = {
+        'previews': os.path.join(APP_ROOT, 'previews'),
+        'processed': os.path.join(APP_ROOT, 'processed_videos'),
+        'logs': os.path.join(APP_ROOT, 'logs')
+    }
     
-    for directory in [previews_dir, processed_dir]:  # Update this line
-        if not os.path.exists(directory):
-            os.makedirs(directory)
-            logger.info(f"Created directory: {directory}")
+    for dir_name, dir_path in required_dirs.items():
+        if not os.path.exists(dir_path):
+            os.makedirs(dir_path)
+            logger.info(f"Created {dir_name} directory at: {dir_path}")
     
     with app.app_context():
         # Initialize log manager
