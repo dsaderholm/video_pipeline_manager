@@ -32,7 +32,6 @@ def get_processed_video_path(task_id, schedule_time=None):
     return os.path.join(videos_dir, f'task_{task_id}_{timestamp}.mp4')
 
 def log_with_details(level, message, task_id=None, details=None, source=None):
-    """Helper function to log with structured details"""
     if details is None:
         details = {}
     details['task_id'] = task_id
@@ -40,7 +39,6 @@ def log_with_details(level, message, task_id=None, details=None, source=None):
     try:
         add_log_entry(level, message, task_id=task_id, details=details, source=source)
     except Exception as e:
-        # Fallback logging to stderr if database logging fails
         print(f"ERROR: Failed to log to database: {str(e)}", file=sys.stderr)
         print(f"{level}: {message} (Task {task_id})", file=sys.stderr)
         if details:

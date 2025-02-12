@@ -70,6 +70,29 @@ class DatabaseLogHandler(logging.Handler):
 # Create handler instance
 db_log_handler = DatabaseLogHandler()
 
+def add_log_entry(level, message, task_id=None, details=None, source=None):
+    """Add a new log entry to the database with retries"""
+    try:
+        with db.get_connection() as conn:
+            c = conn.cursor()
+            current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+            
+            c.execute('''
+                INSERT INTO logs (timestamp, level, message, task_id, details, source)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                current_time,
+                level,
+                message,
+                task_id,
+                json.dumps(details) if details else None,
+                source
+            ))
+            conn.commit()
+            
+    except Exception as e:
+        print(f"Failed to add log entry: {str(e)}")
+
 def get_logs(limit=100, level=None, task_id=None, since=None, processing_status=None):
     """Retrieve logs with optional filtering"""
     try:
