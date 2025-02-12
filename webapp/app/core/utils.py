@@ -18,10 +18,15 @@ def ensure_processed_videos_dir():
     os.makedirs(videos_dir, exist_ok=True)
     return videos_dir
 
-def get_processed_video_path(task_id):
+def get_processed_video_path(task_id, schedule_time=None):
     """Get the permanent path for a processed video"""
     videos_dir = ensure_processed_videos_dir()
-    return os.path.join(videos_dir, f'task_{task_id}_{int(time.time())}.mp4')
+    timestamp = int(time.time())
+    if schedule_time:
+        # Include scheduled time in filename for better organization
+        schedule_str = schedule_time.strftime('%Y%m%d_%H%M')
+        return os.path.join(videos_dir, f'task_{task_id}_{schedule_str}_{timestamp}.mp4')
+    return os.path.join(videos_dir, f'task_{task_id}_{timestamp}.mp4')
 
 def log_with_details(level, message, task_id=None, details=None, source=None):
     """Helper function to log with structured details"""
@@ -94,14 +99,12 @@ def parse_curl_response(stdout_str, stderr_str):
 
 def check_generator_response(stdout_str, stderr_str):
     """Check if generator successfully created a video file"""
-    # If stderr only contains progress info, consider it successful
     if not stderr_str.strip() or all(
         line.startswith(('* ', '  % Total', '100', 'Warning: ')) 
         for line in stderr_str.strip().split('\n')
     ):
         return True, ""
         
-    # Check for explicit error messages
     error_patterns = [
         r'curl:\s*\(\d+\)',
         r'Connection refused',
@@ -118,14 +121,12 @@ def check_generator_response(stdout_str, stderr_str):
 
 def check_utility_response(stdout_str, stderr_str):
     """Check if utility successfully processed the video"""
-    # If stderr only contains progress info, consider it successful
     if not stderr_str.strip() or all(
         line.startswith(('* ', '  % Total', '100', 'Warning: ')) 
         for line in stderr_str.strip().split('\n')
     ):
         return True, ""
         
-    # Check for explicit error messages
     error_patterns = [
         r'curl:\s*\(\d+\)',
         r'Connection refused',
@@ -144,7 +145,6 @@ def check_utility_response(stdout_str, stderr_str):
 
 def check_uploader_response(stdout_str, stderr_str):
     """Check if upload was successful"""
-    # First check stdout for JSON responses
     try:
         json_response = json.loads(stdout_str)
         if isinstance(json_response, dict):
@@ -156,7 +156,6 @@ def check_uploader_response(stdout_str, stderr_str):
     except json.JSONDecodeError:
         pass
 
-    # Check for HTTP errors
     error_patterns = [
         r'HTTP/[0-9.]+ 5[0-9]{2}',
         r'500 Internal Server Error',
@@ -562,8 +561,14 @@ def create_safe_filename(original_path):
 
 def format_upload_command(cmd_template, video_file, task_data, platform_data):
     """Format an upload command with improved error handling and validation"""
+    upload_details = {
+        'video_file': video_file,
+        'task_id': task_data.get('id'),
+        'platform': platform_data.get('name', 'unknown')
+    }
+    
     try:
-        safe_video_path, original_name = create_safe_filename(video_file)
+        safe_video_path, _ = create_safe_filename(video_file)
         try:
             # For processed videos, make a copy instead of moving
             if video_file.startswith('processed_videos/'):
@@ -572,15 +577,15 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
                 os.rename(video_file, safe_video_path)
         except OSError as e:
             log_with_details('ERROR', f"Failed to prepare video file: {str(e)}", 
-                details={
-                    'video_file': video_file,
-                    'safe_path': safe_video_path,
-                    'error': str(e)
-                })
+                details={'video_file': video_file, 'safe_path': safe_video_path, 'error': str(e)})
             return None, None
 
-        # Extract video title without extension
-        video_title = os.path.splitext(original_name)[0]
+        # Use the original name from task_data
+        if task_data.get('original_name'):
+            video_title = os.path.splitext(task_data['original_name'])[0]
+        else:
+            # Fallback to task name if original name not available
+            video_title = task_data['name']
         
         # Set default values for platform data
         platform_defaults = {
@@ -617,30 +622,19 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
             hashtags=hashtags
         )
         
+        upload_details.update({
+            'safe_video_path': safe_video_path,
+            'video_title': video_title,
+            'formatted_command': formatted_cmd
+        })
+        
         log_with_details('INFO', "Successfully formatted upload command", 
-            details={
-                'formatted_command': formatted_cmd,
-                'safe_video_path': safe_video_path,
-                'video_title': video_title,
-                'platform': platform_data,
-                'task': task_data
-            })
+            details=upload_details)
         
         return formatted_cmd, safe_video_path
         
-    except KeyError as e:
-        log_with_details('ERROR', f"Missing required parameter: {str(e)}", 
-            details={
-                'platform_data': platform_data,
-                'task_data': task_data,
-                'error': str(e)
-            })
-        raise
     except Exception as e:
+        upload_details['error'] = str(e)
         log_with_details('ERROR', f"Error formatting upload command: {str(e)}", 
-            details={
-                'platform_data': platform_data,
-                'task_data': task_data,
-                'error': str(e)
-            })
+            details=upload_details)
         raise

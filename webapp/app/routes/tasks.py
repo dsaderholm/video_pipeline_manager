@@ -56,77 +56,34 @@ def validate_schedule(schedule):
     except Exception as e:
         return False, f"Invalid schedule format: {str(e)}"
 
-def cleanup_old_previews(max_age_hours=24):
-    """Clean up preview files older than the specified age"""
-    try:
-        from app.core.pipeline import get_preview_dir
-        preview_dir = get_preview_dir()
-        current_time = datetime.now()
+def get_video_details(video_id, conn):
+    """Get detailed video information"""
+    c = conn.cursor()
+    c.execute("""
+        SELECT id, task_id, original_name, processed_path, scheduled_time, 
+               status, upload_status, error_message, retry_count, generated_at
+        FROM generated_videos
+        WHERE id = ?
+    """, (video_id,))
+    video = c.fetchone()
+    if not video:
+        return None
         
-        preview_files = glob.glob(os.path.join(preview_dir, 'preview_task_*.mp4'))
-        
-        for file_path in preview_files:
-            try:
-                mtime = datetime.fromtimestamp(os.path.getmtime(file_path))
-                if current_time - mtime > timedelta(hours=max_age_hours):
-                    try:
-                        os.remove(file_path)
-                        logger.info(f"Cleaned up old preview file: {file_path}")
-                    except OSError as e:
-                        logger.warning(f"Failed to delete old preview file {file_path}: {e}")
-            except OSError as e:
-                logger.warning(f"Error checking preview file {file_path}: {e}")
-                
-    except Exception as e:
-        logger.error(f"Error during preview cleanup: {e}")
-
-def should_cleanup():
-    """Check if cleanup is needed (avoid cleaning up too frequently)"""
-    try:
-        from app.core.pipeline import get_preview_dir
-        preview_dir = get_preview_dir()
-        marker_file = os.path.join(preview_dir, '.last_cleanup')
-        
-        if not os.path.exists(marker_file):
-            return True
-            
-        last_cleanup = datetime.fromtimestamp(os.path.getmtime(marker_file))
-        return datetime.now() - last_cleanup > timedelta(hours=1)
-        
-    except Exception:
-        return True
-
-def cleanup_preview_dir():
-    """Perform maintenance on the preview directory"""
-    try:
-        if not should_cleanup():
-            logger.debug("Skipping cleanup - last cleanup was too recent")
-            return
-
-        from app.core.pipeline import get_preview_dir
-        preview_dir = get_preview_dir()
-        
-        cleanup_old_previews()
-        
-        for root, dirs, files in os.walk(preview_dir, topdown=False):
-            for name in dirs:
-                try:
-                    dir_path = os.path.join(root, name)
-                    if not os.listdir(dir_path):
-                        os.rmdir(dir_path)
-                        logger.info(f"Removed empty preview subdirectory: {dir_path}")
-                except OSError as e:
-                    logger.warning(f"Failed to remove empty directory {name}: {e}")
-        
-        marker_file = os.path.join(preview_dir, '.last_cleanup')
-        with open(marker_file, 'w') as f:
-            f.write(datetime.now().isoformat())
-                    
-    except Exception as e:
-        logger.error(f"Error during preview directory maintenance: {e}")
+    return {
+        'id': video[0],
+        'task_id': video[1],
+        'original_name': video[2],
+        'processed_path': video[3],
+        'scheduled_time': localize_timestamp(video[4]),
+        'status': video[5],
+        'upload_status': video[6],
+        'error_message': video[7],
+        'retry_count': video[8],
+        'generated_at': localize_timestamp(video[9])
+    }
 
 def get_task_details(task_id, conn):
-    """Get detailed task information including platforms and utilities"""
+    """Get detailed task information including platforms, utilities, and videos"""
     c = conn.cursor()
     
     # Get basic task info with generator name
@@ -160,6 +117,19 @@ def get_task_details(task_id, conn):
     """, (task_id,))
     platforms = c.fetchall()
 
+    # Get generated videos
+    c.execute("""
+        SELECT id FROM generated_videos 
+        WHERE task_id = ? 
+        ORDER BY scheduled_time DESC
+    """, (task_id,))
+    video_ids = [row[0] for row in c.fetchall()]
+    videos = []
+    for vid_id in video_ids:
+        video_detail = get_video_details(vid_id, conn)
+        if video_detail:
+            videos.append(video_detail)
+
     return {
         'id': task[0],
         'name': task[1],
@@ -176,6 +146,7 @@ def get_task_details(task_id, conn):
         'processing_status': task[11],
         'processed_video_path': task[12],
         'created_at': localize_timestamp(task[13]),
+        'videos': videos,
         'platforms': [{
             'id': p[0],
             'name': p[1],
@@ -208,47 +179,163 @@ def get_tasks():
                 
         return jsonify(tasks)
 
-def retry_with_backoff(task_id):
-    """Retry task with exponential backoff"""
+@tasks_bp.route('/api/tasks/<int:id>/videos', methods=['GET'])
+def get_task_videos(id):
+    """Get all videos for a specific task"""
+    with sqlite3.connect(get_db_path()) as conn:
+        c = conn.cursor()
+        
+        c.execute("""
+            SELECT id FROM generated_videos 
+            WHERE task_id = ? 
+            ORDER BY scheduled_time DESC
+        """, (id,))
+        video_ids = [row[0] for row in c.fetchall()]
+        
+        videos = []
+        for vid_id in video_ids:
+            video_detail = get_video_details(vid_id, conn)
+            if video_detail:
+                videos.append(video_detail)
+                
+        return jsonify(videos)
+
+@tasks_bp.route('/api/tasks/<int:id>/videos/<int:video_id>', methods=['GET'])
+def get_task_video(id, video_id):
+    """Get details for a specific video"""
+    with sqlite3.connect(get_db_path()) as conn:
+        video_detail = get_video_details(video_id, conn)
+        if video_detail and video_detail['task_id'] == id:
+            return jsonify(video_detail)
+        return jsonify({'success': False, 'message': 'Video not found'}), 404
+
+def retry_with_backoff(task_id, video_id=None):
+    """Retry task or specific video with exponential backoff"""
     scheduler = current_app.scheduler
     
     with sqlite3.connect(get_db_path()) as conn:
         c = conn.cursor()
-        c.execute("SELECT retry_count FROM tasks WHERE id = ?", (task_id,))
-        result = c.fetchone()
-        retry_count = result[0] if result and result[0] is not None else 0
         
-        if retry_count >= 3:
+        if video_id:
+            # Retry specific video
+            c.execute("SELECT retry_count FROM generated_videos WHERE id = ?", (video_id,))
+            result = c.fetchone()
+            retry_count = result[0] if result and result[0] is not None else 0
+            
+            if retry_count >= 3:
+                c.execute("""
+                    UPDATE generated_videos 
+                    SET status = 'failed', 
+                        upload_status = 'failed',
+                        retry_count = 0
+                    WHERE id = ?
+                """, (video_id,))
+                conn.commit()
+                return
+                
+            delay = 60 * (2 ** retry_count)
+            next_run = datetime.now() + timedelta(seconds=delay)
+            
+            from app.core.pipeline import process_video_upload
+            scheduler.add_job(
+                func=process_video_upload,
+                trigger='date',
+                run_date=next_run,
+                args=[task_id, video_id],
+                id=f'retry_video_{video_id}_{next_run.timestamp()}'
+            )
+            
+            c.execute("""
+                UPDATE generated_videos 
+                SET retry_count = ?,
+                    status = 'retrying',
+                    upload_status = 'pending'
+                WHERE id = ?
+            """, (retry_count + 1, video_id))
+            
+        else:
+            # Retry entire task
+            c.execute("SELECT retry_count FROM tasks WHERE id = ?", (task_id,))
+            result = c.fetchone()
+            retry_count = result[0] if result and result[0] is not None else 0
+            
+            if retry_count >= 3:
+                c.execute("""
+                    UPDATE tasks 
+                    SET status = 'failed', 
+                        retry_count = 0,
+                        processing_status = 'failed'
+                    WHERE id = ?
+                """, (task_id,))
+                conn.commit()
+                return
+            
+            delay = 60 * (2 ** retry_count)
+            next_run = datetime.now() + timedelta(seconds=delay)
+            
+            from app.core.pipeline import process_video_pipeline
+            scheduler.add_job(
+                func=process_video_pipeline,
+                trigger='date',
+                run_date=next_run,
+                args=[task_id],
+                id=f'retry_task_{task_id}_{next_run.timestamp()}'
+            )
+            
             c.execute("""
                 UPDATE tasks 
-                SET status = 'failed', 
-                    retry_count = 0,
-                    processing_status = 'failed'
+                SET retry_count = ?,
+                    status = 'retrying',
+                    processing_status = 'pending'
                 WHERE id = ?
-            """, (task_id,))
-            conn.commit()
-            return
-        
-        delay = 60 * (2 ** retry_count)
-        next_run = datetime.now() + timedelta(seconds=delay)
-        
-        from app.core.pipeline import process_video_pipeline
-        scheduler.add_job(
-            func=process_video_pipeline,
-            trigger='date',
-            run_date=next_run,
-            args=[task_id],
-            id=f'retry_task_{task_id}_{next_run.timestamp()}'
-        )
-        
-        c.execute("""
-            UPDATE tasks 
-            SET retry_count = ?,
-                status = 'retrying',
-                processing_status = 'pending'
-            WHERE id = ?
-        """, (retry_count + 1, task_id))
+            """, (retry_count + 1, task_id))
+            
         conn.commit()
+
+def cleanup_preview_dir():
+    """Perform maintenance on the preview directory"""
+    try:
+        if not should_cleanup():
+            logger.debug("Skipping cleanup - last cleanup was too recent")
+            return
+
+        from app.core.pipeline import get_preview_dir
+        preview_dir = get_preview_dir()
+        
+        for file_path in glob.glob(os.path.join(preview_dir, 'preview_task_*.mp4')):
+            try:
+                mtime = datetime.fromtimestamp(os.path.getmtime(file_path))
+                if datetime.now() - mtime > timedelta(hours=24):
+                    try:
+                        os.remove(file_path)
+                        logger.info(f"Cleaned up old preview file: {file_path}")
+                    except OSError as e:
+                        logger.warning(f"Failed to delete old preview file {file_path}: {e}")
+            except OSError as e:
+                logger.warning(f"Error checking preview file {file_path}: {e}")
+        
+        marker_file = os.path.join(preview_dir, '.last_cleanup')
+        with open(marker_file, 'w') as f:
+            f.write(datetime.now().isoformat())
+                    
+    except Exception as e:
+        logger.error(f"Error during preview directory maintenance: {e}")
+
+def should_cleanup():
+    """Check if cleanup is needed (avoid cleaning up too frequently)"""
+    try:
+        from app.core.pipeline import get_preview_dir
+        preview_dir = get_preview_dir()
+        marker_file = os.path.join(preview_dir, '.last_cleanup')
+        
+        if not os.path.exists(marker_file):
+            return True
+            
+        last_cleanup = datetime.fromtimestamp(os.path.getmtime(marker_file))
+        return datetime.now() - last_cleanup > timedelta(hours=1)
+        
+    except Exception:
+        return True
 
 @tasks_bp.route('/api/tasks', methods=['POST'])
 def create_task():
@@ -285,9 +372,11 @@ def create_task():
                             VALUES (?, ?, ?)''',
                          (task_id, platform['id'], platform['account_name']))
             
-            # Schedule the task
+            # Schedule the task for both generation and upload
+            from app.core.pipeline import process_video_pipeline, process_video_generation
+            
+            # Parse schedule for night processing and uploads
             day_schedules = data['schedule'].split(';')
-            from app.core.pipeline import process_video_pipeline
             
             for day_schedule in day_schedules:
                 if not day_schedule.strip():
@@ -299,10 +388,12 @@ def create_task():
                     'thu': 4, 'fri': 5, 'sat': 6
                 }[day.lower()]
                 
+                # Schedule each time slot
                 for time in times.split(','):
                     hour, minute = map(int, time.strip().split(':'))
-                    job_id = f'task_{task_id}_{day}_{hour}_{minute}'
                     
+                    # Schedule the upload job
+                    upload_job_id = f'task_{task_id}_{day}_{hour}_{minute}'
                     scheduler.add_job(
                         func=process_video_pipeline,
                         trigger='cron',
@@ -310,11 +401,11 @@ def create_task():
                         hour=hour,
                         minute=minute,
                         args=[task_id],
-                        id=job_id,
+                        id=upload_job_id,
                         misfire_grace_time=45
                     )
-                    logger.info(f"Scheduled task {task_id} for {day} at {hour:02d}:{minute:02d}")
-            
+                    logger.info(f"Scheduled upload for task {task_id} on {day} at {hour:02d}:{minute:02d}")
+
             conn.commit()
             return jsonify({'id': task_id, 'status': 'scheduled'})
             
@@ -351,14 +442,29 @@ def delete_task(id):
 
                 # Remove retry jobs
                 for job in scheduler.get_jobs():
-                    if job.id.startswith(f'retry_task_{id}'):
+                    if job.id.startswith(f'retry_task_{id}') or job.id.startswith(f'retry_video_{id}'):
                         try:
                             scheduler.remove_job(job.id)
                         except:
                             pass
             
-            # Delete task platform associations (will cascade)
+            # Delete generated videos
+            c.execute("""
+                SELECT processed_path FROM generated_videos
+                WHERE task_id = ?
+            """, (id,))
+            video_paths = [row[0] for row in c.fetchall()]
+            
+            for path in video_paths:
+                if path and os.path.exists(path):
+                    try:
+                        os.remove(path)
+                    except Exception as e:
+                        logger.warning(f"Failed to delete video file {path}: {e}")
+            
+            # Delete task platform associations and videos (will cascade)
             c.execute('DELETE FROM task_platform_accounts WHERE task_id = ?', (id,))
+            c.execute('DELETE FROM generated_videos WHERE task_id = ?', (id,))
             
             # Delete the task
             c.execute('DELETE FROM tasks WHERE id = ?', (id,))
@@ -640,7 +746,7 @@ def generate_task(id):
         
         with sqlite3.connect(get_db_path()) as conn:
             c = conn.cursor()
-            c.execute("SELECT id, status, processing_status FROM tasks WHERE id = ?", (id,))
+            c.execute("SELECT id, status, processing_status, schedule FROM tasks WHERE id = ?", (id,))
             task = c.fetchone()
             
             if not task:
@@ -655,17 +761,36 @@ def generate_task(id):
                     'message': f'Task {id} is already being processed'
                 }), 409
 
+            # Get next scheduled time if exists
+            schedule = task[3]
+            next_time = None
+            if schedule:
+                day_schedules = schedule.split(';')
+                now = datetime.now()
+                for day_schedule in day_schedules:
+                    if not day_schedule.strip():
+                        continue
+                    day, times = day_schedule.split('|')
+                    for time_str in times.split(','):
+                        hour, minute = map(int, time_str.strip().split(':'))
+                        schedule_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                        if schedule_time > now:
+                            if not next_time or schedule_time < next_time:
+                                next_time = schedule_time
+
         from app.core.pipeline import process_video_generation
-        video_path = process_video_generation(id)
+        result = process_video_generation(id, next_time if next_time else None)
         
         # Reset manual run flag
         setattr(current_app, 'manual_run', False)
         
-        if video_path:
+        if result and isinstance(result, tuple):
+            video_path, video_id = result
             return jsonify({
                 'success': True,
                 'message': 'Video generation completed successfully',
-                'video_path': video_path
+                'video_path': video_path,
+                'video_id': video_id
             })
         else:
             return jsonify({
@@ -682,15 +807,68 @@ def generate_task(id):
             'message': str(e)
         }), 500
 
-@tasks_bp.route('/api/tasks/<int:id>/upload', methods=['POST'])
-def upload_task(id):
-    """Manual upload of processed video content"""
+@tasks_bp.route('/api/tasks/<int:id>/videos/<int:video_id>/upload', methods=['POST'])
+def upload_video(id, video_id):
+    """Manual upload of a specific video"""
     try:
         with sqlite3.connect(get_db_path()) as conn:
             c = conn.cursor()
             c.execute("""
-                SELECT id, status, processing_status, processed_video_path 
-                FROM tasks WHERE id = ?
+                SELECT v.id, v.original_name, v.processed_path, v.scheduled_time,
+                       t.status as task_status
+                FROM generated_videos v
+                JOIN tasks t ON v.task_id = t.id
+                WHERE v.task_id = ? AND v.id = ?
+            """, (id, video_id))
+            video = c.fetchone()
+            
+            if not video:
+                return jsonify({
+                    'success': False,
+                    'message': f'Video {video_id} not found for task {id}'
+                }), 404
+            
+            if video[4] == 'running':
+                return jsonify({
+                    'success': False,
+                    'message': f'Task {id} is currently running'
+                }), 409
+
+            if not video[2] or not os.path.exists(video[2]):
+                return jsonify({
+                    'success': False,
+                    'message': f'Video file not found'
+                }), 404
+
+        from app.core.pipeline import process_video_upload
+        success = process_video_upload(id, (video_id, video[1], video[2], video[3]))
+        
+        if success:
+            return jsonify({
+                'success': True,
+                'message': 'Upload completed successfully'
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'message': 'Upload failed'
+            }), 500
+            
+    except Exception as e:
+        logger.error(f"Error uploading video {video_id} for task {id}: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        }), 500
+
+@tasks_bp.route('/api/tasks/<int:id>/upload', methods=['POST'])
+def upload_task(id):
+    """Manual upload of all pending videos for a task"""
+    try:
+        with sqlite3.connect(get_db_path()) as conn:
+            c = conn.cursor()
+            c.execute("""
+                SELECT id, status FROM tasks WHERE id = ?
             """, (id,))
             task = c.fetchone()
             
@@ -705,35 +883,50 @@ def upload_task(id):
                     'success': False,
                     'message': f'Task {id} is currently running'
                 }), 409
-                
-            if task[2] != 'processed':
+
+            # Get all pending videos for this task
+            c.execute("""
+                SELECT id, original_name, processed_path, scheduled_time
+                FROM generated_videos
+                WHERE task_id = ? 
+                AND upload_status = 'pending'
+                AND processed_path IS NOT NULL
+                ORDER BY scheduled_time ASC
+            """, (id,))
+            pending_videos = c.fetchall()
+            
+            if not pending_videos:
                 return jsonify({
                     'success': False,
-                    'message': f'Task {id} has not been processed yet'
-                }), 400
-                
-            if not task[3] or not os.path.exists(task[3]):
-                return jsonify({
-                    'success': False,
-                    'message': f'Processed video not found for task {id}'
+                    'message': f'No pending videos found for task {id}'
                 }), 404
 
-        from app.core.pipeline import process_video_upload
-        success = process_video_upload(id)
-        
-        if success:
-            return jsonify({
-                'success': True,
-                'message': 'Upload completed successfully'
-            })
-        else:
-            return jsonify({
-                'success': False,
-                'message': 'Upload failed'
-            }), 500
+            success_count = 0
+            for video in pending_videos:
+                if not os.path.exists(video[2]):
+                    continue
+
+                try:
+                    from app.core.pipeline import process_video_upload
+                    if process_video_upload(id, (video[0], video[1], video[2], video[3])):
+                        success_count += 1
+                except Exception as e:
+                    logger.error(f"Error uploading video {video[0]}: {str(e)}")
+                    # Continue with next video
+
+            if success_count > 0:
+                return jsonify({
+                    'success': True,
+                    'message': f'Successfully uploaded {success_count} of {len(pending_videos)} videos'
+                })
+            else:
+                return jsonify({
+                    'success': False,
+                    'message': 'Failed to upload any videos'
+                }), 500
             
     except Exception as e:
-        logger.error(f"Error uploading task {id}: {str(e)}")
+        logger.error(f"Error uploading videos for task {id}: {str(e)}")
         return jsonify({
             'success': False,
             'message': str(e)

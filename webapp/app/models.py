@@ -54,7 +54,7 @@ def init_db():
                 )
             ''')
             
-            # Create tasks table with new columns
+            # Create tasks table
             c.execute('''
                 CREATE TABLE IF NOT EXISTS tasks (
                     id INTEGER PRIMARY KEY,
@@ -72,6 +72,23 @@ def init_db():
                     processed_video_path TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(generator_id) REFERENCES generators(id)
+                )
+            ''')
+
+            # Create generated_videos table
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS generated_videos (
+                    id INTEGER PRIMARY KEY,
+                    task_id INTEGER NOT NULL,
+                    original_name TEXT NOT NULL,
+                    processed_path TEXT NOT NULL,
+                    scheduled_time TEXT NOT NULL,
+                    status TEXT DEFAULT 'pending',
+                    upload_status TEXT DEFAULT 'pending',
+                    error_message TEXT,
+                    retry_count INTEGER DEFAULT 0,
+                    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
                 )
             ''')
             

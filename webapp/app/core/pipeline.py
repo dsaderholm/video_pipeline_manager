@@ -6,7 +6,7 @@ import sys
 import logging
 import shutil
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from app import logger
 from app.core.utils import execute_curl, get_latest_video, cleanup_video, format_upload_command, log_with_details
 from app.core.email_utils import send_task_completion_notification
@@ -74,21 +74,6 @@ def check_and_set_lock():
             conn = get_db_connection()
             with conn:
                 c = conn.cursor()
-                
-                # Create lock table if it doesn't exist
-                c.execute("""
-                    CREATE TABLE IF NOT EXISTS task_lock (
-                        id INTEGER PRIMARY KEY,
-                        locked INTEGER DEFAULT 0,
-                        task_id INTEGER,
-                        locked_at TIMESTAMP
-                    )
-                """)
-                
-                # Insert default lock record if not exists
-                c.execute("INSERT OR IGNORE INTO task_lock (id, locked) VALUES (1, 0)")
-                
-                # Clear stale locks (older than 30 minutes)
                 c.execute("""
                     UPDATE task_lock 
                     SET locked = 0, task_id = NULL, locked_at = NULL 
@@ -96,7 +81,6 @@ def check_and_set_lock():
                     AND datetime(locked_at, '+30 minutes') < datetime('now')
                 """)
                 
-                # Try to acquire lock
                 c.execute("""
                     UPDATE task_lock 
                     SET locked = 1, task_id = NULL, locked_at = datetime('now')
@@ -166,50 +150,53 @@ def update_task_status(task_id, status, processing_status=None, video_path=None,
         if should_close_conn:
             conn.close()
 
-def get_preview_dir():
-    """Get the absolute path to the previews directory"""
-    preview_details = {
-        'operation': 'get_preview_dir',
-        'timestamp': datetime.now().isoformat()
-    }
+def store_generated_video(task_id, original_name, processed_path, scheduled_time, conn=None):
+    """Store information about a newly generated video"""
+    should_close_conn = False
+    if conn is None:
+        conn = get_db_connection()
+        should_close_conn = True
     
     try:
-        webapp_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        preview_dir = os.path.join(webapp_root, 'static', 'previews')
-        
-        preview_details.update({
-            'webapp_root': webapp_root,
-            'preview_dir': preview_dir
-        })
-        
-        os.makedirs(preview_dir, exist_ok=True)
-        preview_details['directory_created'] = True
-        
-        log_with_details('INFO', f"Ensured preview directory exists",
-            details=preview_details)
-        return preview_dir
-        
-    except Exception as e:
-        preview_details['error'] = str(e)
-        log_with_details('ERROR', f"Failed to create preview directory",
-            details=preview_details)
-        raise
+        with conn:
+            c = conn.cursor()
+            c.execute('''
+                INSERT INTO generated_videos 
+                (task_id, original_name, processed_path, scheduled_time, status, upload_status)
+                VALUES (?, ?, ?, ?, 'completed', 'pending')
+            ''', (task_id, original_name, processed_path, scheduled_time))
+            return c.lastrowid
+    finally:
+        if should_close_conn:
+            conn.close()
 
-def cleanup_files(video_files):
-    """Cleanup multiple video files with error handling"""
-    for file in video_files:
-        if file and os.path.exists(file):
-            try:
-                cleanup_video(file)
-            except Exception as e:
-                log_with_details('ERROR', f"Failed to cleanup file {file}: {str(e)}",
-                    details={'file': file, 'error': str(e)})
+def get_next_day_schedules(schedule_str):
+    """Get tomorrow's schedule times from a schedule string"""
+    tomorrow = datetime.now() + timedelta(days=1)
+    tomorrow_day = tomorrow.strftime('%A')[:3].lower()
+    
+    scheduled_times = []
+    day_schedules = schedule_str.split(';')
+    
+    for day_schedule in day_schedules:
+        if not day_schedule.strip():
+            continue
+        
+        day, times = day_schedule.split('|')
+        if day.lower() == tomorrow_day:
+            for time_str in times.split(','):
+                hour, minute = map(int, time_str.strip().split(':'))
+                schedule_time = tomorrow.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                scheduled_times.append(schedule_time)
+    
+    return scheduled_times
 
-def process_video_generation(task_id, preview_mode=False, dry_run=False):
+def process_video_generation(task_id, schedule_time=None, preview_mode=False, dry_run=False):
     """Handle video generation and utility processing"""
     generation_details = {
         'task_id': task_id,
         'mode': 'dry_run' if dry_run else 'preview' if preview_mode else 'normal',
+        'schedule_time': schedule_time.isoformat() if schedule_time else None,
         'start_time': datetime.now().isoformat()
     }
     
@@ -226,7 +213,6 @@ def process_video_generation(task_id, preview_mode=False, dry_run=False):
         
         with conn:
             c = conn.cursor()
-            
             c.execute("""
                 SELECT t.id, t.name, t.generator_id, t.utilities, t.schedule, 
                        t.hashtags, t.sound_name, t.sound_volume, t.status, 
@@ -292,7 +278,8 @@ def process_video_generation(task_id, preview_mode=False, dry_run=False):
 
             # Handle preview mode
             if preview_mode:
-                preview_dir = get_preview_dir()
+                preview_dir = os.path.join('static', 'previews')
+                os.makedirs(preview_dir, exist_ok=True)
                 preview_path = os.path.join(preview_dir, f'preview_task_{task_id}.mp4')
                 
                 if os.path.exists(preview_path):
@@ -302,16 +289,41 @@ def process_video_generation(task_id, preview_mode=False, dry_run=False):
                 update_task_status(task_id, 'completed', None, None, conn)
                 return preview_path
 
-            # Store processed video path
+            # Store processed video
             os.makedirs('processed_videos', exist_ok=True)
-            permanent_path = os.path.join('processed_videos', f'task_{task_id}_{int(time.time())}.mp4')
+            original_name = os.path.basename(current_video_file)
+            timestamp = int(time.time())
+            permanent_path = os.path.join('processed_videos', f'task_{task_id}_{timestamp}.mp4')
             shutil.copy2(current_video_file, permanent_path)
+            
+            # Store video information with schedule time
+            if schedule_time:
+                video_id = store_generated_video(
+                    task_id, 
+                    original_name, 
+                    permanent_path, 
+                    schedule_time.isoformat(), 
+                    conn
+                )
+            else:
+                video_id = store_generated_video(
+                    task_id, 
+                    original_name, 
+                    permanent_path, 
+                    datetime.now().isoformat(), 
+                    conn
+                )
             
             update_task_status(task_id, 'pending', 'processed', permanent_path, conn)
             log_with_task_details('INFO', f"Video generation completed successfully",
                 task_id=task_id,
-                details={'video_path': permanent_path, **generation_details})
-            return permanent_path
+                details={
+                    'video_path': permanent_path,
+                    'original_name': original_name,
+                    'video_id': video_id,
+                    **generation_details
+                })
+            return permanent_path, video_id
 
     except Exception as e:
         log_with_task_details('ERROR', f"Video generation failed: {str(e)}",
@@ -326,13 +338,17 @@ def process_video_generation(task_id, preview_mode=False, dry_run=False):
         if conn:
             conn.close()
 
-def process_video_upload(task_id, video_path=None, preview_mode=False, dry_run=False):
+def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=False):
     """Handle video uploading to platforms"""
     upload_details = {
         'task_id': task_id,
         'mode': 'dry_run' if dry_run else 'preview' if preview_mode else 'normal',
         'start_time': datetime.now().isoformat()
     }
+    
+    if video_info:
+        upload_details['video_id'] = video_info[0]
+        upload_details['scheduled_time'] = video_info[3]
     
     log_with_task_details('INFO', f"Starting video upload process",
         task_id=task_id,
@@ -347,36 +363,63 @@ def process_video_upload(task_id, video_path=None, preview_mode=False, dry_run=F
         with conn:
             c = conn.cursor()
             
+            # Get video to upload
+            if video_info:
+                video_id, original_name, processed_path, scheduled_time = video_info
+            else:
+                # Get the next pending video for this task
+                c.execute("""
+                    SELECT id, original_name, processed_path, scheduled_time
+                    FROM generated_videos 
+                    WHERE task_id = ? 
+                    AND upload_status = 'pending'
+                    AND scheduled_time <= datetime('now', 'localtime')
+                    ORDER BY scheduled_time ASC
+                    LIMIT 1
+                """, (task_id,))
+                video_info = c.fetchone()
+                if not video_info:
+                    log_with_task_details('INFO', "No pending videos ready for upload",
+                        task_id=task_id,
+                        details=upload_details)
+                    return False
+                
+                video_id, original_name, processed_path, scheduled_time = video_info
+
+            if not processed_path or not os.path.exists(processed_path):
+                log_with_task_details('ERROR', f"Video file not found: {processed_path}",
+                    task_id=task_id,
+                    details=upload_details)
+                c.execute("""
+                    UPDATE generated_videos 
+                    SET status = 'failed',
+                        upload_status = 'failed',
+                        error_message = ?
+                    WHERE id = ?
+                """, ("Video file not found", video_id))
+                return False
+
             # Get task data
             c.execute("""
-                SELECT t.id, t.name, t.hashtags, t.sound_name, t.sound_volume, 
-                       t.email_notify, t.processed_video_path
+                SELECT t.name, t.hashtags, t.sound_name, t.sound_volume, t.email_notify
                 FROM tasks t
-                WHERE t.id=?
+                WHERE t.id = ?
             """, (task_id,))
             task_data = c.fetchone()
             
             if not task_data:
-                log_with_task_details('ERROR', "No task found with this ID",
-                    task_id=task_id,
-                    details=upload_details)
-                return False
-
-            # Use provided video path or get from database
-            current_video_file = video_path or task_data[6]
-            if not current_video_file or not os.path.exists(current_video_file):
-                error_msg = "No processed video file found"
-                log_with_task_details('ERROR', error_msg,
+                log_with_task_details('ERROR', "Task not found",
                     task_id=task_id,
                     details=upload_details)
                 return False
 
             task_dict = {
-                'id': task_data[0],
-                'name': task_data[1],
-                'hashtags': task_data[2],
-                'sound_name': task_data[3],
-                'sound_volume': task_data[4]
+                'id': task_id,
+                'name': task_data[0],
+                'hashtags': task_data[1],
+                'sound_name': task_data[2],
+                'sound_volume': task_data[3],
+                'original_name': original_name
             }
 
             if dry_run:
@@ -415,8 +458,8 @@ def process_video_upload(task_id, video_path=None, preview_mode=False, dry_run=F
                 }
                 
                 # Create a copy of the video for this platform
-                platform_video_file = f"{os.path.splitext(current_video_file)[0]}_{platform_name}.mp4"
-                shutil.copy2(current_video_file, platform_video_file)
+                platform_video_file = f"{os.path.splitext(processed_path)[0]}_{platform_name}.mp4"
+                shutil.copy2(processed_path, platform_video_file)
                 files_to_cleanup.add(platform_video_file)
 
                 platform_dict = {
@@ -510,18 +553,43 @@ def process_video_upload(task_id, video_path=None, preview_mode=False, dry_run=F
 
             # After all platforms are processed
             if not uploaded_platforms:
+                c.execute("""
+                    UPDATE generated_videos 
+                    SET status = 'failed',
+                        upload_status = 'failed',
+                        error_message = ?,
+                        retry_count = retry_count + 1
+                    WHERE id = ?
+                """, ("Failed to upload to any platform", video_id))
                 update_task_status(task_id, 'failed', None, None, conn)
                 raise Exception("Failed to upload to any platform")
 
-            # Update task status and send notification
-            update_task_status(task_id, 'completed', 'completed', None, conn)
+            # Update video and task status
+            c.execute("""
+                UPDATE generated_videos 
+                SET status = 'completed',
+                    upload_status = 'completed'
+                WHERE id = ?
+            """, (video_id,))
 
-            if task_data[5]:  # If email notifications are enabled
+            # Check if this is the last pending video for the task
+            c.execute("""
+                SELECT COUNT(*) 
+                FROM generated_videos 
+                WHERE task_id = ? AND upload_status = 'pending'
+            """, (task_id,))
+            pending_count = c.fetchone()[0]
+
+            if pending_count == 0:
+                update_task_status(task_id, 'completed', 'completed', None, conn)
+
+            # Send email notification if enabled
+            if task_data[4]:  # email_notify
                 try:
                     send_task_completion_notification(
                         task_id, 
-                        task_data[1], 
-                        task_data[5], 
+                        task_data[0],  # task name
+                        task_data[4],  # email address
                         success=True,
                         platforms=uploaded_platforms
                     )
@@ -537,6 +605,15 @@ def process_video_upload(task_id, video_path=None, preview_mode=False, dry_run=F
             task_id=task_id,
             details={'error': str(e), **upload_details})
         if not (dry_run or preview_mode):
+            if video_info:
+                c.execute("""
+                    UPDATE generated_videos 
+                    SET status = 'failed',
+                        upload_status = 'failed',
+                        error_message = ?,
+                        retry_count = retry_count + 1
+                    WHERE id = ?
+                """, (str(e), video_id))
             update_task_status(task_id, 'failed', None, None, conn)
         raise
 
@@ -545,11 +622,12 @@ def process_video_upload(task_id, video_path=None, preview_mode=False, dry_run=F
         if conn:
             conn.close()
 
-def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
+def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, dry_run=False):
     """Main pipeline process that coordinates generation and upload"""
     pipeline_details = {
         'task_id': task_id,
         'mode': 'dry_run' if dry_run else 'preview' if preview_mode else 'normal',
+        'schedule_time': schedule_time.isoformat() if schedule_time else None,
         'start_time': datetime.now().isoformat()
     }
     
@@ -577,17 +655,23 @@ def process_video_pipeline(task_id, preview_mode=False, dry_run=False):
                 return None
         
         # Generate video
-        video_path = process_video_generation(task_id, preview_mode, dry_run)
+        generation_result = process_video_generation(task_id, schedule_time, preview_mode, dry_run)
         
         if preview_mode:
-            return video_path
+            return generation_result[0] if isinstance(generation_result, tuple) else generation_result
             
         if dry_run:
             return True
             
-        # If it's a normal run and generation succeeded, proceed with upload
-        if video_path:
-            return process_video_upload(task_id, video_path, preview_mode, dry_run)
+        # If it's a normal run and generation succeeded, proceed with upload if scheduled
+        if generation_result and isinstance(generation_result, tuple):
+            video_path, video_id = generation_result
+            
+            # If this is for immediate upload (manual run or catchup)
+            if not schedule_time or schedule_time <= datetime.now():
+                return process_video_upload(task_id, (video_id, None, video_path, datetime.now().isoformat()))
+            
+            return True  # Video generated successfully, will be uploaded at scheduled time
             
         return None
         
@@ -611,19 +695,32 @@ def process_night_queue():
         conn = get_db_connection()
         with conn:
             c = conn.cursor()
+            
+            # Get all tasks that need processing for tomorrow
+            tomorrow = datetime.now() + timedelta(days=1)
+            tomorrow_day = tomorrow.strftime('%A')[:3].lower()
+            
             c.execute("""
-                SELECT id FROM tasks 
-                WHERE processing_status = 'pending'
-                AND status = 'pending'
-                ORDER BY created_at ASC
+                SELECT id, schedule 
+                FROM tasks 
+                WHERE status != 'failed'
+                AND processing_status != 'failed'
             """)
-            tasks = [row[0] for row in c.fetchall()]
+            tasks = c.fetchall()
 
-        for task_id in tasks:
+        for task_id, schedule in tasks:
+            # Get tomorrow's schedule times for this task
+            schedule_times = get_next_day_schedules(schedule)
+            
+            if not schedule_times:
+                continue
+                
             try:
                 if check_and_set_lock():
                     try:
-                        process_video_generation(task_id)
+                        # Generate a video for each scheduled time
+                        for schedule_time in schedule_times:
+                            process_video_generation(task_id, schedule_time)
                     finally:
                         release_lock()
             except Exception as e:
@@ -639,20 +736,24 @@ def process_scheduled_uploads():
         conn = get_db_connection()
         with conn:
             c = conn.cursor()
+            
+            # Get all videos that are ready for upload
             c.execute("""
-                SELECT id FROM tasks 
-                WHERE schedule <= datetime('now', 'localtime')
-                AND status = 'pending'
-                AND processing_status = 'processed'
-                ORDER BY schedule ASC
+                SELECT v.task_id, v.id, v.original_name, v.processed_path, v.scheduled_time
+                FROM generated_videos v
+                JOIN tasks t ON v.task_id = t.id
+                WHERE v.upload_status = 'pending'
+                AND v.scheduled_time <= datetime('now', 'localtime')
+                AND t.status != 'failed'
+                ORDER BY v.scheduled_time ASC
             """)
-            tasks = [row[0] for row in c.fetchall()]
+            pending_uploads = c.fetchall()
 
-        for task_id in tasks:
+        for task_id, video_id, original_name, processed_path, scheduled_time in pending_uploads:
             try:
                 if check_and_set_lock():
                     try:
-                        process_video_upload(task_id)
+                        process_video_upload(task_id, (video_id, original_name, processed_path, scheduled_time))
                     finally:
                         release_lock()
             except Exception as e:
@@ -661,3 +762,13 @@ def process_scheduled_uploads():
 
     except Exception as e:
         logger.error(f"Error in scheduled uploads: {str(e)}")
+
+def cleanup_files(video_files):
+    """Cleanup multiple video files with error handling"""
+    for file in video_files:
+        if file and os.path.exists(file):
+            try:
+                cleanup_video(file)
+            except Exception as e:
+                log_with_details('ERROR', f"Failed to cleanup file {file}: {str(e)}",
+                    details={'file': file, 'error': str(e)})
