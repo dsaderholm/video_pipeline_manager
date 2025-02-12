@@ -10,43 +10,47 @@ from app.timezone import get_timezone
 def get_db_path():
     return os.path.join('webapp', 'database', 'pipeline.db')
 
+def init_logs():
+    """Initialize the logs table in the database if it doesn't exist"""
+    try:
+        with sqlite3.connect(get_db_path()) as conn:
+            c = conn.cursor()
+            
+            # Create logs table if it doesn't exist (removed DROP TABLE)
+            c.execute('''
+                CREATE TABLE IF NOT EXISTS logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    level TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    task_id INTEGER,
+                    details TEXT,
+                    source TEXT
+                )
+            ''')
+            conn.commit()
+            
+        print("Log system initialized")
+        
+    except Exception as e:
+        print(f"Failed to initialize log system: {str(e)}")
+        raise
+
 class DatabaseLogHandler(logging.Handler):
     def __init__(self):
         super().__init__()
-        self.initialize()
+        self.initialized = False
 
-    def initialize(self):
-        """Initialize the logs table in the database"""
-        try:
-            with sqlite3.connect(get_db_path()) as conn:
-                c = conn.cursor()
-                
-                # Drop the existing logs table if it exists
-                c.execute("DROP TABLE IF EXISTS logs")
-                
-                # Create logs table with new schema
-                c.execute('''
-                    CREATE TABLE IF NOT EXISTS logs (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        timestamp TEXT NOT NULL,
-                        level TEXT NOT NULL,
-                        message TEXT NOT NULL,
-                        task_id INTEGER,
-                        details TEXT,
-                        source TEXT
-                    )
-                ''')
-                conn.commit()
-            
-            print("Log system initialized")
-            
-        except Exception as e:
-            print(f"Failed to initialize log system: {str(e)}")
-            raise
+    def ensure_initialized(self):
+        """Make sure logs table exists before adding entries"""
+        if not self.initialized:
+            init_logs()
+            self.initialized = True
 
     def emit(self, record):
         """Add a log record to the database"""
         try:
+            self.ensure_initialized()
             with sqlite3.connect(get_db_path()) as conn:
                 c = conn.cursor()
                 
@@ -103,13 +107,11 @@ def get_logs(limit=100, level=None, task_id=None, since=None, processing_status=
                 conditions.append("timestamp > ?")
                 params.append(utc_since.strftime('%Y-%m-%d %H:%M:%S'))
             
-            # Handle processing_status which could be a single string or a list
             if processing_status:
                 if isinstance(processing_status, str):
                     conditions.append("task_id IN (SELECT id FROM tasks WHERE processing_status = ?)")
                     params.append(processing_status)
                 elif isinstance(processing_status, list):
-                    # Convert list to a comma-separated string for SQL IN clause
                     conditions.append("task_id IN (SELECT id FROM tasks WHERE processing_status IN ({}))"
                                       .format(','.join(['?']*len(processing_status))))
                     params.extend(processing_status)
@@ -117,24 +119,18 @@ def get_logs(limit=100, level=None, task_id=None, since=None, processing_status=
             if conditions:
                 query += " WHERE " + " AND ".join(conditions)
             
-            # Order by timestamp only
             query += " ORDER BY timestamp DESC LIMIT ?"
             params.append(limit)
-            
-            # Add extensive logging for debugging
-            print(f"Executing query: {query}")
-            print(f"With parameters: {params}")
             
             c.execute(query, params)
             logs = c.fetchall()
             
-            # Convert to list of dictionaries
-            log_results = [{
+            return [{
                 'id': log[0],
                 'timestamp': datetime.strptime(log[1], '%Y-%m-%d %H:%M:%S.%f')
                     .replace(tzinfo=pytz.UTC)
                     .astimezone(pytz.timezone(get_timezone()))
-                    .strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],  # Truncate to milliseconds
+                    .strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
                 'level': log[2],
                 'message': log[3],
                 'task_id': log[4],
@@ -142,18 +138,10 @@ def get_logs(limit=100, level=None, task_id=None, since=None, processing_status=
                 'source': log[6]
             } for log in logs]
             
-            # More debugging information
-            print(f"Retrieved {len(log_results)} log entries")
-            
-            return log_results
+        return log_results
             
     except Exception as e:
-        # Log the full exception details
-        import traceback
         print(f"Failed to retrieve logs: {str(e)}")
-        print(traceback.format_exc())
-        
-        # Reraise the exception to be caught by the caller
         raise
 
 def add_log_entry(level, message, task_id=None, details=None, source=None):
@@ -163,7 +151,7 @@ def add_log_entry(level, message, task_id=None, details=None, source=None):
     
     for attempt in range(max_retries):
         try:
-            with sqlite3.connect(get_db_path(), timeout=5.0) as conn:  # Add 5 second timeout
+            with sqlite3.connect(get_db_path(), timeout=5.0) as conn:
                 c = conn.cursor()
                 current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
                 
@@ -180,17 +168,17 @@ def add_log_entry(level, message, task_id=None, details=None, source=None):
                 ))
                 
                 conn.commit()
-                return  # Success - exit the function
+                return
                 
         except sqlite3.OperationalError as e:
             if "database is locked" in str(e) and attempt < max_retries - 1:
                 time.sleep(retry_delay)
-                retry_delay *= 2  # Exponential backoff
+                retry_delay *= 2
                 continue
             print(f"Failed to add log entry (attempt {attempt + 1}): {str(e)}")
         except Exception as e:
             print(f"Failed to add log entry: {str(e)}")
-            break  # Exit for non-lock errors
+            break
 
 def clear_old_logs(days=30):
     """Clear logs older than specified days"""
@@ -205,32 +193,3 @@ def clear_old_logs(days=30):
             
     except Exception as e:
         print(f"Failed to clear old logs: {str(e)}")
-
-def init_logs():
-    """Initialize the logs table in the database"""
-    try:
-        with sqlite3.connect(get_db_path()) as conn:
-            c = conn.cursor()
-            
-            # Drop the existing logs table if it exists
-            c.execute("DROP TABLE IF EXISTS logs")
-            
-            # Create logs table with new schema
-            c.execute('''
-                CREATE TABLE IF NOT EXISTS logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    level TEXT NOT NULL,
-                    message TEXT NOT NULL,
-                    task_id INTEGER,
-                    details TEXT,
-                    source TEXT
-                )
-            ''')
-            conn.commit()
-            
-        print("Log system initialized")
-        
-    except Exception as e:
-        print(f"Failed to initialize log system: {str(e)})")
-        raise
