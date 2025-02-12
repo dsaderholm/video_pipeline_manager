@@ -740,16 +740,16 @@ def process_scheduled_uploads():
             c = conn.cursor()
             
             # Get all videos that are ready for upload
-            c.execute("""
+            c.execute('''
                 SELECT v.task_id, v.id, v.original_name, v.processed_path, v.scheduled_time
                 FROM generated_videos v
                 JOIN tasks t ON v.task_id = t.id
                 WHERE v.upload_status = 'pending'
-                AND v.status = 'completed'  # Only completed videos
+                AND v.status = 'completed'
                 AND v.scheduled_time <= datetime('now', 'localtime')
                 AND t.status != 'failed'
                 ORDER BY v.scheduled_time ASC
-            """)
+            ''')
             pending_uploads = c.fetchall()
 
         for task_id, video_id, original_name, processed_path, scheduled_time in pending_uploads:
