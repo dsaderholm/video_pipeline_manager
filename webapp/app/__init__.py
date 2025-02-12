@@ -9,15 +9,6 @@ from dotenv import load_dotenv
 # Get absolute path to the application directory
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Initialize logger
-logger = setup_logging(APP_ROOT)
-from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
-from apscheduler.triggers.cron import CronTrigger
-from app.core.database import db
-from app.core.logging_setup import setup_logging
-from app.core.database import db
-load_dotenv()
-
 def setup_logging():
     """Configure the logging system with file and console handlers"""
     # Create logs directory if it doesn't exist
@@ -64,6 +55,15 @@ def setup_logging():
 
 # Initialize logger
 logger = setup_logging()
+
+# Initialize logger
+logger = setup_logging(APP_ROOT)
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
+from apscheduler.triggers.cron import CronTrigger
+from app.core.database import db
+from app.core.logging_setup import setup_logging
+from app.core.database import db
+load_dotenv()
 
 def cleanup_preview_files():
     """Clean up preview files older than 1 hour"""
