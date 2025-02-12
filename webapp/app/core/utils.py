@@ -9,7 +9,8 @@ import re
 import json
 import shutil
 from datetime import datetime
-from app import logger
+import logging
+logger = logging.getLogger('app')
 import sys
 from app.core.database import db
 from app.core.log_manager import add_log_entry
