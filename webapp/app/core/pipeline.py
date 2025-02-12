@@ -705,7 +705,9 @@ def process_night_queue():
                 FROM tasks 
                 WHERE status != 'failed'
                 AND processing_status != 'failed'
-            """)
+                AND schedule LIKE ?
+            """, (f'%{tomorrow_day}|%',))  # Only get tasks scheduled for tomorrow
+            
             tasks = c.fetchall()
 
         for task_id, schedule in tasks:
@@ -743,6 +745,7 @@ def process_scheduled_uploads():
                 FROM generated_videos v
                 JOIN tasks t ON v.task_id = t.id
                 WHERE v.upload_status = 'pending'
+                AND v.status = 'completed'  # Only completed videos
                 AND v.scheduled_time <= datetime('now', 'localtime')
                 AND t.status != 'failed'
                 ORDER BY v.scheduled_time ASC

@@ -372,12 +372,25 @@ def create_task():
                             VALUES (?, ?, ?)''',
                          (task_id, platform['id'], platform['account_name']))
             
-            # Schedule the task for both generation and upload
-            from app.core.pipeline import process_video_pipeline, process_video_generation
+            # Add night processing schedule - runs at configured start time every night
+            # This will generate all videos needed for the next day
+            night_job_id = f'task_{task_id}_night_processing'
+            night_hour, night_minute = os.getenv('NIGHT_PROCESSING_START', '22:00').split(':')
+            scheduler.add_job(
+                func='app.core.pipeline:process_night_queue',
+                trigger='cron',
+                hour=int(night_hour),
+                minute=int(night_minute),
+                id=night_job_id,
+                misfire_grace_time=3600  # 1 hour grace time for night processing
+            )
+            logger.info(f"Scheduled night processing for task {task_id} at {night_hour}:{night_minute}")
             
-            # Parse schedule for night processing and uploads
+            # Schedule the upload jobs
+            from app.core.pipeline import process_video_upload
+            
+            # Parse schedule for uploads
             day_schedules = data['schedule'].split(';')
-            
             for day_schedule in day_schedules:
                 if not day_schedule.strip():
                     continue
@@ -388,21 +401,21 @@ def create_task():
                     'thu': 4, 'fri': 5, 'sat': 6
                 }[day.lower()]
                 
-                # Schedule each time slot
+                # Schedule each upload time slot
                 for time in times.split(','):
                     hour, minute = map(int, time.strip().split(':'))
                     
                     # Schedule the upload job
                     upload_job_id = f'task_{task_id}_{day}_{hour}_{minute}'
                     scheduler.add_job(
-                        func=process_video_pipeline,
+                        func=process_video_upload,
                         trigger='cron',
                         day_of_week=day_number,
                         hour=hour,
                         minute=minute,
-                        args=[task_id],
+                        args=[task_id],  # process_video_upload will find the correct video for this time
                         id=upload_job_id,
-                        misfire_grace_time=45
+                        misfire_grace_time=300  # 5 minutes grace time for uploads
                     )
                     logger.info(f"Scheduled upload for task {task_id} on {day} at {hour:02d}:{minute:02d}")
 
