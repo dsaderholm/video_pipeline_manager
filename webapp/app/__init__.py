@@ -3,22 +3,21 @@ from flask_apscheduler import APScheduler
 import logging
 import logging.handlers
 import sys
-from dotenv import load_dotenv
 import os
-import sqlite3
-import time
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 from apscheduler.triggers.cron import CronTrigger
+from app.core.database import db
 
-# Load environment variables from .env file
+# Load environment variables
 load_dotenv()
 
 # Get absolute path to the application directory
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def setup_logging():
-    """Configure the logging system with both file and database handlers"""
+    """Configure the logging system with file and console handlers"""
     # Create logs directory if it doesn't exist
     logs_dir = os.path.join(APP_ROOT, 'logs')
     if not os.path.exists(logs_dir):
@@ -28,7 +27,7 @@ def setup_logging():
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
     
-    # Remove any existing handlers
+    # Remove existing handlers
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
 
@@ -39,7 +38,6 @@ def setup_logging():
     detailed_formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
-    
     console_formatter = logging.Formatter(
         '%(levelname)s - %(message)s'
     )
@@ -74,7 +72,7 @@ def cleanup_preview_files():
     logger.info("Starting scheduled preview files cleanup")
     deleted_count = 0
     error_count = 0
-    current_time = time.time()
+    current_time = datetime.now().timestamp()
     
     for file in os.listdir(preview_dir):
         if not file.startswith('preview_task_'):
@@ -95,16 +93,14 @@ def cleanup_preview_files():
         logger.info(f"Preview cleanup complete. Deleted: {deleted_count}, Errors: {error_count}")
 
 def init_scheduler(app):
-    """Initialize the APScheduler with improved logging and error handling"""
+    """Initialize the APScheduler with improved settings and error handling"""
     def handle_job_error(event):
         logger.error(f"Job error occurred. Job ID: {event.job_id}, Error: {event.exception}")
         if event.job_id.startswith('task_'):
             try:
                 task_id = int(event.job_id.split('_')[1])
-                db_path = os.path.join('webapp', 'database', 'pipeline.db')
-                with sqlite3.connect(db_path) as conn:
+                with db.get_connection() as conn:
                     c = conn.cursor()
-                    # Update both status and processing_status
                     c.execute("""
                         UPDATE tasks 
                         SET status = 'failed',
@@ -118,25 +114,23 @@ def init_scheduler(app):
         
     def handle_job_missed(event):
         logger.warning(f"Job missed! Job ID: {event.job_id}, Scheduled run time: {event.scheduled_run_time}")
-        # For missed tasks, attempt to reschedule if it's a generation or upload job
         if event.job_id.startswith('task_'):
             try:
                 task_id = int(event.job_id.split('_')[1])
                 logger.info(f"Rescheduling missed task {task_id}")
-                # Task will be picked up by next scheduler run
             except ValueError:
                 pass
 
-    # Set up the scheduler with configuration
+    # Initialize scheduler
     scheduler = APScheduler()
+    
+    # Configure scheduler
     app.config['SCHEDULER_API_ENABLED'] = True
     app.config['SCHEDULER_TIMEZONE'] = os.getenv('TIMEZONE', 'UTC')
-    
-    # Enhanced scheduler settings
     app.config['SCHEDULER_JOB_DEFAULTS'] = {
-        'coalesce': True,  # Combine multiple pending executions
-        'max_instances': 1,  # Only one instance of each job
-        'misfire_grace_time': 60  # 60 second grace time for misfires
+        'coalesce': True,
+        'max_instances': 1,
+        'misfire_grace_time': 15  # 15 second grace time
     }
     
     scheduler.init_app(app)
@@ -145,7 +139,7 @@ def init_scheduler(app):
     scheduler.scheduler.add_listener(handle_job_error, EVENT_JOB_ERROR)
     scheduler.scheduler.add_listener(handle_job_missed, EVENT_JOB_MISSED)
 
-    # Add cleanup job - runs every hour
+    # Add cleanup job
     scheduler.add_job(
         id='cleanup_previews',
         func=cleanup_preview_files,
@@ -154,36 +148,29 @@ def init_scheduler(app):
         next_run_time=datetime.now() + timedelta(minutes=1)
     )
 
-    # Add night processing job - runs every 15 minutes
+    # Add night processing job
     from app.core.pipeline import process_night_queue
     scheduler.add_job(
         id='night_processing',
         func=process_night_queue,
         trigger=CronTrigger(minute='*/15'),
         name='Night Video Processing',
-        misfire_grace_time=300  # 5 minute grace time for night processing
+        misfire_grace_time=300  # 5 minute grace time
     )
 
-    # Add scheduled uploads job - runs every minute
+    # Add scheduled uploads job
     from app.core.pipeline import process_scheduled_uploads
     scheduler.add_job(
         id='scheduled_uploads',
         func=process_scheduled_uploads,
-        trigger=CronTrigger(minute='*'),
+        trigger=CronTrigger(minute='*/5'),  # Every 5 minutes
         name='Scheduled Video Uploads',
-        misfire_grace_time=120  # 2 minute grace time for uploads
+        misfire_grace_time=240  # 4 minute grace time
     )
 
-    # Log all existing tasks
+    # Log existing tasks
     try:
-        db_path = os.path.join('webapp', 'database', 'pipeline.db')
-        
-        # Skip task logging if database doesn't exist yet
-        if not os.path.exists(db_path):
-            logger.info("Initializing scheduler with 0 active tasks (database not yet created)")
-            return scheduler
-
-        with sqlite3.connect(db_path) as conn:
+        with db.get_connection() as conn:
             c = conn.cursor()
             c.execute("""
                 SELECT id, name, schedule, processing_status 
@@ -210,10 +197,10 @@ def create_app():
                 template_folder=os.path.join(APP_ROOT, 'templates'),
                 static_folder=os.path.join(APP_ROOT, 'static'))
     
-    # Initialize scheduler with improved error handling and logging
+    # Initialize scheduler
     app.scheduler = init_scheduler(app)
     
-    # Create required directories if they don't exist
+    # Create required directories
     required_dirs = {
         'previews': os.path.join(APP_ROOT, 'previews'),
         'processed': os.path.join(APP_ROOT, 'processed_videos'),
@@ -226,17 +213,14 @@ def create_app():
             logger.info(f"Created {dir_name} directory at: {dir_path}")
     
     with app.app_context():
-        # Initialize log manager
+        # Initialize logging system
         try:
-            from app.core.log_manager import db_log_handler, init_logs
+            from app.core.log_manager import db_log_handler
             
-            # Initialize logs table
-            init_logs()
-            
-            # Add database handler only to the root logger
+            # Add database handler to root logger
             logging.getLogger().addHandler(db_log_handler)
             
-            # Make sure Flask's logger doesn't propagate to avoid duplication
+            # Prevent Flask logger propagation
             app.logger.propagate = False
             
             logger.info("Database logging system initialized successfully")
@@ -279,7 +263,7 @@ def create_app():
             logger.error(f"Failed to register blueprints: {str(e)}")
             raise
 
-        # Create debug route
+        # Add debug route
         @app.route('/debug')
         def debug():
             """Simple debug endpoint to verify app is running"""
@@ -289,12 +273,7 @@ def create_app():
                 "registered_blueprints": list(app.blueprints.keys())
             }
 
-        # Log successful initialization
         logger.info("Application initialization completed successfully")
-        
-        # Add test log entry to verify logging system
-        app.logger.info("Test log entry - If you see this in the logs, the logging system is working!")
-
         return app
 
 # Create the application instance

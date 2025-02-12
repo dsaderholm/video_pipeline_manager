@@ -1,18 +1,13 @@
 from flask import jsonify, request, Blueprint
-import sqlite3
-import os
-from flask import current_app
 from app.timezone import localize_timestamp
-
-def get_db_path():
-    return os.path.join('webapp', 'database', 'pipeline.db')
+from app.core.database import db
 
 # Create blueprint
 generators_bp = Blueprint('generators', __name__)
 
 @generators_bp.route('/api/generators', methods=['GET'])
 def get_generators():
-    with sqlite3.connect(get_db_path()) as conn:
+    with db.get_connection() as conn:
         c = conn.cursor()
         c.execute("SELECT * FROM generators")
         generators = c.fetchall()
@@ -26,16 +21,18 @@ def get_generators():
 @generators_bp.route('/api/generators', methods=['POST'])
 def create_generator():
     data = request.json
-    with sqlite3.connect(get_db_path()) as conn:
+    with db.get_connection() as conn:
         c = conn.cursor()
         c.execute('INSERT INTO generators (name, generator_curl) VALUES (?, ?)',
                  (data['name'], data['generator_curl']))
         generator_id = c.lastrowid
+        conn.commit()
         return jsonify({'id': generator_id})
 
 @generators_bp.route('/api/generators/<int:id>', methods=['DELETE'])
 def delete_generator(id):
-    with sqlite3.connect(get_db_path()) as conn:
+    with db.get_connection() as conn:
         c = conn.cursor()
         c.execute('DELETE FROM generators WHERE id = ?', (id,))
+        conn.commit()
         return jsonify({'success': True})

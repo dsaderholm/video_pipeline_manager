@@ -11,6 +11,8 @@ import shutil
 from datetime import datetime
 from app import logger
 import sys
+from app.core.database import db
+from app.core.log_manager import add_log_entry
 
 def ensure_processed_videos_dir():
     """Ensure the processed videos directory exists"""
@@ -35,7 +37,6 @@ def log_with_details(level, message, task_id=None, details=None, source=None):
     details['task_id'] = task_id
     
     try:
-        from app.core.log_manager import add_log_entry
         add_log_entry(level, message, task_id=task_id, details=details, source=source)
     except Exception as e:
         # Fallback logging to stderr if database logging fails

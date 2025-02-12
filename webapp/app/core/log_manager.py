@@ -1,92 +1,79 @@
-import os
+# webapp/app/core/log_manager.py
 import json
-import sqlite3
 import logging
-import time
+import threading
 from datetime import datetime
 import pytz
 from app.timezone import get_timezone
-
-def get_db_path():
-    return os.path.join('webapp', 'database', 'pipeline.db')
-
-def init_logs():
-    """Initialize the logs table in the database if it doesn't exist"""
-    try:
-        with sqlite3.connect(get_db_path()) as conn:
-            c = conn.cursor()
-            
-            # Create logs table if it doesn't exist (removed DROP TABLE)
-            c.execute('''
-                CREATE TABLE IF NOT EXISTS logs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp TEXT NOT NULL,
-                    level TEXT NOT NULL,
-                    message TEXT NOT NULL,
-                    task_id INTEGER,
-                    details TEXT,
-                    source TEXT
-                )
-            ''')
-            conn.commit()
-            
-        print("Log system initialized")
-        
-    except Exception as e:
-        print(f"Failed to initialize log system: {str(e)}")
-        raise
+from app.core.database import db
 
 class DatabaseLogHandler(logging.Handler):
     def __init__(self):
         super().__init__()
-        self.initialized = False
-
-    def ensure_initialized(self):
-        """Make sure logs table exists before adding entries"""
-        if not self.initialized:
-            init_logs()
-            self.initialized = True
-
+        self.buffer = []
+        self.buffer_lock = threading.Lock()
+        self.flush_timer = None
+        self.max_buffer = 100
+        self.flush_interval = 5.0  # seconds
+        
     def emit(self, record):
-        """Add a log record to the database"""
+        """Buffer log records and flush periodically"""
         try:
-            self.ensure_initialized()
-            with sqlite3.connect(get_db_path()) as conn:
+            with self.buffer_lock:
+                self.buffer.append(record)
+                
+                if len(self.buffer) >= self.max_buffer:
+                    self.flush()
+                elif not self.flush_timer:
+                    self.flush_timer = threading.Timer(self.flush_interval, self.flush)
+                    self.flush_timer.daemon = True
+                    self.flush_timer.start()
+        except Exception as e:
+            print(f"Error in log handler: {e}")
+    
+    def flush(self):
+        """Flush buffered records to database"""
+        if not self.buffer:
+            return
+            
+        try:
+            with self.buffer_lock:
+                records = self.buffer[:]
+                self.buffer.clear()
+                
+            if self.flush_timer:
+                self.flush_timer.cancel()
+                self.flush_timer = None
+                
+            with db.get_connection() as conn:
                 c = conn.cursor()
-                
-                # Get current timestamp with microseconds
-                current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
-                
-                # Get task_id from extra if it exists
-                task_id = record.__dict__.get('task_id')
-                if not task_id and hasattr(record, 'extra'):
-                    task_id = record.extra.get('task_id')
-                
-                # Add new log entry
-                c.execute('''
-                    INSERT INTO logs (timestamp, level, message, task_id, details, source)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (
-                    current_time,
-                    record.levelname, 
-                    record.getMessage(), 
-                    task_id,
-                    json.dumps(getattr(record, 'details', None)) if hasattr(record, 'details') else None,
-                    record.module
-                ))
-                
+                for record in records:
+                    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+                    task_id = getattr(record, 'task_id', None)
+                    
+                    c.execute('''
+                        INSERT INTO logs (timestamp, level, message, task_id, details, source)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    ''', (
+                        current_time,
+                        record.levelname,
+                        record.getMessage(),
+                        task_id,
+                        json.dumps(getattr(record, 'details', None)) if hasattr(record, 'details') else None,
+                        record.module
+                    ))
                 conn.commit()
                 
         except Exception as e:
-            print(f"Failed to add log entry: {str(e)}")
+            print(f"Error flushing log buffer: {e}")
 
-# Create a single instance of the database log handler
+# Create handler instance
 db_log_handler = DatabaseLogHandler()
 
 def get_logs(limit=100, level=None, task_id=None, since=None, processing_status=None):
     """Retrieve logs with optional filtering"""
     try:
-        with sqlite3.connect(get_db_path()) as conn:
+        with db.get_connection() as conn:
             c = conn.cursor()
             
             query = "SELECT * FROM logs"
@@ -112,8 +99,8 @@ def get_logs(limit=100, level=None, task_id=None, since=None, processing_status=
                     conditions.append("task_id IN (SELECT id FROM tasks WHERE processing_status = ?)")
                     params.append(processing_status)
                 elif isinstance(processing_status, list):
-                    conditions.append("task_id IN (SELECT id FROM tasks WHERE processing_status IN ({}))"
-                                      .format(','.join(['?']*len(processing_status))))
+                    placeholders = ','.join(['?' for _ in processing_status])
+                    conditions.append(f"task_id IN (SELECT id FROM tasks WHERE processing_status IN ({placeholders}))")
                     params.extend(processing_status)
             
             if conditions:
@@ -138,52 +125,14 @@ def get_logs(limit=100, level=None, task_id=None, since=None, processing_status=
                 'source': log[6]
             } for log in logs]
             
-        return log_results
-            
     except Exception as e:
-        print(f"Failed to retrieve logs: {str(e)}")
+        print(f"Failed to retrieve logs: {e}")
         raise
-
-def add_log_entry(level, message, task_id=None, details=None, source=None):
-    """Add a new log entry to the database with retries"""
-    max_retries = 3
-    retry_delay = 0.1  # Start with 100ms delay
-    
-    for attempt in range(max_retries):
-        try:
-            with sqlite3.connect(get_db_path(), timeout=5.0) as conn:
-                c = conn.cursor()
-                current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
-                
-                c.execute('''
-                    INSERT INTO logs (timestamp, level, message, task_id, details, source)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (
-                    current_time,
-                    level,
-                    message,
-                    task_id,
-                    json.dumps(details) if details else None,
-                    source
-                ))
-                
-                conn.commit()
-                return
-                
-        except sqlite3.OperationalError as e:
-            if "database is locked" in str(e) and attempt < max_retries - 1:
-                time.sleep(retry_delay)
-                retry_delay *= 2
-                continue
-            print(f"Failed to add log entry (attempt {attempt + 1}): {str(e)}")
-        except Exception as e:
-            print(f"Failed to add log entry: {str(e)}")
-            break
 
 def clear_old_logs(days=30):
     """Clear logs older than specified days"""
     try:
-        with sqlite3.connect(get_db_path()) as conn:
+        with db.get_connection() as conn:
             c = conn.cursor()
             c.execute('''
                 DELETE FROM logs 
@@ -192,4 +141,4 @@ def clear_old_logs(days=30):
             conn.commit()
             
     except Exception as e:
-        print(f"Failed to clear old logs: {str(e)}")
+        print(f"Failed to clear old logs: {e}")

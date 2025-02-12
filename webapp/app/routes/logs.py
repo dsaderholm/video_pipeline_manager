@@ -1,13 +1,9 @@
 from flask import Blueprint, jsonify, request, render_template
-import json
-import os
 from datetime import datetime, timedelta
 from app.core.log_manager import get_logs, clear_old_logs
 from app.timezone import localize_timestamp, get_timezone
+from app.core.database import db
 import pytz
-
-def get_db_path():
-    return os.path.join('webapp', 'database', 'pipeline.db')
 
 # Create blueprint
 logs_bp = Blueprint('logs', __name__, url_prefix='')
@@ -93,17 +89,16 @@ def clear_logs():
 def get_task_logs(task_id):
     """Get all logs for a specific task"""
     try:
-        processing_status = request.args.get('processing_status')  # Optional filter
+        processing_status = request.args.get('processing_status')
         
         logs = get_logs(
-            limit=1000,  # Higher limit for task-specific logs
+            limit=1000,
             task_id=task_id,
             processing_status=processing_status
         )
         
         # Get task's current status and processing_status
-        import sqlite3
-        with sqlite3.connect(get_db_path()) as conn:
+        with db.get_connection() as conn:
             c = conn.cursor()
             c.execute("""
                 SELECT status, processing_status 
@@ -124,9 +119,7 @@ def get_task_logs(task_id):
         })
         
     except Exception as e:
-        return jsonify({
-            'error': str(e)
-        }), 500
+        return jsonify({'error': str(e)}), 500
 
 @logs_bp.route('/api/logs/stats', methods=['GET'])
 def get_log_stats():
@@ -140,36 +133,30 @@ def get_log_stats():
             'total_count': len(recent_logs),
             'by_level': {},
             'by_hour': {},
-            'by_processing_status': {},  # New stat
+            'by_processing_status': {},
             'recent_errors': []
         }
         
-        # Use configured timezone
         local_tz = pytz.timezone(get_timezone())
         now = datetime.now(local_tz)
         hour_ago = now - timedelta(hours=1)
         
         for log in recent_logs:
-            # Count by level
             level = log['level']
             stats['by_level'][level] = stats['by_level'].get(level, 0) + 1
             
-            # Count by processing status if present
             if 'processing_status' in log and log['processing_status']:
                 proc_status = log['processing_status']
                 stats['by_processing_status'][proc_status] = \
                     stats['by_processing_status'].get(proc_status, 0) + 1
             
-            # Count by hour for recent logs
             try:
-                # Parse the timestamp (already localized by get_logs)
                 log_time = datetime.strptime(log['timestamp'], '%Y-%m-%d %H:%M:%S')
                 log_time = local_tz.localize(log_time)
                 
                 hour_key = log_time.strftime('%Y-%m-%d %H:00')
                 stats['by_hour'][hour_key] = stats['by_hour'].get(hour_key, 0) + 1
                 
-                # Collect recent errors
                 if level in ['ERROR', 'CRITICAL'] and log_time > hour_ago:
                     error_entry = {
                         'timestamp': log['timestamp'],
@@ -183,8 +170,7 @@ def get_log_stats():
                 continue
         
         # Get current task processing stats
-        import sqlite3
-        with sqlite3.connect(get_db_path()) as conn:
+        with db.get_connection() as conn:
             c = conn.cursor()
             c.execute("""
                 SELECT processing_status, COUNT(*) 

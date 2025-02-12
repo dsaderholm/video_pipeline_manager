@@ -1,11 +1,8 @@
 from flask import jsonify, request, Blueprint
-import sqlite3
 import logging
 import os
 from app.timezone import localize_timestamp
-
-def get_db_path():
-    return os.path.join('webapp', 'database', 'pipeline.db')
+from app.core.database import db
 
 # Create blueprint and logger
 utilities_bp = Blueprint('utilities', __name__)
@@ -13,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 @utilities_bp.route('/api/utilities', methods=['GET'])
 def get_utilities():
-    with sqlite3.connect(get_db_path()) as conn:
+    with db.get_connection() as conn:
         c = conn.cursor()
         c.execute("SELECT * FROM utilities")
         utilities = c.fetchall()
@@ -27,16 +24,18 @@ def get_utilities():
 @utilities_bp.route('/api/utilities', methods=['POST'])
 def create_utility():
     data = request.json
-    with sqlite3.connect(get_db_path()) as conn:
+    with db.get_connection() as conn:
         c = conn.cursor()
         c.execute('INSERT INTO utilities (name, utility_curl) VALUES (?, ?)',
                  (data['name'], data['utility_curl']))
         utility_id = c.lastrowid
+        conn.commit()
         return jsonify({'id': utility_id})
 
 @utilities_bp.route('/api/utilities/<int:id>', methods=['DELETE'])
 def delete_utility(id):
-    with sqlite3.connect(get_db_path()) as conn:
+    with db.get_connection() as conn:
         c = conn.cursor()
         c.execute('DELETE FROM utilities WHERE id = ?', (id,))
+        conn.commit()
         return jsonify({'success': True})

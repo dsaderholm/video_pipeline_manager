@@ -1,4 +1,3 @@
-import sqlite3
 import json
 import time
 import os
@@ -10,21 +9,11 @@ from datetime import datetime, timedelta
 from app import logger
 from app.core.utils import execute_curl, get_latest_video, cleanup_video, format_upload_command, log_with_details
 from app.core.email_utils import send_task_completion_notification
+from app.core.database import db
 from flask import current_app
 
-# Global lock for database operations
+# Global lock for thread safety (keep this as it's different from database locking)
 db_lock = threading.Lock()
-
-def get_db_path():
-    return os.path.join('webapp', 'database', 'pipeline.db')
-
-def get_db_connection(timeout=60.0):
-    """Get a database connection with timeout and proper settings"""
-    conn = sqlite3.connect(get_db_path(), timeout=timeout)
-    conn.execute("PRAGMA journal_mode=WAL")  # Write-Ahead Logging for better concurrency
-    conn.execute("PRAGMA busy_timeout=60000")  # 60 second timeout
-    conn.execute("PRAGMA synchronous=NORMAL")  # Slightly less durability for better concurrency
-    return conn
 
 def log_with_task_details(level, message, task_id, details=None):
     """Helper function to log with task ID and structured details"""
@@ -33,9 +22,8 @@ def log_with_task_details(level, message, task_id, details=None):
     details['task_id'] = task_id
     
     try:
-        with get_db_connection() as log_conn:
-            log_with_details(level, message, task_id=task_id, details=details, source='pipeline')
-    except sqlite3.OperationalError as e:
+        log_with_details(level, message, task_id=task_id, details=details, source='pipeline')
+    except Exception as e:
         print(f"ERROR: Failed to log to database: {str(e)}", file=sys.stderr)
         print(f"{level}: {message} (Task {task_id})", file=sys.stderr)
 
@@ -71,8 +59,7 @@ def check_and_set_lock():
     
     with db_lock:  # Use thread lock for atomic operation
         try:
-            conn = get_db_connection()
-            with conn:
+            with db.get_connection() as conn:
                 c = conn.cursor()
                 c.execute("""
                     UPDATE task_lock 
@@ -108,8 +95,7 @@ def release_lock():
     """Release the task lock"""
     with db_lock:
         try:
-            conn = get_db_connection()
-            with conn:
+            with db.get_connection() as conn:
                 c = conn.cursor()
                 c.execute("""
                     UPDATE task_lock 
@@ -123,12 +109,11 @@ def release_lock():
 
 def update_task_status(task_id, status, processing_status=None, video_path=None, conn=None):
     """Update task status and processing details"""
-    should_close_conn = False
-    if conn is None:
-        conn = get_db_connection()
-        should_close_conn = True
-    
+    should_close_conn = conn is None
     try:
+        if conn is None:
+            conn = db.get_connection().__enter__()
+        
         with conn:
             c = conn.cursor()
             query = "UPDATE tasks SET status=?"
@@ -147,17 +132,16 @@ def update_task_status(task_id, status, processing_status=None, video_path=None,
             
             c.execute(query, params)
     finally:
-        if should_close_conn:
-            conn.close()
+        if should_close_conn and conn:
+            conn.__exit__(None, None, None)
 
 def store_generated_video(task_id, original_name, processed_path, scheduled_time, conn=None):
     """Store information about a newly generated video"""
-    should_close_conn = False
-    if conn is None:
-        conn = get_db_connection()
-        should_close_conn = True
-    
+    should_close_conn = conn is None
     try:
+        if conn is None:
+            conn = db.get_connection().__enter__()
+        
         with conn:
             c = conn.cursor()
             c.execute('''
@@ -167,8 +151,8 @@ def store_generated_video(task_id, original_name, processed_path, scheduled_time
             ''', (task_id, original_name, processed_path, scheduled_time))
             return c.lastrowid
     finally:
-        if should_close_conn:
-            conn.close()
+        if should_close_conn and conn:
+            conn.__exit__(None, None, None)
 
 def get_next_day_schedules(schedule_str):
     """Get tomorrow's schedule times from a schedule string"""
@@ -209,7 +193,7 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
     conn = None
     
     try:
-        conn = get_db_connection()
+        conn = db.get_connection().__enter__()
         
         with conn:
             c = conn.cursor()
@@ -336,7 +320,7 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
     finally:
         cleanup_files(files_to_cleanup)
         if conn:
-            conn.close()
+            conn.__exit__(None, None, None)
 
 def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=False):
     """Handle video uploading to platforms"""
@@ -358,7 +342,7 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=F
     files_to_cleanup = set()
     
     try:
-        conn = get_db_connection()
+        conn = db.get_connection().__enter__()
         
         with conn:
             c = conn.cursor()
@@ -620,7 +604,7 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=F
     finally:
         cleanup_files(files_to_cleanup)
         if conn:
-            conn.close()
+            conn.__exit__(None, None, None)
 
 def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, dry_run=False):
     """Main pipeline process that coordinates generation and upload"""
@@ -692,8 +676,7 @@ def process_night_queue():
         return
 
     try:
-        conn = get_db_connection()
-        with conn:
+        with db.get_connection() as conn:
             c = conn.cursor()
             
             # Get all tasks that need processing for tomorrow
@@ -734,37 +717,33 @@ def process_night_queue():
 
 def process_scheduled_uploads():
     """Process tasks that are ready for upload"""
+    if not check_and_set_lock():
+        logger.debug("Task lock is held, skipping scheduled uploads")
+        return
+        
     try:
-        conn = get_db_connection()
-        with conn:
+        with db.get_connection() as conn:
             c = conn.cursor()
-            
-            # Get all videos that are ready for upload
             c.execute('''
                 SELECT v.task_id, v.id, v.original_name, v.processed_path, v.scheduled_time
                 FROM generated_videos v
                 JOIN tasks t ON v.task_id = t.id
                 WHERE v.upload_status = 'pending'
-                AND v.status = 'completed'
                 AND v.scheduled_time <= datetime('now', 'localtime')
                 AND t.status != 'failed'
                 ORDER BY v.scheduled_time ASC
+                LIMIT 1  -- Process one at a time
             ''')
-            pending_uploads = c.fetchall()
-
-        for task_id, video_id, original_name, processed_path, scheduled_time in pending_uploads:
-            try:
-                if check_and_set_lock():
-                    try:
-                        process_video_upload(task_id, (video_id, original_name, processed_path, scheduled_time))
-                    finally:
-                        release_lock()
-            except Exception as e:
-                log_with_task_details('ERROR', f"Scheduled upload failed for task {task_id}: {str(e)}",
-                    task_id=task_id)
-
-    except Exception as e:
-        logger.error(f"Error in scheduled uploads: {str(e)}")
+            pending_upload = c.fetchone()
+            
+            if pending_upload:
+                task_id, video_id, original_name, processed_path, scheduled_time = pending_upload
+                try:
+                    process_video_upload(task_id, (video_id, original_name, processed_path, scheduled_time))
+                except Exception as e:
+                    logger.error(f"Failed to process upload for task {task_id}: {e}")
+    finally:
+        release_lock()
 
 def cleanup_files(video_files):
     """Cleanup multiple video files with error handling"""

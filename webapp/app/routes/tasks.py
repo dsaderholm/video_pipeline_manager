@@ -1,5 +1,4 @@
 from flask import jsonify, request, Blueprint, current_app, send_from_directory, send_file
-import sqlite3
 import json
 from datetime import datetime, timedelta
 import logging
@@ -7,9 +6,7 @@ import os
 import time
 import glob
 from app.timezone import localize_timestamp
-
-def get_db_path():
-    return os.path.join('webapp', 'database', 'pipeline.db')
+from app.core.database import db
 
 # Create blueprint and logger
 tasks_bp = Blueprint('tasks', __name__)
@@ -160,7 +157,7 @@ def get_task_details(task_id, conn):
 
 @tasks_bp.route('/api/tasks', methods=['GET'])
 def get_tasks():
-    with sqlite3.connect(get_db_path()) as conn:
+    with db.get_connection() as conn:
         tasks = []
         c = conn.cursor()
         
@@ -182,7 +179,7 @@ def get_tasks():
 @tasks_bp.route('/api/tasks/<int:id>/videos', methods=['GET'])
 def get_task_videos(id):
     """Get all videos for a specific task"""
-    with sqlite3.connect(get_db_path()) as conn:
+    with db.get_connection() as conn:
         c = conn.cursor()
         
         c.execute("""
@@ -203,7 +200,7 @@ def get_task_videos(id):
 @tasks_bp.route('/api/tasks/<int:id>/videos/<int:video_id>', methods=['GET'])
 def get_task_video(id, video_id):
     """Get details for a specific video"""
-    with sqlite3.connect(get_db_path()) as conn:
+    with db.get_connection() as conn:
         video_detail = get_video_details(video_id, conn)
         if video_detail and video_detail['task_id'] == id:
             return jsonify(video_detail)
@@ -213,7 +210,7 @@ def retry_with_backoff(task_id, video_id=None):
     """Retry task or specific video with exponential backoff"""
     scheduler = current_app.scheduler
     
-    with sqlite3.connect(get_db_path()) as conn:
+    with db.get_connection() as conn:
         c = conn.cursor()
         
         if video_id:
@@ -347,7 +344,7 @@ def create_task():
     if not is_valid:
         return jsonify({'success': False, 'message': error_message}), 400
     
-    with sqlite3.connect(get_db_path()) as conn:
+    with db.get_connection() as conn:
         try:
             conn.execute('BEGIN')
             c = conn.cursor()
@@ -373,7 +370,6 @@ def create_task():
                          (task_id, platform['id'], platform['account_name']))
             
             # Add night processing schedule - runs at configured start time every night
-            # This will generate all videos needed for the next day
             night_job_id = f'task_{task_id}_night_processing'
             night_hour, night_minute = os.getenv('NIGHT_PROCESSING_START', '22:00').split(':')
             scheduler.add_job(
@@ -431,7 +427,7 @@ def create_task():
 def delete_task(id):
     scheduler = current_app.scheduler
     
-    with sqlite3.connect(get_db_path()) as conn:
+    with db.get_connection() as conn:
         try:
             conn.execute('BEGIN')
             c = conn.cursor()
@@ -497,7 +493,7 @@ def run_task(id):
         setattr(current_app, 'manual_run', True)
         
         # First verify task exists and is not already running
-        with sqlite3.connect(get_db_path()) as conn:
+        with db.get_connection() as conn:
             c = conn.cursor()
             c.execute("SELECT id, status FROM tasks WHERE id = ?", (id,))
             task = c.fetchone()
@@ -552,26 +548,25 @@ def preview_task(id):
         # Run cleanup before generating new preview
         cleanup_preview_dir()
         
-        with sqlite3.connect(get_db_path()) as conn:
-            conn.isolation_level = None  # Enable autocommit mode
+        with db.get_connection() as conn:
             c = conn.cursor()
             
             # Begin transaction
-            c.execute("BEGIN IMMEDIATE")
+            conn.execute("BEGIN IMMEDIATE")
             
             # Now check this specific task - within transaction
             c.execute("SELECT id, status, processing_status FROM tasks WHERE id = ?", (id,))
             task = c.fetchone()
             
             if not task:
-                c.execute("COMMIT")
+                conn.commit()
                 return jsonify({
                     'success': False,
                     'message': f'Task {id} not found'
                 }), 404
                 
             if task[1] == 'previewing' or task[2] == 'processing':
-                c.execute("COMMIT")
+                conn.commit()
                 return jsonify({
                     'success': False,
                     'message': 'Preview or processing already in progress'
@@ -605,7 +600,7 @@ def preview_task(id):
             """, (id,))
             
             # Commit transaction
-            c.execute("COMMIT")
+            conn.commit()
 
         # Start the pipeline in preview mode
         from app.core.pipeline import process_video_pipeline
@@ -632,7 +627,7 @@ def preview_task(id):
 
             # Only proceed if file exists and is stable
             if os.path.exists(preview_path) and file_size > 0:
-                with sqlite3.connect(get_db_path()) as conn:
+                with db.get_connection() as conn:
                     c = conn.cursor()
                     c.execute("""
                         UPDATE tasks 
@@ -653,7 +648,7 @@ def preview_task(id):
     except Exception as e:
         logger.error(f"Error generating preview for task {id}: {str(e)}")
         # Update task status on error
-        with sqlite3.connect(get_db_path()) as conn:
+        with db.get_connection() as conn:
             c = conn.cursor()
             c.execute("""
                 UPDATE tasks 
@@ -724,7 +719,7 @@ def download_preview(id):
 def dry_run_task(id):
     try:
         # First verify task exists
-        with sqlite3.connect(get_db_path()) as conn:
+        with db.get_connection() as conn:
             c = conn.cursor()
             c.execute("SELECT id, status FROM tasks WHERE id = ?", (id,))
             task = c.fetchone()
@@ -757,7 +752,7 @@ def generate_task(id):
         # Set flag for manual run
         setattr(current_app, 'manual_run', True)
         
-        with sqlite3.connect(get_db_path()) as conn:
+        with db.get_connection() as conn:
             c = conn.cursor()
             c.execute("SELECT id, status, processing_status, schedule FROM tasks WHERE id = ?", (id,))
             task = c.fetchone()
@@ -824,7 +819,7 @@ def generate_task(id):
 def upload_video(id, video_id):
     """Manual upload of a specific video"""
     try:
-        with sqlite3.connect(get_db_path()) as conn:
+        with db.get_connection() as conn:
             c = conn.cursor()
             c.execute("""
                 SELECT v.id, v.original_name, v.processed_path, v.scheduled_time,
@@ -878,7 +873,7 @@ def upload_video(id, video_id):
 def upload_task(id):
     """Manual upload of all pending videos for a task"""
     try:
-        with sqlite3.connect(get_db_path()) as conn:
+        with db.get_connection() as conn:
             c = conn.cursor()
             c.execute("""
                 SELECT id, status FROM tasks WHERE id = ?

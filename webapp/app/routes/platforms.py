@@ -1,11 +1,7 @@
 from flask import jsonify, request, Blueprint
-import sqlite3
 import logging
-import os
 from app.timezone import localize_timestamp
-
-def get_db_path():
-    return os.path.join('webapp', 'database', 'pipeline.db')
+from app.core.database import db
 
 # Create blueprint and logger
 platforms_bp = Blueprint('platforms', __name__)
@@ -13,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 @platforms_bp.route('/api/platforms', methods=['GET'])
 def get_platforms():
-    with sqlite3.connect(get_db_path()) as conn:
+    with db.get_connection() as conn:
         c = conn.cursor()
         c.execute("SELECT * FROM platforms")
         platforms = c.fetchall()
@@ -30,7 +26,7 @@ def get_platforms():
 @platforms_bp.route('/api/platforms', methods=['POST'])
 def create_platform():
     data = request.json
-    with sqlite3.connect(get_db_path()) as conn:
+    with db.get_connection() as conn:
         c = conn.cursor()
         c.execute('''INSERT INTO platforms 
                     (name, uploader_curl, fallback_curl, fallback_curl_2, default_hashtags)
@@ -39,21 +35,23 @@ def create_platform():
                   data.get('fallback_curl'), data.get('fallback_curl_2'), 
                   data.get('default_hashtags')))
         platform_id = c.lastrowid
+        conn.commit()
         return jsonify({'id': platform_id})
 
 @platforms_bp.route('/api/platforms/<int:id>', methods=['DELETE'])
 def delete_platform(id):
-    with sqlite3.connect(get_db_path()) as conn:
+    with db.get_connection() as conn:
         c = conn.cursor()
         # First delete any task platform account associations
         c.execute('DELETE FROM task_platform_accounts WHERE platform_id = ?', (id,))
         # Then delete the platform
         c.execute('DELETE FROM platforms WHERE id = ?', (id,))
+        conn.commit()
         return jsonify({'success': True})
 
 @platforms_bp.route('/api/tasks/<int:task_id>/platforms', methods=['GET'])
 def get_task_platforms(task_id):
-    with sqlite3.connect(get_db_path()) as conn:
+    with db.get_connection() as conn:
         c = conn.cursor()
         c.execute('''
             SELECT p.*, tpa.account_name 
@@ -76,19 +74,21 @@ def get_task_platforms(task_id):
 @platforms_bp.route('/api/tasks/<int:task_id>/platforms', methods=['POST'])
 def add_task_platform(task_id):
     data = request.json
-    with sqlite3.connect(get_db_path()) as conn:
+    with db.get_connection() as conn:
         c = conn.cursor()
         c.execute('''INSERT INTO task_platform_accounts 
                     (task_id, platform_id, account_name)
                     VALUES (?, ?, ?)''',
                  (task_id, data['platform_id'], data['account_name']))
+        conn.commit()
         return jsonify({'success': True})
 
 @platforms_bp.route('/api/tasks/<int:task_id>/platforms/<int:platform_id>', methods=['DELETE'])
 def remove_task_platform(task_id, platform_id):
-    with sqlite3.connect(get_db_path()) as conn:
+    with db.get_connection() as conn:
         c = conn.cursor()
         c.execute('''DELETE FROM task_platform_accounts 
                     WHERE task_id = ? AND platform_id = ?''',
                  (task_id, platform_id))
+        conn.commit()
         return jsonify({'success': True})
