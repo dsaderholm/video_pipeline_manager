@@ -53,10 +53,6 @@ def setup_logging():
 
     return logging.getLogger(__name__)
 
-# Initialize logger
-logger = setup_logging()
-
-# Initialize logger
 logger = setup_logging(APP_ROOT)
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 from apscheduler.triggers.cron import CronTrigger
