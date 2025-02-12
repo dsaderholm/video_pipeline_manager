@@ -177,6 +177,12 @@ def init_scheduler(app):
     # Log all existing tasks
     try:
         db_path = os.path.join('webapp', 'database', 'pipeline.db')
+        
+        # Skip task logging if database doesn't exist yet
+        if not os.path.exists(db_path):
+            logger.info("Initializing scheduler with 0 active tasks (database not yet created)")
+            return scheduler
+
         with sqlite3.connect(db_path) as conn:
             c = conn.cursor()
             c.execute("""
