@@ -6,22 +6,17 @@ import sys
 import os
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
-from apscheduler.triggers.cron import CronTrigger
-from app.core.database import db
-from app.core.logging_setup import setup_logging
-
-# Load environment variables
-load_dotenv()
-
 # Get absolute path to the application directory
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Initialize logger
 logger = setup_logging(APP_ROOT)
-
-# Then continue with the rest of the imports:
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
+from apscheduler.triggers.cron import CronTrigger
 from app.core.database import db
+from app.core.logging_setup import setup_logging
+from app.core.database import db
+load_dotenv()
 
 def setup_logging():
     """Configure the logging system with file and console handlers"""

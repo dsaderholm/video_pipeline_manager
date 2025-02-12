@@ -5,7 +5,8 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import smtplib
 from datetime import datetime
-from app import logger
+import logging
+logger = logging.getLogger('app')
 
 def get_db_path():
     return os.path.join('webapp', 'database', 'pipeline.db')
