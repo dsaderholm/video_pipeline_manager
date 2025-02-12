@@ -6,7 +6,8 @@ import logging
 import shutil
 import threading
 from datetime import datetime, timedelta
-from app import logger
+import logging
+logger = logging.getLogger('app')
 from app.core.utils import execute_curl, get_latest_video, cleanup_video, format_upload_command, log_with_details
 from app.core.email_utils import send_task_completion_notification
 from app.core.database import db
