@@ -58,10 +58,14 @@ class DatabaseManager:
     @contextlib.contextmanager
     def get_connection(self):
         """Get a database connection with proper settings"""
-        conn = sqlite3.connect(get_db_path(), timeout=60.0)
+        conn = sqlite3.connect(get_db_path(), timeout=60.0, check_same_thread=False)
         try:
             conn.execute("PRAGMA busy_timeout=60000")
+            conn.row_factory = sqlite3.Row  # Allow accessing columns by name
             yield conn
+        except sqlite3.Error as e:
+            print(f"Database connection error: {e}")
+            raise
         finally:
             conn.close()
     

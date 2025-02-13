@@ -174,6 +174,7 @@ def init_scheduler(app):
 
     # Log existing tasks
     try:
+        # Use the db instance's connection method
         with db.get_connection() as conn:
             c = conn.cursor()
             c.execute("""
@@ -183,10 +184,12 @@ def init_scheduler(app):
             """)
             tasks = c.fetchall()
             
-            app_logger.info(f"Initializing scheduler with {len(tasks)} active tasks")
+            logger.info(f"Initializing scheduler with {len(tasks)} active tasks")
             for task in tasks:
-                app_logger.info(f"Task {task[0]} ({task[1]}): Schedule = {task[2]}, Processing = {task[3]}")
-    except Exception as e:
+                # Convert sqlite3.Row to dict if needed
+                task_dict = dict(task)
+                logger.info(f"Task {task_dict['id']} ({task_dict['name']}): Schedule = {task_dict['schedule']}, Processing = {task_dict['processing_status']}")
+    except sqlite3.Error as e:
         logger.error(f"Failed to log existing tasks: {e}")
 
     scheduler.start()
