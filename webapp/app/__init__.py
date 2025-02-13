@@ -55,6 +55,9 @@ def setup_logging():
     return logging.getLogger('app')
 
 # Initialize logger immediately
+
+app_logger = setup_logging()
+
 logger = app_logger
 
 # Now do the rest of the imports
