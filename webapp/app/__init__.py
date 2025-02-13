@@ -70,7 +70,7 @@ def cleanup_preview_files():
     if not os.path.exists(preview_dir):
         return
         
-    logger.info("Starting scheduled preview files cleanup")
+    app_logger.info("Starting scheduled preview files cleanup")
     deleted_count = 0
     error_count = 0
     current_time = datetime.now().timestamp()
@@ -91,7 +91,7 @@ def cleanup_preview_files():
                 logger.error(f"Error cleaning up old preview file {file_path}: {e}")
     
     if deleted_count > 0 or error_count > 0:
-        logger.info(f"Preview cleanup complete. Deleted: {deleted_count}, Errors: {error_count}")
+        app_logger.info(f"Preview cleanup complete. Deleted: {deleted_count}, Errors: {error_count}")
 
 def init_scheduler(app):
     """Initialize the APScheduler with improved settings and error handling"""
@@ -109,7 +109,7 @@ def init_scheduler(app):
                         WHERE id = ?
                     """, (task_id,))
                     conn.commit()
-                    logger.info(f"Updated task {task_id} status to failed after job error")
+                    app_logger.info(f"Updated task {task_id} status to failed after job error")
             except Exception as e:
                 logger.error(f"Failed to update task status: {e}")
         
@@ -118,7 +118,7 @@ def init_scheduler(app):
         if event.job_id.startswith('task_'):
             try:
                 task_id = int(event.job_id.split('_')[1])
-                logger.info(f"Rescheduling missed task {task_id}")
+                app_logger.info(f"Rescheduling missed task {task_id}")
             except ValueError:
                 pass
 
@@ -180,9 +180,9 @@ def init_scheduler(app):
             """)
             tasks = c.fetchall()
             
-            logger.info(f"Initializing scheduler with {len(tasks)} active tasks")
+            app_logger.info(f"Initializing scheduler with {len(tasks)} active tasks")
             for task in tasks:
-                logger.info(f"Task {task[0]} ({task[1]}): Schedule = {task[2]}, Processing = {task[3]}")
+                app_logger.info(f"Task {task[0]} ({task[1]}): Schedule = {task[2]}, Processing = {task[3]}")
     except Exception as e:
         logger.error(f"Failed to log existing tasks: {e}")
 
@@ -191,7 +191,7 @@ def init_scheduler(app):
 
 def create_app():
     """Create and configure the Flask application"""
-    logger.info("Starting application initialization...")
+    app_logger.info("Starting application initialization...")
 
     # Create Flask app
     app = Flask(__name__,
@@ -211,7 +211,7 @@ def create_app():
     for dir_name, dir_path in required_dirs.items():
         if not os.path.exists(dir_path):
             os.makedirs(dir_path)
-            logger.info(f"Created {dir_name} directory at: {dir_path}")
+            app_logger.info(f"Created {dir_name} directory at: {dir_path}")
     
     with app.app_context():
         # Initialize logging system
@@ -224,7 +224,7 @@ def create_app():
             # Prevent Flask logger propagation
             app.logger.propagate = False
             
-            logger.info("Database logging system initialized successfully")
+            app_logger.info("Database logging system initialized successfully")
             
         except Exception as e:
             logger.error(f"Failed to initialize logging system: {str(e)}")
@@ -234,7 +234,7 @@ def create_app():
         try:
             from app.models import init_db
             init_db()
-            logger.info("Main database initialized successfully")
+            app_logger.info("Main database initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize main database: {str(e)}")
             raise
@@ -255,7 +255,7 @@ def create_app():
                     module = __import__(module_path, fromlist=[blueprint_name])
                     blueprint = getattr(module, blueprint_name)
                     app.register_blueprint(blueprint)
-                    logger.info(f"Registered blueprint: {blueprint_name}")
+                    app_logger.info(f"Registered blueprint: {blueprint_name}")
                 except Exception as e:
                     logger.error(f"Failed to register blueprint {blueprint_name}: {str(e)}")
                     raise
@@ -274,7 +274,7 @@ def create_app():
                 "registered_blueprints": list(app.blueprints.keys())
             }
 
-        logger.info("Application initialization completed successfully")
+        app_logger.info("Application initialization completed successfully")
         return app
 
 # Create the application instance
