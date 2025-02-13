@@ -113,9 +113,7 @@ def update_task_status(task_id, status, processing_status=None, video_path=None,
     should_close_conn = conn is None
     try:
         if conn is None:
-            conn = db.get_connection().__enter__()
-        
-        with conn:
+            with db.get_connection() as conn:
             c = conn.cursor()
             query = "UPDATE tasks SET status=?"
             params = [status]
@@ -141,9 +139,7 @@ def store_generated_video(task_id, original_name, processed_path, scheduled_time
     should_close_conn = conn is None
     try:
         if conn is None:
-            conn = db.get_connection().__enter__()
-        
-        with conn:
+            with db.get_connection() as conn:        
             c = conn.cursor()
             c.execute('''
                 INSERT INTO generated_videos 
@@ -194,9 +190,7 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
     conn = None
     
     try:
-        conn = db.get_connection().__enter__()
-        
-        with conn:
+        with db.get_connection() as conn:
             c = conn.cursor()
             c.execute("""
                 SELECT t.id, t.name, t.generator_id, t.utilities, t.schedule, 
@@ -343,9 +337,7 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=F
     files_to_cleanup = set()
     
     try:
-        conn = db.get_connection().__enter__()
-        
-        with conn:
+        with db.get_connection() as conn:
             c = conn.cursor()
             
             # Get video to upload
