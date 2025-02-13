@@ -140,12 +140,12 @@ def store_generated_video(task_id, original_name, processed_path, scheduled_time
     try:
         if conn is None:
             with db.get_connection() as conn:        
-            c = conn.cursor()
-            c.execute('''
-                INSERT INTO generated_videos 
-                (task_id, original_name, processed_path, scheduled_time, status, upload_status)
-                VALUES (?, ?, ?, ?, 'completed', 'pending')
-            ''', (task_id, original_name, processed_path, scheduled_time))
+                c = conn.cursor()
+                c.execute('''
+                    INSERT INTO generated_videos 
+                    (task_id, original_name, processed_path, scheduled_time, status, upload_status)
+                    VALUES (?, ?, ?, ?, 'completed', 'pending')
+                ''', (task_id, original_name, processed_path, scheduled_time))
             return c.lastrowid
     finally:
         if should_close_conn and conn:
