@@ -55,7 +55,7 @@ def setup_logging():
     return logging.getLogger('app')
 
 # Initialize logger immediately
-app_logger = setup_logging()  # Changed name to app_logger to avoid collision
+logger = app_logger
 
 # Now do the rest of the imports
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED

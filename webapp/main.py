@@ -1,4 +1,4 @@
-from webapp.app import app, logger
+from webapp.app import app, app_logger as logger
 
 if __name__ == '__main__':
     logger.info("Starting Video Pipeline Manager...")
