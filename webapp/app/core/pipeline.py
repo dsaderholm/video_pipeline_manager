@@ -114,25 +114,25 @@ def update_task_status(task_id, status, processing_status=None, video_path=None,
     try:
         if conn is None:
             with db.get_connection() as conn:
-            c = conn.cursor()
-            query = "UPDATE tasks SET status=?"
-            params = [status]
-            
-            if processing_status is not None:
-                query += ", processing_status=?"
-                params.append(processing_status)
-            
-            if video_path is not None:
-                query += ", processed_video_path=?"
-                params.append(video_path)
-            
-            query += " WHERE id=?"
-            params.append(task_id)
-            
-            c.execute(query, params)
+                c = conn.cursor()
+                query = "UPDATE tasks SET status=?"
+                params = [status]
+                
+                if processing_status is not None:
+                    query += ", processing_status=?"
+                    params.append(processing_status)
+                
+                if video_path is not None:
+                    query += ", processed_video_path=?"
+                    params.append(video_path)
+                
+                query += " WHERE id=?"
+                params.append(task_id)
+                
+                c.execute(query, params)
     finally:
         if should_close_conn and conn:
-            conn.__exit__(None, None, None)
+            conn.close()
 
 def store_generated_video(task_id, original_name, processed_path, scheduled_time, conn=None):
     """Store information about a newly generated video"""
