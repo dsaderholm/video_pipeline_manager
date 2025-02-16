@@ -434,8 +434,9 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=F
                     }
                 }
                 
-                # Create a copy of the video for this platform
-                platform_video_file = f"{os.path.splitext(processed_path)[0]}_{platform_name}.mp4"
+                # Create a copy of the video with original name + platform suffix
+                original_name_base = os.path.splitext(original_name)[0]
+                platform_video_file = f"{os.path.join(os.path.dirname(processed_path), original_name_base)}_{platform_name}.mp4"
                 shutil.copy2(processed_path, platform_video_file)
                 files_to_cleanup.add(platform_video_file)
 
