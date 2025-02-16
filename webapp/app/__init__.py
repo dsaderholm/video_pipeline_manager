@@ -11,6 +11,9 @@ import sqlite3  # Added the missing import
 # Set up logging first, before any other imports
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Create a global scheduler instance
+scheduler = APScheduler()
+
 def setup_logging():
     """Configure the logging system with file and console handlers"""
     # Create logs directory if it doesn't exist
@@ -124,9 +127,6 @@ def init_scheduler(app):
             except ValueError:
                 pass
 
-    # Initialize scheduler
-    scheduler = APScheduler()
-    
     # Configure scheduler
     app.config['SCHEDULER_API_ENABLED'] = True
     app.config['SCHEDULER_TIMEZONE'] = os.getenv('TIMEZONE', 'UTC')
@@ -136,67 +136,69 @@ def init_scheduler(app):
         'misfire_grace_time': 15  # 15 second grace time
     }
     
-    scheduler.init_app(app)
+    # Initialize the scheduler if it hasn't been started
+    if not scheduler.running:
+        scheduler.init_app(app)
 
-    # Add event listeners
-    scheduler.scheduler.add_listener(handle_job_error, EVENT_JOB_ERROR)
-    scheduler.scheduler.add_listener(handle_job_missed, EVENT_JOB_MISSED)
+        # Add event listeners
+        scheduler.scheduler.add_listener(handle_job_error, EVENT_JOB_ERROR)
+        scheduler.scheduler.add_listener(handle_job_missed, EVENT_JOB_MISSED)
 
-    # Add cleanup job
-    scheduler.add_job(
-        id='cleanup_previews',
-        func=cleanup_preview_files,
-        trigger='interval',
-        hours=1,
-        next_run_time=datetime.now() + timedelta(minutes=1)
-    )
+        # Add cleanup job
+        scheduler.add_job(
+            id='cleanup_previews',
+            func=cleanup_preview_files,
+            trigger='interval',
+            hours=1,
+            next_run_time=datetime.now() + timedelta(minutes=1)
+        )
 
-    # Add night processing job
-    from app.core.pipeline import process_night_queue
-    scheduler.add_job(
-        id='night_processing',
-        func=process_night_queue,
-        trigger=CronTrigger(minute='*/15'),
-        name='Night Video Processing',
-        misfire_grace_time=300  # 5 minute grace time
-    )
+        # Add night processing job
+        from app.core.pipeline import process_night_queue
+        scheduler.add_job(
+            id='night_processing',
+            func=process_night_queue,
+            trigger=CronTrigger(minute='*/15'),
+            name='Night Video Processing',
+            misfire_grace_time=300  # 5 minute grace time
+        )
 
-    # Add scheduled uploads job
-    from app.core.pipeline import process_scheduled_uploads
-    scheduler.add_job(
-        id='scheduled_uploads',
-        func=process_scheduled_uploads,
-        trigger=CronTrigger(minute='*/5'),  # Every 5 minutes
-        name='Scheduled Video Uploads',
-        misfire_grace_time=240  # 4 minute grace time
-    )
+        # Add scheduled uploads job
+        from app.core.pipeline import process_scheduled_uploads
+        scheduler.add_job(
+            id='scheduled_uploads',
+            func=process_scheduled_uploads,
+            trigger=CronTrigger(minute='*/5'),  # Every 5 minutes
+            name='Scheduled Video Uploads',
+            misfire_grace_time=240  # 4 minute grace time
+        )
 
-    # Log existing tasks
-    try:
-        # Use the db instance's connection method
-        with db.get_connection() as conn:
-            c = conn.cursor()
-            c.execute("""
-                SELECT id, name, schedule, processing_status 
-                FROM tasks 
-                WHERE status != 'completed'
-            """)
-            tasks = c.fetchall()
-            
-            logger.info(f"Initializing scheduler with {len(tasks)} active tasks")
-            for task in tasks:
-                # Modified: Properly convert sqlite row to dict
-                task_dict = {
-                    'id': task[0],
-                    'name': task[1],
-                    'schedule': task[2],
-                    'processing_status': task[3]
-                }
-                logger.info(f"Task {task_dict['id']} ({task_dict['name']}): Schedule = {task_dict['schedule']}, Processing = {task_dict['processing_status']}")
-    except sqlite3.Error as e:
-        logger.error(f"Failed to log existing tasks: {e}")
+        # Log existing tasks
+        try:
+            # Use the db instance's connection method
+            with db.get_connection() as conn:
+                c = conn.cursor()
+                c.execute("""
+                    SELECT id, name, schedule, processing_status 
+                    FROM tasks 
+                    WHERE status != 'completed'
+                """)
+                tasks = c.fetchall()
+                
+                logger.info(f"Initializing scheduler with {len(tasks)} active tasks")
+                for task in tasks:
+                    task_dict = {
+                        'id': task[0],
+                        'name': task[1],
+                        'schedule': task[2],
+                        'processing_status': task[3]
+                    }
+                    logger.info(f"Task {task_dict['id']} ({task_dict['name']}): Schedule = {task_dict['schedule']}, Processing = {task_dict['processing_status']}")
+        except sqlite3.Error as e:
+            logger.error(f"Failed to log existing tasks: {e}")
 
-    scheduler.start()
+        scheduler.start()
+
     return scheduler
 
 def create_app():
