@@ -74,6 +74,7 @@ class DatabaseManager:
         :return: A database connection
         """
         last_error = None
+        conn = None
         for attempt in range(max_retries):
             try:
                 # Open connection with extended timeout and WAL mode
@@ -89,24 +90,28 @@ class DatabaseManager:
                 conn.execute("PRAGMA synchronous=NORMAL")
                 conn.execute("PRAGMA busy_timeout=10000")  # 10-second busy timeout
                 
-                try:
-                    yield conn
-                finally:
-                    conn.close()
+                yield conn
+                return  # Exit the loop if successful
                 
-                # If we get here, connection was successful
-                return
-            
             except sqlite3.OperationalError as e:
                 logger.warning(f"Database connection attempt {attempt + 1} failed: {e}")
                 last_error = e
                 
                 # Exponential backoff
                 time.sleep(0.1 * (2 ** attempt))
+                
+            finally:
+                if conn:
+                    try:
+                        conn.close()
+                    except Exception as e:
+                        logger.error(f"Error closing connection: {e}")
         
         # If all retries fail
         logger.error(f"Failed to acquire database connection after {max_retries} attempts")
-        raise last_error if last_error else sqlite3.OperationalError("Unknown database connection error")
+        if last_error:
+            raise last_error
+        raise sqlite3.OperationalError("Unknown database connection error")
     
     def with_connection(self, f):
         """Decorator to handle database connections"""

@@ -6,7 +6,7 @@ import sys
 import os
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-import sqlite3  # Added the missing import
+import sqlite3
 
 # Set up logging first, before any other imports
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -178,24 +178,27 @@ def init_scheduler(app):
             # Use the db instance's connection method
             with db.get_connection() as conn:
                 c = conn.cursor()
-                c.execute("""
-                    SELECT id, name, schedule, processing_status 
-                    FROM tasks 
-                    WHERE status != 'completed'
-                """)
-                tasks = c.fetchall()
-                
-                logger.info(f"Initializing scheduler with {len(tasks)} active tasks")
-                for task in tasks:
-                    task_dict = {
-                        'id': task[0],
-                        'name': task[1],
-                        'schedule': task[2],
-                        'processing_status': task[3]
-                    }
-                    logger.info(f"Task {task_dict['id']} ({task_dict['name']}): Schedule = {task_dict['schedule']}, Processing = {task_dict['processing_status']}")
-        except sqlite3.Error as e:
-            logger.error(f"Failed to log existing tasks: {e}")
+                try:
+                    c.execute("""
+                        SELECT id, name, schedule, processing_status 
+                        FROM tasks 
+                        WHERE status != 'completed'
+                    """)
+                    tasks = c.fetchall()
+                    
+                    logger.info(f"Initializing scheduler with {len(tasks)} active tasks")
+                    for task in tasks:
+                        task_dict = {
+                            'id': task[0],
+                            'name': task[1],
+                            'schedule': task[2],
+                            'processing_status': task[3]
+                        }
+                        logger.info(f"Task {task_dict['id']} ({task_dict['name']}): Schedule = {task_dict['schedule']}, Processing = {task_dict['processing_status']}")
+                except sqlite3.OperationalError as e:
+                    logger.warning(f"Could not load existing tasks: {e}")
+        except Exception as e:
+            logger.error(f"Failed to load tasks: {e}")
 
         scheduler.start()
 
@@ -210,9 +213,6 @@ def create_app():
                 template_folder=os.path.join(APP_ROOT, 'templates'),
                 static_folder=os.path.join(APP_ROOT, 'static'))
     
-    # Initialize scheduler
-    app.scheduler = init_scheduler(app)
-    
     # Create required directories
     required_dirs = {
         'previews': os.path.join(APP_ROOT, 'previews'),
@@ -226,7 +226,16 @@ def create_app():
             app_logger.info(f"Created {dir_name} directory at: {dir_path}")
     
     with app.app_context():
-        # Initialize logging system
+        # Initialize database FIRST
+        try:
+            from app.models import init_db
+            init_db()
+            app_logger.info("Main database initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize main database: {str(e)}")
+            raise
+
+        # Initialize logging system SECOND
         try:
             from app.core.log_manager import db_log_handler
             
@@ -242,16 +251,10 @@ def create_app():
             logger.error(f"Failed to initialize logging system: {str(e)}")
             raise
 
-        # Initialize database
-        try:
-            from app.models import init_db
-            init_db()
-            app_logger.info("Main database initialized successfully")
-        except Exception as e:
-            logger.error(f"Failed to initialize main database: {str(e)}")
-            raise
+        # Initialize scheduler THIRD
+        app.scheduler = init_scheduler(app)
 
-        # Register blueprints
+        # Register blueprints FOURTH
         try:
             blueprints = [
                 ('app.routes.main', 'main_bp'),
