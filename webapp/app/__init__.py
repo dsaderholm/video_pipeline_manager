@@ -6,6 +6,7 @@ import sys
 import os
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+import sqlite3  # Added the missing import
 
 # Set up logging first, before any other imports
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -55,9 +56,7 @@ def setup_logging():
     return logging.getLogger('app')
 
 # Initialize logger immediately
-
 app_logger = setup_logging()
-
 logger = app_logger
 
 # Now do the rest of the imports
@@ -186,8 +185,13 @@ def init_scheduler(app):
             
             logger.info(f"Initializing scheduler with {len(tasks)} active tasks")
             for task in tasks:
-                # Convert sqlite3.Row to dict if needed
-                task_dict = dict(task)
+                # Modified: Properly convert sqlite row to dict
+                task_dict = {
+                    'id': task[0],
+                    'name': task[1],
+                    'schedule': task[2],
+                    'processing_status': task[3]
+                }
                 logger.info(f"Task {task_dict['id']} ({task_dict['name']}): Schedule = {task_dict['schedule']}, Processing = {task_dict['processing_status']}")
     except sqlite3.Error as e:
         logger.error(f"Failed to log existing tasks: {e}")
