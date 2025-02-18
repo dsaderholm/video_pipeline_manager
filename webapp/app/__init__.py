@@ -133,6 +133,7 @@ def init_scheduler(app):
     app.config['SCHEDULER_JOB_DEFAULTS'] = {
         'coalesce': True,
         'max_instances': 1,
+        'max_retries': 0 
         'misfire_grace_time': 30  # 15 second grace time
     }
     

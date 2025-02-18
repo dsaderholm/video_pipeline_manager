@@ -306,7 +306,7 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
                 details=generation_details)
             return True
 
-        success, stdout, stderr = execute_curl(task_data[-1], validate_output=True, mode='generator')
+        success, stdout, stderr = execute_curl(task_data[-1], retries=3, retry_delay=5, validate_output=True, mode='generator')
         if not success:
             error_msg = f"Generator failed: {stderr}"
             log_with_task_details('ERROR', error_msg,
@@ -336,7 +336,7 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
                     continue
 
                 util_cmd = util[0].format(input=current_video_file)
-                success, stdout, stderr = execute_curl(util_cmd, validate_output=True, mode='utility')
+                success, stdout, stderr = execute_curl(util_cmd, retries=3, retry_delay=5, validate_output=True, mode='utility')
                 if not success:
                     error_msg = f"Utility failed: {stderr}"
                     log_with_task_details('ERROR', error_msg,
@@ -553,7 +553,7 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=F
             current_stderr = ""
 
             # Try primary upload
-            success, stdout, stderr = execute_curl(upload_cmd, mode='uploader')
+            success, stdout, stderr = execute_curl(upload_cmd, retries=3, retry_delay=5, mode='uploader')
             current_stdout, current_stderr = stdout, stderr
 
             # If primary fails, try fallback
@@ -572,7 +572,7 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=F
                 if fallback_safe_path:
                     files_to_cleanup.add(fallback_safe_path)
                     
-                success, stdout, stderr = execute_curl(fallback_cmd, mode='uploader')
+                success, stdout, stderr = execute_curl(fallback_cmd, retries=3, retry_delay=5, mode='uploader')
                 if success:
                     current_stdout, current_stderr = stdout, stderr
 
@@ -592,7 +592,7 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=F
                 if fallback_safe_path_2:
                     files_to_cleanup.add(fallback_safe_path_2)
                     
-                success, stdout, stderr = execute_curl(fallback_cmd_2, mode='uploader')
+                success, stdout, stderr = execute_curl(fallback_cmd_2, retries=3, retry_delay=5, mode='uploader')
                 if success:
                     current_stdout, current_stderr = stdout, stderr
 
