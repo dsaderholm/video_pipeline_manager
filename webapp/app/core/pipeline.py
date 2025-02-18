@@ -757,9 +757,12 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, dry_
                 # Immediate upload for manual runs or catchup
                 if not schedule_time or schedule_time <= datetime.now():
                     try:
+                        # Get the original name from the video path
+                        original_name = os.path.basename(video_path)
+
                         upload_result = process_video_upload(
                             task_id, 
-                            (video_id, None, video_path, datetime.now().isoformat()), 
+                            (video_id, original_name, video_path, datetime.now().isoformat()),
                             preview_mode, 
                             dry_run, 
                             conn
