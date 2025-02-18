@@ -482,7 +482,7 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=F
             'hashtags': task_data[1],
             'sound_name': task_data[2],
             'sound_volume': task_data[3],
-            'original_name': original_name  # Use the original name from generation
+            'original_name': os.path.splitext(original_name)[0]  # Remove .mp4 and set as original_name
         }
 
         if dry_run:
