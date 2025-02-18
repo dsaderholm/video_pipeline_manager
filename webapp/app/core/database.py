@@ -36,8 +36,11 @@ class DatabaseManager:
                 conn.execute("PRAGMA synchronous=NORMAL")
                 conn.execute("PRAGMA busy_timeout=10000")  # 10-second timeout
                 conn.execute("PRAGMA cache_size=-10000")   # 10MB cache
+                conn.execute("PRAGMA temp_store=MEMORY")
+                conn.execute("PRAGMA mmap_size=30000000000")  # 30GB memory map
+                conn.execute("PRAGMA page_size=4096")
                 
-                # Create tables if they don't exist (add any additional tables)
+                # Create tables if they don't exist
                 conn.executescript('''
                     CREATE TABLE IF NOT EXISTS logs (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,12 +68,36 @@ class DatabaseManager:
             logger.error(f"Database initialization error: {e}")
             raise
     
+    def reset_db_locks(self):
+        """Reset all database locks in case of deadlock"""
+        try:
+            with self.get_connection() as conn:
+                conn.execute("""
+                    UPDATE task_lock 
+                    SET locked = 0, 
+                        task_id = NULL, 
+                        locked_at = NULL
+                """)
+                logger.info("Database locks have been reset")
+        except Exception as e:
+            logger.error(f"Failed to reset database locks: {e}")
+
+    def vacuum_db(self):
+        """Optimize database and reclaim space"""
+        try:
+            with self.get_connection() as conn:
+                conn.execute("VACUUM")
+                logger.info("Database vacuum completed")
+        except Exception as e:
+            logger.error(f"Failed to vacuum database: {e}")
+    
     @contextlib.contextmanager
-    def get_connection(self, max_retries=3):
+    def get_connection(self, max_retries=3, retry_delay=0.1):
         """
         Get a database connection with robust error handling and retry mechanism
         
         :param max_retries: Number of times to retry on database lock
+        :param retry_delay: Initial delay between retries (will be exponentially increased)
         :return: A database connection
         """
         last_error = None
@@ -89,6 +116,9 @@ class DatabaseManager:
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute("PRAGMA synchronous=NORMAL")
                 conn.execute("PRAGMA busy_timeout=10000")  # 10-second busy timeout
+                conn.execute("PRAGMA temp_store=MEMORY")
+                conn.execute("PRAGMA mmap_size=30000000000")  # 30GB memory map
+                conn.execute("PRAGMA page_size=4096")
                 
                 yield conn
                 return  # Exit the loop if successful
@@ -97,8 +127,15 @@ class DatabaseManager:
                 logger.warning(f"Database connection attempt {attempt + 1} failed: {e}")
                 last_error = e
                 
+                # If this was the last attempt, try to reset locks
+                if attempt == max_retries - 1:
+                    try:
+                        self.reset_db_locks()
+                    except:
+                        pass
+                
                 # Exponential backoff
-                time.sleep(0.1 * (2 ** attempt))
+                time.sleep(retry_delay * (2 ** attempt))
                 
             finally:
                 if conn:

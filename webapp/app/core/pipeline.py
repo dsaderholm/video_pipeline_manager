@@ -62,21 +62,52 @@ def check_and_set_lock():
         try:
             with db.get_connection() as conn:
                 c = conn.cursor()
+                
+                # First check current lock status
+                c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
+                current_lock = c.fetchone()
+                lock_details['current_lock'] = {
+                    'locked': current_lock[0] if current_lock else None,
+                    'task_id': current_lock[1] if current_lock else None,
+                    'locked_at': current_lock[2] if current_lock else None
+                }
+                
+                # Clear stale locks (older than 5 minutes)
                 c.execute("""
                     UPDATE task_lock 
                     SET locked = 0, task_id = NULL, locked_at = NULL 
                     WHERE locked = 1 
-                    AND datetime(locked_at, '+30 minutes') < datetime('now')
+                    AND datetime(locked_at, '+5 minutes') < datetime('now')
                 """)
+                expired_cleared = c.rowcount > 0
+                lock_details['expired_cleared'] = expired_cleared
                 
+                if expired_cleared:
+                    log_with_task_details('INFO', 
+                        "Cleared expired lock",
+                        task_id=None,
+                        details={'cleared_lock': lock_details['current_lock']})
+                
+                # Try to acquire lock
                 c.execute("""
                     UPDATE task_lock 
-                    SET locked = 1, task_id = NULL, locked_at = datetime('now')
+                    SET locked = 1, 
+                        task_id = NULL, 
+                        locked_at = datetime('now')
                     WHERE id = 1 AND locked = 0
                 """)
                 
                 acquired = c.rowcount > 0
                 lock_details['acquired'] = acquired
+                
+                # Get final lock status
+                c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
+                final_lock = c.fetchone()
+                lock_details['final_lock'] = {
+                    'locked': final_lock[0] if final_lock else None,
+                    'task_id': final_lock[1] if final_lock else None,
+                    'locked_at': final_lock[2] if final_lock else None
+                }
                 
                 log_with_task_details('INFO', 
                     "Successfully acquired pipeline lock" if acquired else "Failed to acquire pipeline lock",
@@ -87,26 +118,87 @@ def check_and_set_lock():
                 
         except Exception as e:
             lock_details['error'] = str(e)
-            log_with_task_details('ERROR', f"Error managing pipeline lock", 
+            log_with_task_details('ERROR', 
+                f"Error managing pipeline lock: {str(e)}", 
                 task_id=None,
                 details=lock_details)
-            raise
+            return False
 
 def release_lock():
     """Release the task lock"""
-    with db_lock:
+    release_details = {
+        'operation': 'release',
+        'timestamp': datetime.now().isoformat()
+    }
+    
+    with db_lock:  # Use thread lock for atomic operation
         try:
             with db.get_connection() as conn:
                 c = conn.cursor()
-                c.execute("""
-                    UPDATE task_lock 
-                    SET locked = 0, task_id = NULL, locked_at = NULL 
-                    WHERE id = 1
-                """)
+                
+                # Get current lock status before release
+                c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
+                current_lock = c.fetchone()
+                release_details['before_release'] = {
+                    'locked': current_lock[0] if current_lock else None,
+                    'task_id': current_lock[1] if current_lock else None,
+                    'locked_at': current_lock[2] if current_lock else None
+                }
+                
+                # Only attempt release if currently locked
+                if current_lock and current_lock[0] == 1:
+                    c.execute("""
+                        UPDATE task_lock 
+                        SET locked = 0, 
+                            task_id = NULL, 
+                            locked_at = NULL 
+                        WHERE id = 1
+                    """)
+                    released = c.rowcount > 0
+                else:
+                    released = False
+                    release_details['skipped'] = "Lock was not held"
+                
+                release_details['released'] = released
+                
+                # Get final lock status
+                c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
+                final_lock = c.fetchone()
+                release_details['after_release'] = {
+                    'locked': final_lock[0] if final_lock else None,
+                    'task_id': final_lock[1] if final_lock else None,
+                    'locked_at': final_lock[2] if final_lock else None
+                }
+                
+                if released:
+                    log_with_task_details('INFO', 
+                        "Successfully released pipeline lock",
+                        task_id=None,
+                        details=release_details)
+                else:
+                    log_with_task_details('DEBUG', 
+                        "No lock needed to be released",
+                        task_id=None,
+                        details=release_details)
+                
+                return released
+                
         except Exception as e:
-            log_with_task_details('ERROR', f"Error releasing pipeline lock: {str(e)}", 
+            release_details['error'] = str(e)
+            log_with_task_details('ERROR', 
+                f"Error releasing pipeline lock: {str(e)}", 
                 task_id=None,
-                details={'error': str(e)})
+                details=release_details)
+            # In case of database errors, we'll try a force release
+            try:
+                force_release_lock()
+            except Exception as force_error:
+                release_details['force_release_error'] = str(force_error)
+                log_with_task_details('ERROR', 
+                    f"Force release also failed: {str(force_error)}", 
+                    task_id=None,
+                    details=release_details)
+            return False
 
 def update_task_status(task_id, status, processing_status=None, video_path=None, conn=None):
     """Update task status and processing details"""
@@ -605,56 +697,113 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, dry_
         task_id=task_id,
         details=pipeline_details)
     
+    # Don't update status or acquire lock for dry runs and previews
     if not (dry_run or preview_mode):
         update_task_status(task_id, 'running', 'pending')
     
-    if not (dry_run or preview_mode) and not check_and_set_lock():
-        log_with_task_details('INFO', "Another task is currently running. Task will retry later.",
-            task_id=task_id,
-            details=pipeline_details)
-        return False if dry_run else None
-    
+    lock_acquired = False
     try:
+        # Lock handling
+        if not (dry_run or preview_mode):
+            lock_acquired = check_and_set_lock()
+            if not lock_acquired:
+                log_with_task_details('INFO', 
+                    "Another task is currently running. Task will retry later.",
+                    task_id=task_id,
+                    details=pipeline_details)
+                return None
+        
         with db.get_connection() as conn:
-            # For night processing, check if this is within the night window
+            # Night processing check
             if not (preview_mode or dry_run) and not should_process_at_night():
-                # If outside night window, only proceed if this is a manual run
+                # Only proceed if this is a manual run
                 if not getattr(current_app, 'manual_run', False):
-                    log_with_task_details('INFO', "Outside night processing window, task will be processed later.",
+                    log_with_task_details('INFO', 
+                        "Outside night processing window, task will be processed later.",
                         task_id=task_id,
                         details=pipeline_details)
                     return None
             
             # Generate video
-            generation_result = process_video_generation(task_id, schedule_time, preview_mode, dry_run, conn)
+            try:
+                generation_result = process_video_generation(
+                    task_id, 
+                    schedule_time, 
+                    preview_mode, 
+                    dry_run, 
+                    conn
+                )
+            except Exception as e:
+                log_with_task_details('ERROR', 
+                    f"Video generation failed: {str(e)}",
+                    task_id=task_id,
+                    details={'error': str(e), **pipeline_details})
+                raise
             
             if preview_mode:
                 return generation_result[0] if isinstance(generation_result, tuple) else generation_result
-                
+            
             if dry_run:
                 return True
-                
-            # If it's a normal run and generation succeeded, proceed with upload if scheduled
+            
+            # Handle upload for normal runs
             if generation_result and isinstance(generation_result, tuple):
                 video_path, video_id = generation_result
+                pipeline_details['video_info'] = {
+                    'path': video_path,
+                    'id': video_id
+                }
                 
-                # If this is for immediate upload (manual run or catchup)
+                # Immediate upload for manual runs or catchup
                 if not schedule_time or schedule_time <= datetime.now():
-                    return process_video_upload(task_id, (video_id, None, video_path, datetime.now().isoformat()), preview_mode, dry_run, conn)
+                    try:
+                        upload_result = process_video_upload(
+                            task_id, 
+                            (video_id, None, video_path, datetime.now().isoformat()), 
+                            preview_mode, 
+                            dry_run, 
+                            conn
+                        )
+                        pipeline_details['upload_result'] = upload_result
+                        return upload_result
+                    except Exception as e:
+                        log_with_task_details('ERROR', 
+                            f"Video upload failed: {str(e)}",
+                            task_id=task_id,
+                            details={'error': str(e), **pipeline_details})
+                        raise
                 
                 return True  # Video generated successfully, will be uploaded at scheduled time
-                
+            
             return None
             
     except Exception as e:
-        log_with_task_details('ERROR', f"Pipeline failed: {str(e)}",
+        log_with_task_details('ERROR', 
+            f"Pipeline failed: {str(e)}",
             task_id=task_id,
             details={'error': str(e), **pipeline_details})
+        if not (dry_run or preview_mode):
+            update_task_status(task_id, 'failed', 'failed')
         raise
         
     finally:
-        if not (dry_run or preview_mode):
-            release_lock()
+        # Always release lock if we acquired it
+        if lock_acquired:
+            try:
+                release_lock()
+            except Exception as e:
+                log_with_task_details('ERROR', 
+                    f"Failed to release lock, attempting force release: {str(e)}",
+                    task_id=task_id,
+                    details={'error': str(e), **pipeline_details})
+                # If normal release fails, try force release
+                try:
+                    force_release_lock()
+                except Exception as force_e:
+                    log_with_task_details('ERROR', 
+                        f"Force release also failed: {str(force_e)}",
+                        task_id=task_id,
+                        details={'error': str(force_e), **pipeline_details})
 
 def process_night_queue():
     """Process pending tasks during night window"""
@@ -662,7 +811,14 @@ def process_night_queue():
         logger.debug("Outside night processing window, skipping night queue")
         return
 
+    lock_acquired = False
     try:
+        # Try to acquire lock before processing
+        if not check_and_set_lock():
+            logger.debug("Could not acquire lock for night processing, will retry next cycle")
+            return
+
+        lock_acquired = True
         with db.get_connection() as conn:
             c = conn.cursor()
             
@@ -676,39 +832,48 @@ def process_night_queue():
                 WHERE status != 'failed'
                 AND processing_status != 'failed'
                 AND schedule LIKE ?
-            """, (f'%{tomorrow_day}|%',))  # Only get tasks scheduled for tomorrow
+            """, (f'%{tomorrow_day}|%',))
             
             tasks = c.fetchall()
 
-        for task_id, schedule in tasks:
-            # Get tomorrow's schedule times for this task
-            schedule_times = get_next_day_schedules(schedule)
-            
-            if not schedule_times:
-                continue
-                
-            try:
-                if check_and_set_lock():
-                    try:
-                        # Generate a video for each scheduled time
-                        for schedule_time in schedule_times:
-                            process_video_generation(task_id, schedule_time, conn=conn)
-                    finally:
-                        release_lock()
-            except Exception as e:
-                log_with_task_details('ERROR', f"Night processing failed for task {task_id}: {str(e)}",
-                    task_id=task_id)
+            for task_id, schedule in tasks:
+                schedule_times = get_next_day_schedules(schedule)
+                if not schedule_times:
+                    continue
+                    
+                try:
+                    # Generate a video for each scheduled time
+                    for schedule_time in schedule_times:
+                        process_video_generation(task_id, schedule_time, conn=conn)
+                except Exception as e:
+                    log_with_task_details('ERROR', 
+                        f"Night processing failed for task {task_id}: {str(e)}",
+                        task_id=task_id,
+                        details={'error': str(e), 'schedule_time': schedule_time})
 
     except Exception as e:
         logger.error(f"Error in night processing queue: {str(e)}")
+        
+    finally:
+        if lock_acquired:
+            try:
+                release_lock()
+            except Exception as e:
+                logger.error(f"Failed to release lock after night processing: {str(e)}")
+                try:
+                    force_release_lock()
+                except Exception as force_e:
+                    logger.error(f"Force release also failed after night processing: {str(force_e)}")
 
 def process_scheduled_uploads():
     """Process tasks that are ready for upload"""
-    if not check_and_set_lock():
-        logger.debug("Task lock is held, skipping scheduled uploads")
-        return
-        
+    lock_acquired = False
     try:
+        if not check_and_set_lock():
+            logger.debug("Task lock is held, skipping scheduled uploads")
+            return
+            
+        lock_acquired = True
         with db.get_connection() as conn:
             c = conn.cursor()
             c.execute('''
@@ -719,18 +884,40 @@ def process_scheduled_uploads():
                 AND v.scheduled_time <= datetime('now', 'localtime')
                 AND t.status != 'failed'
                 ORDER BY v.scheduled_time ASC
-                LIMIT 1  -- Process one at a time
+                LIMIT 1
             ''')
             pending_upload = c.fetchone()
             
             if pending_upload:
                 task_id, video_id, original_name, processed_path, scheduled_time = pending_upload
                 try:
-                    process_video_upload(task_id, (video_id, original_name, processed_path, scheduled_time), conn=conn)
+                    process_video_upload(
+                        task_id, 
+                        (video_id, original_name, processed_path, scheduled_time), 
+                        conn=conn
+                    )
                 except Exception as e:
-                    logger.error(f"Failed to process upload for task {task_id}: {e}")
+                    log_with_task_details('ERROR', 
+                        f"Failed to process upload for task {task_id}: {str(e)}",
+                        task_id=task_id,
+                        details={
+                            'error': str(e),
+                            'video_id': video_id,
+                            'scheduled_time': scheduled_time
+                        })
+    except Exception as e:
+        logger.error(f"Error in scheduled uploads processor: {str(e)}")
+        
     finally:
-        release_lock()
+        if lock_acquired:
+            try:
+                release_lock()
+            except Exception as e:
+                logger.error(f"Failed to release lock after scheduled uploads: {str(e)}")
+                try:
+                    force_release_lock()
+                except Exception as force_e:
+                    logger.error(f"Force release also failed after scheduled uploads: {str(force_e)}")
 
 def cleanup_files(video_files):
     """Cleanup multiple video files with error handling"""
@@ -741,3 +928,57 @@ def cleanup_files(video_files):
             except Exception as e:
                 log_with_details('ERROR', f"Failed to cleanup file {file}: {str(e)}",
                     details={'file': file, 'error': str(e)})
+                    
+def force_release_lock():
+    """Force release any existing lock regardless of state"""
+    release_details = {
+        'operation': 'force_release',
+        'timestamp': datetime.now().isoformat()
+    }
+    
+    try:
+        with db.get_connection() as conn:
+            c = conn.cursor()
+            
+            # Get current lock state for logging
+            c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
+            current_lock = c.fetchone()
+            release_details['before_release'] = {
+                'locked': current_lock[0] if current_lock else None,
+                'task_id': current_lock[1] if current_lock else None,
+                'locked_at': current_lock[2] if current_lock else None
+            }
+            
+            # Force release the lock
+            c.execute("""
+                UPDATE task_lock 
+                SET locked = 0, task_id = NULL, locked_at = NULL 
+                WHERE id = 1
+            """)
+            
+            released = c.rowcount > 0
+            release_details['released'] = released
+            
+            # Get final state for logging
+            c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
+            final_lock = c.fetchone()
+            release_details['after_release'] = {
+                'locked': final_lock[0] if final_lock else None,
+                'task_id': final_lock[1] if final_lock else None,
+                'locked_at': final_lock[2] if final_lock else None
+            }
+            
+            log_with_task_details('INFO', 
+                "Successfully force-released pipeline lock" if released else "No lock needed to be released",
+                task_id=None,
+                details=release_details)
+            
+            return released
+            
+    except Exception as e:
+        release_details['error'] = str(e)
+        log_with_task_details('ERROR', 
+            f"Failed to force release lock: {str(e)}", 
+            task_id=None,
+            details=release_details)
+        return False                    
