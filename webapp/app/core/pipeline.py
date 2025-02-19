@@ -492,13 +492,29 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=F
                 details=upload_details)
             return False
 
+        # Get the original name from generated_videos table
+        c.execute("""
+            SELECT original_name 
+            FROM generated_videos 
+            WHERE id = ?
+        """, (video_id,))
+        video_data = c.fetchone()
+        
+        if not video_data:
+            log_with_task_details('ERROR', "Video data not found",
+                task_id=task_id,
+                details=upload_details)
+            return False
+            
+        original_filename = os.path.splitext(video_data[0])[0]  # Remove extension and use as description
+
         task_dict = {
             'id': task_id,
             'name': task_data[0],
             'hashtags': task_data[1],
             'sound_name': task_data[2],
             'sound_volume': task_data[3],
-            'original_name': os.path.splitext(original_name)[0]  # Remove .mp4 and set as original_name
+            'original_name': original_filename  # Use the original filename from generator
         }
 
         if dry_run:
