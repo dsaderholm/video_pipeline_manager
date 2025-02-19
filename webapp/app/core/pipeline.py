@@ -244,20 +244,63 @@ def update_task_status(task_id, status, processing_status=None, video_path=None,
 
 def store_generated_video(task_id, original_name, processed_path, scheduled_time, conn=None):
     """Store information about a newly generated video"""
+    video_id = None
     should_close_conn = conn is None
+    
     try:
         if conn is None:
-            with db.get_connection() as conn:        
-                c = conn.cursor()
-                c.execute('''
-                    INSERT INTO generated_videos 
-                    (task_id, original_name, processed_path, scheduled_time, status, upload_status)
-                    VALUES (?, ?, ?, ?, 'completed', 'pending')
-                ''', (task_id, original_name, processed_path, scheduled_time))
-            return c.lastrowid
+            conn = db.get_connection()
+            
+        c = conn.cursor()
+        
+        # Start transaction
+        c.execute("BEGIN IMMEDIATE")
+        
+        try:
+            c.execute('''
+                INSERT INTO generated_videos 
+                (task_id, original_name, processed_path, scheduled_time, status, upload_status)
+                VALUES (?, ?, ?, ?, 'completed', 'pending')
+            ''', (task_id, original_name, processed_path, scheduled_time))
+            
+            video_id = c.lastrowid
+            
+            # Verify the video was stored
+            c.execute("SELECT id FROM generated_videos WHERE id = ?", (video_id,))
+            if not c.fetchone():
+                raise Exception("Failed to verify video storage")
+                
+            # Commit transaction
+            c.execute("COMMIT")
+            
+            log_with_task_details('INFO', f"Stored generated video information",
+                task_id=task_id,
+                details={
+                    'video_id': video_id,
+                    'original_name': original_name,
+                    'processed_path': processed_path
+                })
+                
+            return video_id
+            
+        except Exception as e:
+            # Rollback transaction on error
+            c.execute("ROLLBACK")
+            raise
+            
+    except Exception as e:
+        log_with_task_details('ERROR', f"Failed to store video information: {str(e)}",
+            task_id=task_id,
+            details={
+                'original_name': original_name,
+                'processed_path': processed_path,
+                'error': str(e)
+            })
+        raise
+        
     finally:
         if should_close_conn and conn:
-            conn.__exit__(None, None, None)
+            conn.close()
 
 def get_next_day_schedules(schedule_str):
     """Get tomorrow's schedule times from a schedule string"""
@@ -295,121 +338,147 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
         
     files_to_cleanup = set()
     current_video_file = None
+    video_id = None
+    should_close_conn = conn is None  # Track if we need to close the connection
     
     try:
+        if conn is None:
+            conn = db.get_connection()
+            
         c = conn.cursor()
-        c.execute("""
-            SELECT t.id, t.name, t.generator_id, t.utilities, t.schedule, 
-                   t.hashtags, t.sound_name, t.sound_volume, t.status, 
-                   t.email_notify, t.created_at,
-                   g.generator_curl 
-            FROM tasks t
-            JOIN generators g ON t.generator_id = g.id
-            WHERE t.id=?
-        """, (task_id,))
-        task_data = c.fetchone()
+        # Start a transaction for the whole generation process
+        c.execute("BEGIN IMMEDIATE")
         
-        if not task_data:
-            log_with_task_details('ERROR', "No task found with this ID",
-                task_id=task_id,
-                details=generation_details)
-            return None
-
-        # Generate video
-        if dry_run:
-            log_with_task_details('INFO', "[DRY RUN] Would execute generator",
-                task_id=task_id,
-                details=generation_details)
-            return True
-
-        success, stdout, stderr = execute_curl(task_data[-1], retries=3, retry_delay=5, validate_output=True, mode='generator')
-        if not success:
-            error_msg = f"Generator failed: {stderr}"
-            log_with_task_details('ERROR', error_msg,
-                task_id=task_id,
-                details={'stdout': stdout, 'stderr': stderr, **generation_details})
-            update_task_status(task_id, 'failed', 'failed', None, conn)
-            raise Exception(error_msg)
-
-        current_video_file = get_latest_video()
-        if not current_video_file:
-            error_msg = "No video file was generated"
-            log_with_task_details('ERROR', error_msg,
-                task_id=task_id,
-                details=generation_details)
-            update_task_status(task_id, 'failed', 'failed', None, conn)
-            raise Exception(error_msg)
-
-        files_to_cleanup.add(current_video_file)
-
-        # Apply utilities
-        if task_data[3]:  # utilities JSON string
-            utilities = json.loads(task_data[3])
-            for util_id in utilities:
-                c.execute("SELECT utility_curl FROM utilities WHERE id=?", (util_id,))
-                util = c.fetchone()
-                if not util:
-                    continue
-
-                util_cmd = util[0].format(input=current_video_file)
-                success, stdout, stderr = execute_curl(util_cmd, retries=3, retry_delay=5, validate_output=True, mode='utility')
-                if not success:
-                    error_msg = f"Utility failed: {stderr}"
-                    log_with_task_details('ERROR', error_msg,
-                        task_id=task_id,
-                        details={'stdout': stdout, 'stderr': stderr, **generation_details})
-                    update_task_status(task_id, 'failed', 'failed', None, conn)
-                    raise Exception(error_msg)
-
-        # Handle preview mode
-        if preview_mode:
-            preview_dir = os.path.join('static', 'previews')
-            os.makedirs(preview_dir, exist_ok=True)
-            preview_path = os.path.join(preview_dir, f'preview_task_{task_id}.mp4')
+        try:
+            c.execute("""
+                SELECT t.id, t.name, t.generator_id, t.utilities, t.schedule, 
+                       t.hashtags, t.sound_name, t.sound_volume, t.status, 
+                       t.email_notify, t.created_at,
+                       g.generator_curl 
+                FROM tasks t
+                JOIN generators g ON t.generator_id = g.id
+                WHERE t.id=?
+            """, (task_id,))
+            task_data = c.fetchone()
             
-            if os.path.exists(preview_path):
-                os.remove(preview_path)
+            if not task_data:
+                log_with_task_details('ERROR', "No task found with this ID",
+                    task_id=task_id,
+                    details=generation_details)
+                return None
+
+            # Generate video
+            if dry_run:
+                log_with_task_details('INFO', "[DRY RUN] Would execute generator",
+                    task_id=task_id,
+                    details=generation_details)
+                return True
+
+            success, stdout, stderr = execute_curl(task_data[-1], retries=3, retry_delay=5, validate_output=True, mode='generator')
+            if not success:
+                error_msg = f"Generator failed: {stderr}"
+                log_with_task_details('ERROR', error_msg,
+                    task_id=task_id,
+                    details={'stdout': stdout, 'stderr': stderr, **generation_details})
+                update_task_status(task_id, 'failed', 'failed', None, conn)
+                raise Exception(error_msg)
+
+            current_video_file = get_latest_video()
+            if not current_video_file:
+                error_msg = "No video file was generated"
+                log_with_task_details('ERROR', error_msg,
+                    task_id=task_id,
+                    details=generation_details)
+                update_task_status(task_id, 'failed', 'failed', None, conn)
+                raise Exception(error_msg)
+
+            original_name = os.path.basename(current_video_file)
+            log_with_task_details('INFO', f"Retrieved generated video",
+                task_id=task_id,
+                details={'original_name': original_name, 'path': current_video_file})
+
+            files_to_cleanup.add(current_video_file)
+
+            # Apply utilities
+            if task_data[3]:  # utilities JSON string
+                utilities = json.loads(task_data[3])
+                for util_id in utilities:
+                    c.execute("SELECT utility_curl FROM utilities WHERE id=?", (util_id,))
+                    util = c.fetchone()
+                    if not util:
+                        continue
+
+                    util_cmd = util[0].format(input=current_video_file)
+                    success, stdout, stderr = execute_curl(util_cmd, retries=3, retry_delay=5, validate_output=True, mode='utility')
+                    if not success:
+                        error_msg = f"Utility failed: {stderr}"
+                        log_with_task_details('ERROR', error_msg,
+                            task_id=task_id,
+                            details={'stdout': stdout, 'stderr': stderr, **generation_details})
+                        update_task_status(task_id, 'failed', 'failed', None, conn)
+                        raise Exception(error_msg)
+
+            # Handle preview mode
+            if preview_mode:
+                preview_dir = os.path.join('static', 'previews')
+                os.makedirs(preview_dir, exist_ok=True)
+                preview_path = os.path.join(preview_dir, f'preview_task_{task_id}.mp4')
+                
+                if os.path.exists(preview_path):
+                    os.remove(preview_path)
+                
+                shutil.copy2(current_video_file, preview_path)
+                update_task_status(task_id, 'completed', None, None, conn)
+                c.execute("COMMIT")
+                return preview_path
+
+            # Store processed video
+            os.makedirs('processed_videos', exist_ok=True)
+            timestamp = int(time.time())
+            permanent_path = os.path.join('processed_videos', f'task_{task_id}_{timestamp}.mp4')
+            shutil.copy2(current_video_file, permanent_path)
             
-            shutil.copy2(current_video_file, preview_path)
-            update_task_status(task_id, 'completed', None, None, conn)
-            return preview_path
-
-        # Store processed video
-        os.makedirs('processed_videos', exist_ok=True)
-        original_name = os.path.basename(current_video_file)
-        timestamp = int(time.time())
-        permanent_path = os.path.join('processed_videos', f'task_{task_id}_{timestamp}.mp4')
-        shutil.copy2(current_video_file, permanent_path)
-        
-        # Store video information with schedule time
-        if schedule_time:
-            video_id = store_generated_video(
-                task_id, 
-                original_name, 
-                permanent_path, 
-                schedule_time.isoformat(), 
-                conn
-            )
-        else:
-            video_id = store_generated_video(
-                task_id, 
-                original_name, 
-                permanent_path, 
-                datetime.now().isoformat(), 
-                conn
-            )
-        
-        update_task_status(task_id, 'pending', 'processed', permanent_path, conn)
-        log_with_task_details('INFO', f"Video generation completed successfully",
-            task_id=task_id,
-            details={
-                'video_path': permanent_path,
-                'original_name': original_name,
-                'video_id': video_id,
-                **generation_details
-            })
-        return permanent_path, video_id
-
+            # Store video information with schedule time
+            if schedule_time:
+                video_id = store_generated_video(
+                    task_id, 
+                    original_name,  # Original name from generator
+                    permanent_path, 
+                    schedule_time.isoformat(), 
+                    conn
+                )
+            else:
+                video_id = store_generated_video(
+                    task_id, 
+                    original_name,  # Original name from generator
+                    permanent_path, 
+                    datetime.now().isoformat(), 
+                    conn
+                )
+                
+            if not video_id:
+                raise Exception("Failed to store video information")
+            
+            update_task_status(task_id, 'pending', 'processed', permanent_path, conn)
+            
+            # Commit the transaction if everything succeeded
+            c.execute("COMMIT")
+            
+            log_with_task_details('INFO', f"Video generation completed successfully",
+                task_id=task_id,
+                details={
+                    'video_path': permanent_path,
+                    'original_name': original_name,
+                    'video_id': video_id,
+                    **generation_details
+                })
+            return permanent_path, video_id
+            
+        except Exception as e:
+            # Rollback transaction on error
+            c.execute("ROLLBACK")
+            raise
+            
     except Exception as e:
         log_with_task_details('ERROR', f"Video generation failed: {str(e)}",
             task_id=task_id,
@@ -420,6 +489,14 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
 
     finally:
         cleanup_files(files_to_cleanup)
+        # Only close the connection if we created it
+        if should_close_conn and conn:
+            try:
+                conn.close()
+            except Exception as e:
+                log_with_task_details('ERROR', f"Failed to close database connection: {str(e)}",
+                    task_id=task_id,
+                    details={'error': str(e)})
 
 def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=False, conn=None):
     """Handle video uploading to platforms"""
@@ -445,6 +522,9 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=F
         # Get video to upload
         if video_info:
             video_id, original_name, processed_path, scheduled_time = video_info
+            log_with_task_details('INFO', f"Using provided video info",
+                task_id=task_id,
+                details={'video_id': video_id, 'original_name': original_name})
         else:
             # Get the next pending video for this task
             c.execute("""
@@ -464,11 +544,20 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=F
                 return False
             
             video_id, original_name, processed_path, scheduled_time = video_info
+            log_with_task_details('INFO', f"Found pending video",
+                task_id=task_id,
+                details={'video_id': video_id, 'original_name': original_name})
+
+        if not video_id:
+            log_with_task_details('ERROR', "Video ID is null",
+                task_id=task_id,
+                details=upload_details)
+            return False
 
         if not processed_path or not os.path.exists(processed_path):
             log_with_task_details('ERROR', f"Video file not found: {processed_path}",
                 task_id=task_id,
-                details=upload_details)
+                details={'video_id': video_id, 'processed_path': processed_path})
             c.execute("""
                 UPDATE generated_videos 
                 SET status = 'failed',
@@ -489,24 +578,14 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=F
         if not task_data:
             log_with_task_details('ERROR', "Task not found",
                 task_id=task_id,
-                details=upload_details)
+                details={'video_id': video_id})
             return False
 
-        # Get the original name from generated_videos table
-        c.execute("""
-            SELECT original_name 
-            FROM generated_videos 
-            WHERE id = ?
-        """, (video_id,))
-        video_data = c.fetchone()
-        
-        if not video_data:
-            log_with_task_details('ERROR', "Video data not found",
-                task_id=task_id,
-                details=upload_details)
-            return False
-            
-        original_filename = os.path.splitext(video_data[0])[0]  # Remove extension and use as description
+        # Use the original name directly from video_info since we already have it
+        original_filename = os.path.splitext(original_name)[0]  # Remove extension
+        log_with_task_details('INFO', f"Using original filename for description",
+            task_id=task_id,
+            details={'original_filename': original_filename})
 
         task_dict = {
             'id': task_id,
@@ -514,7 +593,7 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=F
             'hashtags': task_data[1],
             'sound_name': task_data[2],
             'sound_volume': task_data[3],
-            'original_name': original_filename  # Use the original filename from generator
+            'original_name': original_filename
         }
 
         if dry_run:
