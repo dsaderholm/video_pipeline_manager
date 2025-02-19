@@ -51,14 +51,15 @@ def should_process_at_night():
     else:  # Handles case where night window crosses midnight
         return current_time >= start_time or current_time <= end_time
 
-def check_and_set_lock():
+def check_and_set_lock(task_id=None):  # Add task_id parameter here
     """Check if any task is running and set lock if not"""
     lock_details = {
         'operation': 'check_and_set',
-        'timestamp': datetime.now().isoformat()
+        'timestamp': datetime.now().isoformat(),
+        'task_id': task_id  # Add this line
     }
     
-    with db_lock:  # Use thread lock for atomic operation
+    with db_lock:
         try:
             with db.get_connection() as conn:
                 c = conn.cursor()
@@ -72,12 +73,15 @@ def check_and_set_lock():
                     'locked_at': current_lock[2] if current_lock else None
                 }
                 
-                # Clear stale locks (older than 5 minutes)
+                # Clear stale locks (older than 5 minutes or NULL timestamp)
                 c.execute("""
                     UPDATE task_lock 
                     SET locked = 0, task_id = NULL, locked_at = NULL 
                     WHERE locked = 1 
-                    AND datetime(locked_at, '+5 minutes') < datetime('now')
+                    AND (
+                        locked_at IS NULL 
+                        OR datetime(locked_at, '+5 minutes') < datetime('now')
+                    )
                 """)
                 expired_cleared = c.rowcount > 0
                 lock_details['expired_cleared'] = expired_cleared
@@ -85,17 +89,17 @@ def check_and_set_lock():
                 if expired_cleared:
                     log_with_task_details('INFO', 
                         "Cleared expired lock",
-                        task_id=None,
+                        task_id=task_id,
                         details={'cleared_lock': lock_details['current_lock']})
                 
                 # Try to acquire lock
                 c.execute("""
                     UPDATE task_lock 
                     SET locked = 1, 
-                        task_id = NULL, 
+                        task_id = ?, 
                         locked_at = datetime('now')
                     WHERE id = 1 AND locked = 0
-                """)
+                """, (task_id,))  # Pass task_id here
                 
                 acquired = c.rowcount > 0
                 lock_details['acquired'] = acquired
@@ -109,9 +113,11 @@ def check_and_set_lock():
                     'locked_at': final_lock[2] if final_lock else None
                 }
                 
+                conn.commit()
+                
                 log_with_task_details('INFO', 
                     "Successfully acquired pipeline lock" if acquired else "Failed to acquire pipeline lock",
-                    task_id=None,
+                    task_id=task_id,
                     details=lock_details)
                 
                 return acquired
@@ -120,18 +126,19 @@ def check_and_set_lock():
             lock_details['error'] = str(e)
             log_with_task_details('ERROR', 
                 f"Error managing pipeline lock: {str(e)}", 
-                task_id=None,
+                task_id=task_id,
                 details=lock_details)
             return False
 
-def release_lock():
+def release_lock(task_id=None):  # Add task_id parameter here
     """Release the task lock"""
     release_details = {
         'operation': 'release',
-        'timestamp': datetime.now().isoformat()
+        'timestamp': datetime.now().isoformat(),
+        'task_id': task_id  # Add this line
     }
     
-    with db_lock:  # Use thread lock for atomic operation
+    with db_lock:
         try:
             with db.get_connection() as conn:
                 c = conn.cursor()
@@ -145,8 +152,18 @@ def release_lock():
                     'locked_at': current_lock[2] if current_lock else None
                 }
                 
-                # Only attempt release if currently locked
-                if current_lock and current_lock[0] == 1:
+                # Only release if we own the lock
+                if task_id:
+                    c.execute("""
+                        UPDATE task_lock 
+                        SET locked = 0, 
+                            task_id = NULL, 
+                            locked_at = NULL 
+                        WHERE id = 1 
+                        AND task_id = ?
+                    """, (task_id,))
+                else:
+                    # Force release if no task_id provided
                     c.execute("""
                         UPDATE task_lock 
                         SET locked = 0, 
@@ -154,10 +171,7 @@ def release_lock():
                             locked_at = NULL 
                         WHERE id = 1
                     """)
-                    released = c.rowcount > 0
-                else:
-                    released = False
-                    release_details['skipped'] = "Lock was not held"
+                released = c.rowcount > 0
                 
                 release_details['released'] = released
                 
@@ -170,15 +184,17 @@ def release_lock():
                     'locked_at': final_lock[2] if final_lock else None
                 }
                 
+                conn.commit()
+                
                 if released:
                     log_with_task_details('INFO', 
                         "Successfully released pipeline lock",
-                        task_id=None,
+                        task_id=task_id,
                         details=release_details)
                 else:
                     log_with_task_details('DEBUG', 
                         "No lock needed to be released",
-                        task_id=None,
+                        task_id=task_id,
                         details=release_details)
                 
                 return released
@@ -187,16 +203,16 @@ def release_lock():
             release_details['error'] = str(e)
             log_with_task_details('ERROR', 
                 f"Error releasing pipeline lock: {str(e)}", 
-                task_id=None,
+                task_id=task_id,
                 details=release_details)
-            # In case of database errors, we'll try a force release
+            # Try force release as last resort
             try:
                 force_release_lock()
             except Exception as force_error:
                 release_details['force_release_error'] = str(force_error)
                 log_with_task_details('ERROR', 
                     f"Force release also failed: {str(force_error)}", 
-                    task_id=None,
+                    task_id=task_id,
                     details=release_details)
             return False
 
@@ -705,7 +721,7 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, dry_
     try:
         # Lock handling
         if not (dry_run or preview_mode):
-            lock_acquired = check_and_set_lock()
+            lock_acquired = check_and_set_lock(task_id)  # Pass task_id here
             if not lock_acquired:
                 log_with_task_details('INFO', 
                     "Another task is currently running. Task will retry later.",
@@ -793,7 +809,7 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, dry_
         # Always release lock if we acquired it
         if lock_acquired:
             try:
-                release_lock()
+                release_lock(task_id)
             except Exception as e:
                 log_with_task_details('ERROR', 
                     f"Failed to release lock, attempting force release: {str(e)}",

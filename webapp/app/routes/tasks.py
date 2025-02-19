@@ -502,23 +502,31 @@ def run_task(id):
                     'success': False,
                     'message': f'Task {id} not found'
                 }), 404
-            if task[1] == 'running':
-                return jsonify({
-                    'success': False,
-                    'message': f'Task {id} is already running'
-                }), 409
 
-            # Clear any stuck locks before running
+            # Check for stale lock and clear it
             c.execute("""
                 UPDATE task_lock 
                 SET locked = 0, 
                     task_id = NULL, 
                     locked_at = NULL 
                 WHERE id = 1 
-                AND datetime(locked_at, '+30 minutes') < datetime('now')
+                AND (
+                    locked_at IS NULL 
+                    OR datetime(locked_at, '+5 minutes') < datetime('now')
+                )
             """)
-            conn.commit()
+            
+            # Check if task is locked
+            c.execute("SELECT locked, task_id FROM task_lock WHERE id = 1")
+            lock_status = c.fetchone()
+            if lock_status and lock_status[0] == 1:
+                return jsonify({
+                    'success': False,
+                    'message': f'Task {id} is already running'
+                }), 409
                 
+            conn.commit()
+
         from app.core.pipeline import process_video_pipeline
         process_video_pipeline(id)
         
@@ -534,13 +542,13 @@ def run_task(id):
         logger.error(f"Error running task {id}: {str(e)}")
         # Reset manual run flag
         setattr(current_app, 'manual_run', False)
-        # If task fails due to lock, trigger retry mechanism
-        retry_with_backoff(id)
+        # If task fails, force release the lock
+        from app.core.pipeline import force_release_lock
+        force_release_lock()
         return jsonify({
             'success': False,
-            'message': 'Task is queued for retry',
-            'error': str(e)
-        }), 503
+            'message': str(e)
+        }), 500
 
 @tasks_bp.route('/api/tasks/<int:id>/preview', methods=['POST'])
 def preview_task(id):
