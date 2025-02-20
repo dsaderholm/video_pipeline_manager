@@ -155,23 +155,25 @@ def init_scheduler(app):
         )
 
         # Add night processing job
-        from app.core.pipeline import process_night_queue
         scheduler.add_job(
             id='night_processing',
             func=process_night_queue,
-            trigger=CronTrigger(minute='*/15'),
+            trigger=CronTrigger(minute='0,15,30,45'),  # Run at specific minutes
             name='Night Video Processing',
-            misfire_grace_time=300  # 5 minute grace time
+            misfire_grace_time=300,  # 5 minute grace time
+            max_instances=1,
+            coalesce=True
         )
 
         # Add scheduled uploads job
-        from app.core.pipeline import process_scheduled_uploads
         scheduler.add_job(
             id='scheduled_uploads',
             func=process_scheduled_uploads,
-            trigger=CronTrigger(minute='*/5'),  # Every 5 minutes
+            trigger=CronTrigger(minute='2,7,12,17,22,27,32,37,42,47,52,57'),  # Offset from night processing
             name='Scheduled Video Uploads',
-            misfire_grace_time=240  # 4 minute grace time
+            misfire_grace_time=240,  # 4 minute grace time
+            max_instances=1,
+            coalesce=True
         )
 
         # Log existing tasks
