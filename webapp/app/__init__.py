@@ -98,6 +98,8 @@ def cleanup_preview_files():
     if deleted_count > 0 or error_count > 0:
         app_logger.info(f"Preview cleanup complete. Deleted: {deleted_count}, Errors: {error_count}")
 
+from app.core.pipeline import process_night_queue, process_scheduled_uploads
+
 def init_scheduler(app):
     """Initialize the APScheduler with improved settings and error handling"""
     def handle_job_error(event):
