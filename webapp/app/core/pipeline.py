@@ -377,14 +377,20 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
                         task_id=task_id,
                         details={'stdout': stdout, 'stderr': stderr, **generation_details})
                     update_task_status(task_id, 'failed', 'failed', None, conn)
-                    raise Exception(error_msg)
+                    # Don't raise here, return instead
+                    return None
             except Exception as e:
                 # Make sure to clean up any temporary files
                 if current_video_file and os.path.exists(current_video_file):
                     cleanup_video(current_video_file)
-                # Rollback transaction
-                c.execute("ROLLBACK")
-                raise
+                # Check if transaction is active before rolling back
+                try:
+                    c.execute("SELECT 1")  # Quick test if transaction is active
+                    c.execute("ROLLBACK")
+                except sqlite3.OperationalError:
+                    # Transaction wasn't active, that's okay
+                    pass
+                return None
 
             current_video_file = get_latest_video()
             if not current_video_file:
