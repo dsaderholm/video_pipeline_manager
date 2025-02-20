@@ -13,11 +13,15 @@ def localize_timestamp(timestamp_str):
     
     # Parse the timestamp (assuming it's in UTC)
     try:
-        # First try parsing with microseconds
-        dt = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f')
+        # First try ISO format with microseconds
+        dt = datetime.fromisoformat(timestamp_str)
     except ValueError:
-        # If that fails, try without microseconds
-        dt = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+        try:
+            # Then try parsing with microseconds
+            dt = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S.%f')
+        except ValueError:
+            # If that fails, try without microseconds
+            dt = datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
     
     # Set UTC timezone
     utc_dt = pytz.UTC.localize(dt)
