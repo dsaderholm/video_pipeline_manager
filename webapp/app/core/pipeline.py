@@ -242,7 +242,7 @@ def update_task_status(task_id, status, processing_status=None, video_path=None,
         if should_close_conn and conn:
             conn.close()
 
-def store_generated_video(task_id, original_name, processed_path, scheduled_time, conn=None):
+def store_generated_video(task_id, original_name, processed_path, scheduled_time, conn=None, in_transaction=False):
     """Store information about a newly generated video"""
     video_id = None
     should_close_conn = conn is None
@@ -253,8 +253,9 @@ def store_generated_video(task_id, original_name, processed_path, scheduled_time
             
         c = conn.cursor()
         
-        # Start transaction
-        c.execute("BEGIN IMMEDIATE")
+        # Only start transaction if not already in one
+        if not in_transaction:
+            c.execute("BEGIN IMMEDIATE")
         
         try:
             c.execute('''
@@ -270,22 +271,16 @@ def store_generated_video(task_id, original_name, processed_path, scheduled_time
             if not c.fetchone():
                 raise Exception("Failed to verify video storage")
                 
-            # Commit transaction
-            c.execute("COMMIT")
+            # Only commit if we started the transaction
+            if not in_transaction:
+                c.execute("COMMIT")
             
-            log_with_task_details('INFO', f"Stored generated video information",
-                task_id=task_id,
-                details={
-                    'video_id': video_id,
-                    'original_name': original_name,
-                    'processed_path': processed_path
-                })
-                
             return video_id
             
         except Exception as e:
-            # Rollback transaction on error
-            c.execute("ROLLBACK")
+            # Only rollback if we started the transaction
+            if not in_transaction:
+                c.execute("ROLLBACK")
             raise
             
     except Exception as e:
@@ -374,14 +369,22 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
                     details=generation_details)
                 return True
 
-            success, stdout, stderr = execute_curl(task_data[-1], retries=3, retry_delay=5, validate_output=True, mode='generator')
-            if not success:
-                error_msg = f"Generator failed: {stderr}"
-                log_with_task_details('ERROR', error_msg,
-                    task_id=task_id,
-                    details={'stdout': stdout, 'stderr': stderr, **generation_details})
-                update_task_status(task_id, 'failed', 'failed', None, conn)
-                raise Exception(error_msg)
+            try:
+                success, stdout, stderr = execute_curl(task_data[-1], retries=3, retry_delay=5, validate_output=True, mode='generator')
+                if not success:
+                    error_msg = f"Generator failed: {stderr}"
+                    log_with_task_details('ERROR', error_msg,
+                        task_id=task_id,
+                        details={'stdout': stdout, 'stderr': stderr, **generation_details})
+                    update_task_status(task_id, 'failed', 'failed', None, conn)
+                    raise Exception(error_msg)
+            except Exception as e:
+                # Make sure to clean up any temporary files
+                if current_video_file and os.path.exists(current_video_file):
+                    cleanup_video(current_video_file)
+                # Rollback transaction
+                c.execute("ROLLBACK")
+                raise
 
             current_video_file = get_latest_video()
             if not current_video_file:
@@ -408,15 +411,22 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
                     if not util:
                         continue
 
-                    util_cmd = util[0].format(input=current_video_file)
-                    success, stdout, stderr = execute_curl(util_cmd, retries=3, retry_delay=5, validate_output=True, mode='utility')
-                    if not success:
-                        error_msg = f"Utility failed: {stderr}"
-                        log_with_task_details('ERROR', error_msg,
-                            task_id=task_id,
-                            details={'stdout': stdout, 'stderr': stderr, **generation_details})
-                        update_task_status(task_id, 'failed', 'failed', None, conn)
-                        raise Exception(error_msg)
+                    try:
+                        util_cmd = util[0].format(input=current_video_file)
+                        success, stdout, stderr = execute_curl(util_cmd, retries=3, retry_delay=5, validate_output=True, mode='utility')
+                        if not success:
+                            error_msg = f"Utility failed: {stderr}"
+                            log_with_task_details('ERROR', error_msg,
+                                task_id=task_id,
+                                details={'stdout': stdout, 'stderr': stderr, **generation_details})
+                            update_task_status(task_id, 'failed', 'failed', None, conn)
+                            raise Exception(error_msg)
+                    except Exception as e:
+                        # Clean up on utility failure
+                        if current_video_file and os.path.exists(current_video_file):
+                            cleanup_video(current_video_file)
+                        c.execute("ROLLBACK")
+                        raise
 
             # Handle preview mode
             if preview_mode:
@@ -442,18 +452,20 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
             if schedule_time:
                 video_id = store_generated_video(
                     task_id, 
-                    original_name,  # Original name from generator
+                    original_name,
                     permanent_path, 
                     schedule_time.isoformat(), 
-                    conn
+                    conn,
+                    in_transaction=True
                 )
             else:
                 video_id = store_generated_video(
                     task_id, 
-                    original_name,  # Original name from generator
+                    original_name,
                     permanent_path, 
                     datetime.now().isoformat(), 
-                    conn
+                    conn,
+                    in_transaction=True
                 )
                 
             if not video_id:
