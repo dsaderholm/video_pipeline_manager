@@ -11,8 +11,9 @@ import sqlite3
 # Set up logging first, before any other imports
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Create a global scheduler instance
+# Create a global scheduler instance and initialization flag
 scheduler = APScheduler()
+_scheduler_initialized = False
 
 def setup_logging():
     """Configure the logging system with file and console handlers"""
@@ -102,6 +103,13 @@ from app.core.pipeline import process_night_queue, process_scheduled_uploads
 
 def init_scheduler(app):
     """Initialize the APScheduler with improved settings and error handling"""
+    global _scheduler_initialized
+    
+    # Only initialize once
+    if _scheduler_initialized:
+        logger.debug("Scheduler already initialized, skipping...")
+        return scheduler
+
     def handle_job_error(event):
         logger.error(f"Job error occurred. Job ID: {event.job_id}, Error: {event.exception}")
         if event.job_id.startswith('task_'):
@@ -135,8 +143,7 @@ def init_scheduler(app):
     app.config['SCHEDULER_JOB_DEFAULTS'] = {
         'coalesce': True,
         'max_instances': 1,
-        'max_retries': 0 ,
-        'misfire_grace_time': 30  # 15 second grace time
+        'misfire_grace_time': 60  # Increased to 60 seconds
     }
     
     # Initialize the scheduler if it hasn't been started
@@ -180,7 +187,6 @@ def init_scheduler(app):
 
         # Log existing tasks
         try:
-            # Use the db instance's connection method
             with db.get_connection() as conn:
                 c = conn.cursor()
                 try:
@@ -206,6 +212,8 @@ def init_scheduler(app):
             logger.error(f"Failed to load tasks: {e}")
 
         scheduler.start()
+        _scheduler_initialized = True
+        logger.info("Scheduler initialized successfully")
 
     return scheduler
 
