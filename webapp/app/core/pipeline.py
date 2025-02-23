@@ -320,6 +320,7 @@ def get_next_day_schedules(schedule_str):
 
 def process_video_generation(task_id, schedule_time=None, preview_mode=False, dry_run=False, conn=None):
     """Handle video generation and utility processing"""
+    lock_acquired = False
     generation_details = {
         'task_id': task_id,
         'mode': 'dry_run' if dry_run else 'preview' if preview_mode else 'normal',
@@ -337,6 +338,15 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
     should_close_conn = conn is None  # Track if we need to close the connection
     
     try:
+        # Acquire lock at the very beginning
+        if not (dry_run or preview_mode):
+            lock_acquired = check_and_set_lock(task_id)
+            if not lock_acquired:
+                log_with_task_details('INFO', "Another task is currently running",
+                    task_id=task_id,
+                    details=generation_details)
+                return None
+
         if conn is None:
             conn = db.get_connection()
             
@@ -513,13 +523,32 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
         raise
 
     finally:
+        # Always attempt to release lock in finally block
+        if lock_acquired:
+            try:
+                release_lock(task_id)
+            except Exception as e:
+                log_with_task_details('ERROR', 
+                    f"Failed to release lock, attempting force release: {str(e)}",
+                    task_id=task_id,
+                    details={'error': str(e)})
+                try:
+                    force_release_lock()
+                except Exception as force_e:
+                    log_with_task_details('ERROR', 
+                        f"Force release also failed: {str(force_e)}",
+                        task_id=task_id,
+                        details={'error': str(force_e)})
+        
         cleanup_files(files_to_cleanup)
+        
         # Only close the connection if we created it
         if should_close_conn and conn:
             try:
                 conn.close()
             except Exception as e:
-                log_with_task_details('ERROR', f"Failed to close database connection: {str(e)}",
+                log_with_task_details('ERROR', 
+                    f"Failed to close database connection: {str(e)}",
                     task_id=task_id,
                     details={'error': str(e)})
 
