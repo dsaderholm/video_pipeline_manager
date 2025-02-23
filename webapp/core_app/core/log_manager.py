@@ -1,11 +1,11 @@
-# webapp/app/core/log_manager.py
+# webapp/webapp.core_app.core/log_manager.py
 import json
 import logging
 import threading
 from datetime import datetime
 import pytz
-from app.timezone import get_timezone
-from app.core.database import db
+from webapp.core_app.timezone import get_timezone
+from webapp.core_app.core.database import db
 
 class DatabaseLogHandler(logging.Handler):
     def __init__(self):
