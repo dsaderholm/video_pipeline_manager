@@ -415,10 +415,6 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
                 task_id=task_id,
                 details={'video_name': original_name})
 
-            log_with_task_details('INFO', f"Retrieved generated video",
-                task_id=task_id,
-                details={'original_name': original_name, 'path': current_video_file})
-
             files_to_cleanup.add(current_video_file)
 
             # Apply utilities
