@@ -1,8 +1,8 @@
 from flask import Blueprint, jsonify, request, render_template
 from datetime import datetime, timedelta
-from app.core.log_manager import get_logs, clear_old_logs
-from app.timezone import localize_timestamp, get_timezone
-from app.core.database import db
+from webapp.core_app.core.log_manager import get_logs, clear_old_logs
+from webapp.core_app.timezone import localize_timestamp, get_timezone
+from webapp.core_app.core.database import db
 import pytz
 
 # Create blueprint

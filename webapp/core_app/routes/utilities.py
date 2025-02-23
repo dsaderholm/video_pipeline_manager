@@ -1,8 +1,8 @@
 from flask import jsonify, request, Blueprint
 import logging
 import os
-from app.timezone import localize_timestamp
-from app.core.database import db
+from webapp.core_app.timezone import localize_timestamp
+from webapp.core_app.core.database import db
 
 # Create blueprint and logger
 utilities_bp = Blueprint('utilities', __name__)

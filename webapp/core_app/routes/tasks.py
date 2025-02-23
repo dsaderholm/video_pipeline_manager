@@ -5,8 +5,8 @@ import logging
 import os
 import time
 import glob
-from app.timezone import localize_timestamp
-from app.core.database import db
+from webapp.core_app.timezone import localize_timestamp
+from webapp.core_app.core.database import db
 
 # Create blueprint and logger
 tasks_bp = Blueprint('tasks', __name__)
@@ -233,7 +233,7 @@ def retry_with_backoff(task_id, video_id=None):
             delay = 60 * (2 ** retry_count)
             next_run = datetime.now() + timedelta(seconds=delay)
             
-            from app.core.pipeline import process_video_upload
+            from webapp.core_app.core.pipeline import process_video_upload
             scheduler.add_job(
                 func=process_video_upload,
                 trigger='date',
@@ -270,7 +270,7 @@ def retry_with_backoff(task_id, video_id=None):
             delay = 60 * (2 ** retry_count)
             next_run = datetime.now() + timedelta(seconds=delay)
             
-            from app.core.pipeline import process_video_pipeline
+            from webapp.core_app.core.pipeline import process_video_pipeline
             scheduler.add_job(
                 func=process_video_pipeline,
                 trigger='date',
@@ -296,7 +296,7 @@ def cleanup_preview_dir():
             logger.debug("Skipping cleanup - last cleanup was too recent")
             return
 
-        from app.core.pipeline import get_preview_dir
+        from webapp.core_app.core.pipeline import get_preview_dir
         preview_dir = get_preview_dir()
         
         for file_path in glob.glob(os.path.join(preview_dir, 'preview_task_*.mp4')):
@@ -321,7 +321,7 @@ def cleanup_preview_dir():
 def should_cleanup():
     """Check if cleanup is needed (avoid cleaning up too frequently)"""
     try:
-        from app.core.pipeline import get_preview_dir
+        from webapp.core_app.core.pipeline import get_preview_dir
         preview_dir = get_preview_dir()
         marker_file = os.path.join(preview_dir, '.last_cleanup')
         
@@ -373,7 +373,7 @@ def create_task():
             night_job_id = f'task_{task_id}_night_processing'
             night_hour, night_minute = os.getenv('NIGHT_PROCESSING_START', '22:00').split(':')
             scheduler.add_job(
-                func='app.core.pipeline:process_night_queue',
+                func='webapp.core_app.core.pipeline:process_night_queue',
                 trigger='cron',
                 hour=int(night_hour),
                 minute=int(night_minute),
@@ -383,7 +383,7 @@ def create_task():
             logger.info(f"Scheduled night processing for task {task_id} at {night_hour}:{night_minute}")
             
             # Schedule the upload jobs
-            from app.core.pipeline import process_video_upload
+            from webapp.core_app.core.pipeline import process_video_upload
             
             # Parse schedule for uploads
             day_schedules = data['schedule'].split(';')
@@ -527,7 +527,7 @@ def run_task(id):
                 
             conn.commit()
 
-        from app.core.pipeline import process_video_pipeline
+        from webapp.core_app.core.pipeline import process_video_pipeline
         process_video_pipeline(id)
         
         # Reset manual run flag
@@ -543,7 +543,7 @@ def run_task(id):
         # Reset manual run flag
         setattr(current_app, 'manual_run', False)
         # If task fails, force release the lock
-        from app.core.pipeline import force_release_lock
+        from webapp.core_app.core.pipeline import force_release_lock
         force_release_lock()
         return jsonify({
             'success': False,
@@ -581,7 +581,7 @@ def preview_task(id):
                 }), 409
 
             # Clean up any existing preview files for this task
-            from app.core.pipeline import get_preview_dir
+            from webapp.core_app.core.pipeline import get_preview_dir
             preview_dir = get_preview_dir()
             preview_path = os.path.join(preview_dir, f'preview_task_{id}.mp4')
             
@@ -611,7 +611,7 @@ def preview_task(id):
             conn.commit()
 
         # Start the pipeline in preview mode
-        from app.core.pipeline import process_video_pipeline
+        from webapp.core_app.core.pipeline import process_video_pipeline
         preview_result = process_video_pipeline(id, preview_mode=True)
         
         if preview_result:
@@ -674,7 +674,7 @@ def preview_task(id):
 @tasks_bp.route('/api/tasks/<int:id>/preview/download', methods=['GET'])
 def download_preview(id):
     try:
-        from app.core.pipeline import get_preview_dir
+        from webapp.core_app.core.pipeline import get_preview_dir
         preview_dir = get_preview_dir()
         preview_path = os.path.join(preview_dir, f'preview_task_{id}.mp4')
         
@@ -738,7 +738,7 @@ def dry_run_task(id):
                 }), 404
 
         # Run the pipeline in dry run mode
-        from app.core.pipeline import process_video_pipeline
+        from webapp.core_app.core.pipeline import process_video_pipeline
         success = process_video_pipeline(id, dry_run=True)
         
         return jsonify({
@@ -794,7 +794,7 @@ def generate_task(id):
                             if not next_time or schedule_time < next_time:
                                 next_time = schedule_time
 
-        from app.core.pipeline import process_video_generation
+        from webapp.core_app.core.pipeline import process_video_generation
         result = process_video_generation(id, next_time if next_time else None)
         
         # Reset manual run flag
@@ -856,7 +856,7 @@ def upload_video(id, video_id):
                     'message': f'Video file not found'
                 }), 404
 
-        from app.core.pipeline import process_video_upload
+        from webapp.core_app.core.pipeline import process_video_upload
         success = process_video_upload(id, (video_id, video[1], video[2], video[3]))
         
         if success:
@@ -923,7 +923,7 @@ def upload_task(id):
                     continue
 
                 try:
-                    from app.core.pipeline import process_video_upload
+                    from webapp.core_app.core.pipeline import process_video_upload
                     if process_video_upload(id, (video[0], video[1], video[2], video[3])):
                         success_count += 1
                 except Exception as e:
