@@ -204,6 +204,14 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
                 'stdout_length': len(stdout_str),
                 'stderr_length': len(stderr_str)
             })
+
+            # Parse the Content-Disposition header for the filename when in generator mode
+            generated_filename = None
+            if mode == 'generator':
+                cd_match = re.search(r'Content-Disposition:.*filename="?([^";\n]+)', stderr_str, re.IGNORECASE)
+                if cd_match:
+                    generated_filename = cd_match.group(1)
+                    attempt_details['generated_filename'] = generated_filename
             
             # Use appropriate response checker based on mode
             if mode == 'generator':
@@ -234,7 +242,7 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
                 
                 execution_details['attempts'].append(attempt_details)
                 log_with_details('INFO', "Curl command executed successfully", details=execution_details)
-                return True, stdout_str, stderr_str
+                return True, stdout_str, generated_filename if mode == 'generator' else stderr_str
             
             if attempt < retries - 1:
                 retry_delay_time = retry_delay * (2 ** attempt)

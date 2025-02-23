@@ -370,14 +370,13 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
                 return True
 
             try:
-                success, stdout, stderr = execute_curl(task_data[-1], retries=3, retry_delay=5, validate_output=True, mode='generator')
+                success, stdout, original_filename = execute_curl(task_data[-1], retries=3, retry_delay=5, validate_output=True, mode='generator')
                 if not success:
-                    error_msg = f"Generator failed: {stderr}"
+                    error_msg = f"Generator failed: {original_filename}"  # original_filename contains error in case of failure
                     log_with_task_details('ERROR', error_msg,
                         task_id=task_id,
-                        details={'stdout': stdout, 'stderr': stderr, **generation_details})
+                        details={'stdout': stdout, 'stderr': original_filename, **generation_details})
                     update_task_status(task_id, 'failed', 'failed', None, conn)
-                    # Don't raise here, return instead
                     return None
             except Exception as e:
                 # Make sure to clean up any temporary files
@@ -401,7 +400,15 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
                 update_task_status(task_id, 'failed', 'failed', None, conn)
                 raise Exception(error_msg)
 
-            original_name = os.path.basename(current_video_file)
+            # Use the original filename from the generator if available, otherwise fallback to the current name
+            if original_filename:
+                original_name = original_filename
+            else:
+                original_name = os.path.basename(current_video_file)
+                log_with_task_details('WARNING', f"Using fallback filename",
+                    task_id=task_id,
+                    details={'fallback_name': original_name})
+
             log_with_task_details('INFO', f"Retrieved generated video",
                 task_id=task_id,
                 details={'original_name': original_name, 'path': current_video_file})
