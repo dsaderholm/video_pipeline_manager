@@ -15,6 +15,7 @@ def get_db_path():
 class DatabaseManager:
     _instance = None
     _lock = threading.Lock()
+    _connection_pool = {}
     
     def __init__(self):
         self.init_db()
@@ -30,12 +31,12 @@ class DatabaseManager:
     def init_db(self):
         """Initialize database with improved settings"""
         try:
-            with sqlite3.connect(get_db_path()) as conn:
+            with self.get_connection() as conn:
                 # Set WAL mode and optimize for concurrency
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute("PRAGMA synchronous=NORMAL")
-                conn.execute("PRAGMA busy_timeout=30000")  # 30-second timeout
-                conn.execute("PRAGMA cache_size=-10000")   # 10MB cache
+                conn.execute("PRAGMA busy_timeout=60000")  # Increased to 60-second timeout
+                conn.execute("PRAGMA cache_size=-64000")   # Increased to 64MB cache
                 conn.execute("PRAGMA temp_store=MEMORY")
                 conn.execute("PRAGMA mmap_size=30000000000")  # 30GB memory map
                 conn.execute("PRAGMA page_size=4096")
@@ -90,78 +91,92 @@ class DatabaseManager:
                 logger.info("Database vacuum completed")
         except Exception as e:
             logger.error(f"Failed to vacuum database: {e}")
-    
-    @contextlib.contextmanager
-    def get_connection(self, max_retries=5, retry_delay=1.0):
-        """
-        Get a database connection with robust error handling and retry mechanism
+
+    def _get_connection_key(self) -> str:
+        """Get unique key for current thread"""
+        return f"thread_{threading.get_ident()}"
+
+    def _create_connection(self) -> sqlite3.Connection:
+        """Create a new database connection with optimized settings"""
+        conn = sqlite3.connect(
+            get_db_path(),
+            timeout=60.0,  # 60-second connection timeout
+            isolation_level=None,  # Autocommit mode
+            check_same_thread=False  # Allow cross-thread access
+        )
         
-        :param max_retries: Number of times to retry on database lock
-        :param retry_delay: Initial delay between retries (will be exponentially increased)
-        :return: A database connection
+        # Enable WAL mode for this connection
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=60000")
+        conn.execute("PRAGMA temp_store=MEMORY")
+        conn.execute("PRAGMA cache_size=-64000")
+        
+        return conn
+
+    @contextlib.contextmanager
+    def get_connection(self, max_retries: int = 5, initial_retry_delay: float = 0.1):
         """
-        last_error = None
+        Get a database connection with exponential backoff retry
+        
+        Args:
+            max_retries: Maximum number of retry attempts
+            initial_retry_delay: Initial delay between retries (doubles each attempt)
+        """
+        conn_key = self._get_connection_key()
         conn = None
+        last_error = None
+        
         for attempt in range(max_retries):
             try:
-                # Open connection with extended timeout and WAL mode
-                conn = sqlite3.connect(
-                    get_db_path(), 
-                    timeout=60.0,  # 60-second timeout
-                    isolation_level=None,  # Autocommit mode
-                    check_same_thread=False  # Allow cross-thread access
-                )
+                # Try to get or create connection
+                if conn_key not in self._connection_pool:
+                    self._connection_pool[conn_key] = self._create_connection()
                 
-                # Set pragmas for performance and concurrency
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("PRAGMA synchronous=NORMAL")
-                conn.execute("PRAGMA busy_timeout=30000")  # 30-second busy timeout
-                conn.execute("PRAGMA temp_store=MEMORY")
-                conn.execute("PRAGMA mmap_size=30000000000")  # 30GB memory map
-                conn.execute("PRAGMA page_size=4096")
+                conn = self._connection_pool[conn_key]
+                
+                # Test connection
+                conn.execute("SELECT 1")
                 
                 yield conn
                 return
                 
             except sqlite3.OperationalError as e:
-                if conn:
-                    try:
-                        conn.close()
-                    except:
-                        pass
+                delay = initial_retry_delay * (2 ** attempt)  # Exponential backoff
+                
+                if "database is locked" in str(e):
+                    logger.warning(f"Database locked, attempt {attempt + 1}/{max_retries}. Retrying in {delay:.2f}s")
+                    time.sleep(delay)
+                    last_error = e
                     
-                logger.warning(f"Database connection attempt {attempt + 1} failed: {e}")
-                last_error = e
-                
-                if "database is locked" in str(e) and attempt == max_retries - 1:
-                    try:
-                        self.reset_db_locks()
-                    except:
-                        pass
-                
-                time.sleep(retry_delay * (2 ** attempt))
-            
-            except Exception as e:
-                if conn:
-                    try:
-                        conn.close()
-                    except:
-                        pass
+                    # On last attempt, try to reset locks
+                    if attempt == max_retries - 1:
+                        try:
+                            self.reset_db_locks()
+                        except:
+                            pass
+                    continue
+                    
+                logger.error(f"Database error on attempt {attempt + 1}: {e}")
                 raise
-            
+                
+            except Exception as e:
+                logger.error(f"Unexpected database error: {e}")
+                raise
+                
             finally:
-                if conn:
+                if attempt == max_retries - 1 and conn_key in self._connection_pool:
+                    # Close and remove connection on last attempt
                     try:
-                        conn.close()
-                    except Exception as e:
-                        logger.error(f"Error closing connection: {e}")
+                        self._connection_pool[conn_key].close()
+                    except:
+                        pass
+                    del self._connection_pool[conn_key]
         
-        # If all retries fail
-        logger.error(f"Failed to acquire database connection after {max_retries} attempts")
         if last_error:
             raise last_error
-        raise sqlite3.OperationalError("Unknown database connection error")
-    
+        raise sqlite3.OperationalError("Failed to acquire database connection")
+
     def with_connection(self, f):
         """Decorator to handle database connections"""
         @wraps(f)
@@ -169,6 +184,15 @@ class DatabaseManager:
             with self.get_connection() as conn:
                 return f(conn, *args, **kwargs)
         return wrapper
+
+    def cleanup(self):
+        """Clean up all database connections"""
+        for conn_key, conn in self._connection_pool.items():
+            try:
+                conn.close()
+            except:
+                pass
+        self._connection_pool.clear()
 
 # Create the singleton instance
 db = DatabaseManager.get_instance()
