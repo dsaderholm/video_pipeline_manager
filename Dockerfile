@@ -9,15 +9,15 @@ RUN apt-get update && apt-get install -y \
 RUN useradd -m -U appuser
 WORKDIR /app
 
-# Debug: Show initial state
-RUN echo "Initial directory state:" && ls -la
-
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application code and show what was copied
+# Copy application code
 COPY . .
+
+# Create necessary directories
+RUN mkdir -p /app/webapp/previews /app/webapp/processed_videos /app/webapp/database /app/webapp/logs
 
 # Set proper ownership and permissions
 RUN chown -R appuser:appuser /app && \
@@ -27,14 +27,11 @@ RUN chown -R appuser:appuser /app && \
 USER appuser
 
 ENV PYTHONPATH=/app
-ENV FLASK_APP=webapp.main:app
-ENV FLASK_ENV=development
+ENV FLASK_APP=webapp.core_app:app
+ENV FLASK_ENV=production
 ENV PYTHONUNBUFFERED=1
 
 EXPOSE 5000
 
-# Make sure working directory is writable
-RUN touch /app/.test && rm /app/.test
-
-# Final debug command
+# Use standard Flask server
 CMD ["python", "webapp/main.py"]

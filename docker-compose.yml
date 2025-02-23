@@ -9,12 +9,14 @@ services:
     env_file:
       - stack.env
     environment:
-      - FLASK_ENV=development
+      - FLASK_ENV=production
       - PYTHONPATH=/app
-      - FLASK_APP=webapp.main:app
-      - PYTHONDONTWRITEBYTECODE=1  # Prevents writing .pyc files
+      - FLASK_APP=webapp.core_app:app
+      - PYTHONDONTWRITEBYTECODE=1
     volumes:
-      - video_pipeline_manager_db_data:/app/webapp/database  # Mount the volume here
+      - video_pipeline_manager_db_data:/app/webapp/database
+      - ./webapp/previews:/app/webapp/previews
+      - ./webapp/processed_videos:/app/webapp/processed_videos
     restart: unless-stopped
     networks:
       video_generation:
@@ -26,4 +28,4 @@ networks:
     name: "Video Generation"
 
 volumes:
-  video_pipeline_manager_db_data:  # Define the volume
+  video_pipeline_manager_db_data:
