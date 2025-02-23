@@ -12,8 +12,8 @@ from datetime import datetime
 import logging
 logger = logging.getLogger('app')
 import sys
-from app.core.database import db
-from app.core.log_manager import add_log_entry
+from webapp.core_app.core.database import db
+from webapp.core_app.core.log_manager import add_log_entry
 
 def ensure_processed_videos_dir():
     """Ensure the processed videos directory exists"""

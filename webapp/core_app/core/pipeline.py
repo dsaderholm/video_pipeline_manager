@@ -8,9 +8,9 @@ import threading
 from datetime import datetime, timedelta
 import logging
 logger = logging.getLogger('app')
-from app.core.utils import execute_curl, get_latest_video, cleanup_video, format_upload_command, log_with_details
-from app.core.email_utils import send_task_completion_notification
-from app.core.database import db
+from webapp.core_app.core.utils import execute_curl, get_latest_video, cleanup_video, format_upload_command, log_with_details
+from webapp.core_app.core.email_utils import send_task_completion_notification
+from webapp.core_app.core.database import db
 from flask import current_app
 
 # Global lock for thread safety (keep this as it's different from database locking)
