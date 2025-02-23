@@ -318,7 +318,7 @@ def get_next_day_schedules(schedule_str):
     
     return scheduled_times
 
-def process_video_generation(task_id, schedule_time=None, preview_mode=False, dry_run=False, conn=None):
+def process_video_generation(task_id, schedule_time=None, preview_mode=False, dry_run=False, conn=None, parent_has_lock=False):
     """Handle video generation and utility processing"""
     lock_acquired = False
     generation_details = {
@@ -335,11 +335,11 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
     files_to_cleanup = set()
     current_video_file = None
     video_id = None
-    should_close_conn = conn is None  # Track if we need to close the connection
+    should_close_conn = conn is None
     
     try:
-        # Acquire lock at the very beginning
-        if not (dry_run or preview_mode):
+        # Only acquire lock if parent doesn't have one
+        if not (dry_run or preview_mode or parent_has_lock):
             lock_acquired = check_and_set_lock(task_id)
             if not lock_acquired:
                 log_with_task_details('INFO', "Another task is currently running",
@@ -862,7 +862,7 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, dry_
     try:
         # Lock handling
         if not (dry_run or preview_mode):
-            lock_acquired = check_and_set_lock(task_id)  # Pass task_id here
+            lock_acquired = check_and_set_lock(task_id)
             if not lock_acquired:
                 log_with_task_details('INFO', 
                     "Another task is currently running. Task will retry later.",
@@ -888,7 +888,8 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, dry_
                     schedule_time, 
                     preview_mode, 
                     dry_run, 
-                    conn
+                    conn,
+                    parent_has_lock=lock_acquired
                 )
             except Exception as e:
                 log_with_task_details('ERROR', 
