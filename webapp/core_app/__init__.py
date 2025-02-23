@@ -66,7 +66,7 @@ logger = app_logger
 # Now do the rest of the imports
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 from apscheduler.triggers.cron import CronTrigger
-from app.core.database import db
+from webapp.core_app.core.database import db  # Updated import path
 
 load_dotenv()
 
@@ -99,7 +99,7 @@ def cleanup_preview_files():
     if deleted_count > 0 or error_count > 0:
         app_logger.info(f"Preview cleanup complete. Deleted: {deleted_count}, Errors: {error_count}")
 
-from app.core.pipeline import process_night_queue, process_scheduled_uploads
+from webapp.core_app.core.pipeline import process_night_queue, process_scheduled_uploads  # Updated import path
 
 def init_scheduler(app):
     """Initialize the APScheduler with improved settings and error handling"""
@@ -241,7 +241,7 @@ def create_app():
     with app.app_context():
         # Initialize database FIRST
         try:
-            from app.models import init_db
+            from webapp.core_app.models import init_db  # Updated import path
             init_db()
             app_logger.info("Main database initialized successfully")
         except Exception as e:
@@ -250,7 +250,7 @@ def create_app():
 
         # Initialize logging system SECOND
         try:
-            from app.core.log_manager import db_log_handler
+            from webapp.core_app.core.log_manager import db_log_handler  # Updated import path
             
             # Add database handler to root logger
             logging.getLogger().addHandler(db_log_handler)
@@ -270,12 +270,12 @@ def create_app():
         # Register blueprints FOURTH
         try:
             blueprints = [
-                ('app.routes.main', 'main_bp'),
-                ('app.routes.generators', 'generators_bp'),
-                ('app.routes.utilities', 'utilities_bp'),
-                ('app.routes.platforms', 'platforms_bp'),
-                ('app.routes.tasks', 'tasks_bp'),
-                ('app.routes.logs', 'logs_bp')
+                ('webapp.core_app.routes.main', 'main_bp'),  # Updated import paths
+                ('webapp.core_app.routes.generators', 'generators_bp'),
+                ('webapp.core_app.routes.utilities', 'utilities_bp'),
+                ('webapp.core_app.routes.platforms', 'platforms_bp'),
+                ('webapp.core_app.routes.tasks', 'tasks_bp'),
+                ('webapp.core_app.routes.logs', 'logs_bp')
             ]
             
             for module_path, blueprint_name in blueprints:
