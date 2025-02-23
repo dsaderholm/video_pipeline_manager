@@ -1,7 +1,7 @@
 import sqlite3
 import os
 import logging
-from app import app_logger as logger
+from webapp.core_app import app_logger as logger
 
 def init_db():
     try:
