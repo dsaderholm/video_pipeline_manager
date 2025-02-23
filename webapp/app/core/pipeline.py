@@ -410,14 +410,10 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
                 update_task_status(task_id, 'failed', 'failed', None, conn)
                 raise Exception(error_msg)
 
-            # Use the original filename from the generator if available, otherwise fallback to the current name
-            if original_filename:
-                original_name = original_filename
-            else:
-                original_name = os.path.basename(current_video_file)
-                log_with_task_details('WARNING', f"Using fallback filename",
-                    task_id=task_id,
-                    details={'fallback_name': original_name})
+            original_name = os.path.splitext(os.path.basename(current_video_file))[0]
+            log_with_task_details('INFO', f"Using generated video filename",
+                task_id=task_id,
+                details={'video_name': original_name})
 
             log_with_task_details('INFO', f"Retrieved generated video",
                 task_id=task_id,
