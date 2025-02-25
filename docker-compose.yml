@@ -17,7 +17,6 @@ services:
       - video_pipeline_manager_db_data:/app/webapp/database
       - ./webapp/previews:/app/webapp/previews
       - ./webapp/processed_videos:/app/webapp/processed_videos
-    working_dir: /app/webapp
     restart: unless-stopped
     networks:
       video_generation:
