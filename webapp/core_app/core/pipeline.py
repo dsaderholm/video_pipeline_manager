@@ -7,6 +7,7 @@ import shutil
 import threading
 from datetime import datetime, timedelta
 import logging
+import sqlite3
 logger = logging.getLogger('app')
 from webapp.core_app.core.utils import execute_curl, get_latest_video, cleanup_video, format_upload_command, log_with_details
 from webapp.core_app.core.email_utils import send_task_completion_notification
@@ -51,76 +52,103 @@ def should_process_at_night():
     else:  # Handles case where night window crosses midnight
         return current_time >= start_time or current_time <= end_time
 
-def check_and_set_lock(task_id=None):  # Add task_id parameter here
+def safe_rollback(conn, cursor=None):
+    """Safely roll back a transaction with proper error handling"""
+    if not conn:
+        return False
+        
+    try:
+        # Check if a transaction is active by trying a simple query
+        if cursor is None:
+            cursor = conn.cursor()
+            
+        cursor.execute("SELECT 1")
+        
+        # If we got here, connection is active, try to roll back
+        try:
+            conn.rollback()
+            return True
+        except sqlite3.OperationalError as e:
+            # Log the rollback error but don't raise
+            logger.warning(f"Rollback error: {str(e)}")
+            return False
+    except Exception as e:
+        # Connection might be closed or invalid
+        logger.warning(f"Cannot check transaction status: {str(e)}")
+        return False
+
+def check_and_set_lock(task_id=None):
     """Check if any task is running and set lock if not"""
     lock_details = {
         'operation': 'check_and_set',
         'timestamp': datetime.now().isoformat(),
-        'task_id': task_id  # Add this line
+        'task_id': task_id
     }
     
     with db_lock:
+        conn = None
         try:
-            with db.get_connection() as conn:
-                c = conn.cursor()
-                
-                # First check current lock status
-                c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
-                current_lock = c.fetchone()
-                lock_details['current_lock'] = {
-                    'locked': current_lock[0] if current_lock else None,
-                    'task_id': current_lock[1] if current_lock else None,
-                    'locked_at': current_lock[2] if current_lock else None
-                }
-                
-                # Clear stale locks (older than 5 minutes or NULL timestamp)
-                c.execute("""
-                    UPDATE task_lock 
-                    SET locked = 0, task_id = NULL, locked_at = NULL 
-                    WHERE locked = 1 
-                    AND (
-                        locked_at IS NULL 
-                        OR datetime(locked_at, '+5 minutes') < datetime('now')
-                    )
-                """)
-                expired_cleared = c.rowcount > 0
-                lock_details['expired_cleared'] = expired_cleared
-                
-                if expired_cleared:
-                    log_with_task_details('INFO', 
-                        "Cleared expired lock",
-                        task_id=task_id,
-                        details={'cleared_lock': lock_details['current_lock']})
-                
-                # Try to acquire lock
-                c.execute("""
-                    UPDATE task_lock 
-                    SET locked = 1, 
-                        task_id = ?, 
-                        locked_at = datetime('now')
-                    WHERE id = 1 AND locked = 0
-                """, (task_id,))  # Pass task_id here
-                
-                acquired = c.rowcount > 0
-                lock_details['acquired'] = acquired
-                
-                # Get final lock status
-                c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
-                final_lock = c.fetchone()
-                lock_details['final_lock'] = {
-                    'locked': final_lock[0] if final_lock else None,
-                    'task_id': final_lock[1] if final_lock else None,
-                    'locked_at': final_lock[2] if final_lock else None
-                }
-                
-                conn.commit()
-                
+            # Create a new connection directly instead of using the contextmanager to avoid generator issues
+            conn = db._create_connection()
+            
+            # First check current lock status
+            c = conn.cursor()
+            c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
+            current_lock = c.fetchone()
+            lock_details['current_lock'] = {
+                'locked': current_lock[0] if current_lock else None,
+                'task_id': current_lock[1] if current_lock else None,
+                'locked_at': current_lock[2] if current_lock else None
+            }
+            
+            # Clear stale locks (older than 5 minutes or NULL timestamp)
+            c.execute("""
+                UPDATE task_lock 
+                SET locked = 0, task_id = NULL, locked_at = NULL 
+                WHERE locked = 1 
+                AND (
+                    locked_at IS NULL 
+                    OR datetime(locked_at, '+5 minutes') < datetime('now')
+                )
+            """)
+            expired_cleared = c.rowcount > 0
+            lock_details['expired_cleared'] = expired_cleared
+            
+            if expired_cleared:
                 log_with_task_details('INFO', 
-                    "Successfully acquired pipeline lock" if acquired else "Failed to acquire pipeline lock",
+                    "Cleared expired lock",
                     task_id=task_id,
-                    details=lock_details)
-                
-                return acquired
+                    details={'cleared_lock': lock_details['current_lock']})
+            
+            # Try to acquire lock
+            c.execute("""
+                UPDATE task_lock 
+                SET locked = 1, 
+                    task_id = ?, 
+                    locked_at = datetime('now')
+                WHERE id = 1 AND locked = 0
+            """, (task_id,))
+            
+            acquired = c.rowcount > 0
+            lock_details['acquired'] = acquired
+            
+            # Get final lock status
+            c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
+            final_lock = c.fetchone()
+            lock_details['final_lock'] = {
+                'locked': final_lock[0] if final_lock else None,
+                'task_id': final_lock[1] if final_lock else None,
+                'locked_at': final_lock[2] if final_lock else None
+            }
+            
+            conn.commit()
+            
+            log_with_task_details('INFO', 
+                "Successfully acquired pipeline lock" if acquired else "Failed to acquire pipeline lock",
+                task_id=task_id,
+                details=lock_details)
+            
+            return acquired
                 
         except Exception as e:
             lock_details['error'] = str(e)
@@ -128,76 +156,92 @@ def check_and_set_lock(task_id=None):  # Add task_id parameter here
                 f"Error managing pipeline lock: {str(e)}", 
                 task_id=task_id,
                 details=lock_details)
+            
+            # Try to rollback if possible
+            if conn:
+                try:
+                    safe_rollback(conn)
+                except:
+                    pass
             return False
+        finally:
+            # Always close the connection in finally block
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
 
-def release_lock(task_id=None):  # Add task_id parameter here
+def release_lock(task_id=None):
     """Release the task lock"""
     release_details = {
         'operation': 'release',
         'timestamp': datetime.now().isoformat(),
-        'task_id': task_id  # Add this line
+        'task_id': task_id
     }
     
     with db_lock:
+        conn = None
         try:
-            with db.get_connection() as conn:
-                c = conn.cursor()
-                
-                # Get current lock status before release
-                c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
-                current_lock = c.fetchone()
-                release_details['before_release'] = {
-                    'locked': current_lock[0] if current_lock else None,
-                    'task_id': current_lock[1] if current_lock else None,
-                    'locked_at': current_lock[2] if current_lock else None
-                }
-                
-                # Only release if we own the lock
-                if task_id:
-                    c.execute("""
-                        UPDATE task_lock 
-                        SET locked = 0, 
-                            task_id = NULL, 
-                            locked_at = NULL 
-                        WHERE id = 1 
-                        AND task_id = ?
-                    """, (task_id,))
-                else:
-                    # Force release if no task_id provided
-                    c.execute("""
-                        UPDATE task_lock 
-                        SET locked = 0, 
-                            task_id = NULL, 
-                            locked_at = NULL 
-                        WHERE id = 1
-                    """)
-                released = c.rowcount > 0
-                
-                release_details['released'] = released
-                
-                # Get final lock status
-                c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
-                final_lock = c.fetchone()
-                release_details['after_release'] = {
-                    'locked': final_lock[0] if final_lock else None,
-                    'task_id': final_lock[1] if final_lock else None,
-                    'locked_at': final_lock[2] if final_lock else None
-                }
-                
-                conn.commit()
-                
-                if released:
-                    log_with_task_details('INFO', 
-                        "Successfully released pipeline lock",
-                        task_id=task_id,
-                        details=release_details)
-                else:
-                    log_with_task_details('DEBUG', 
-                        "No lock needed to be released",
-                        task_id=task_id,
-                        details=release_details)
-                
-                return released
+            # Create a new connection directly instead of using the contextmanager
+            conn = db._create_connection()
+            c = conn.cursor()
+            
+            # Get current lock status before release
+            c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
+            current_lock = c.fetchone()
+            release_details['before_release'] = {
+                'locked': current_lock[0] if current_lock else None,
+                'task_id': current_lock[1] if current_lock else None,
+                'locked_at': current_lock[2] if current_lock else None
+            }
+            
+            # Only release if we own the lock
+            if task_id:
+                c.execute("""
+                    UPDATE task_lock 
+                    SET locked = 0, 
+                        task_id = NULL, 
+                        locked_at = NULL 
+                    WHERE id = 1 
+                    AND task_id = ?
+                """, (task_id,))
+            else:
+                # Force release if no task_id provided
+                c.execute("""
+                    UPDATE task_lock 
+                    SET locked = 0, 
+                        task_id = NULL, 
+                        locked_at = NULL 
+                    WHERE id = 1
+                """)
+            released = c.rowcount > 0
+            
+            release_details['released'] = released
+            
+            # Get final lock status
+            c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
+            final_lock = c.fetchone()
+            release_details['after_release'] = {
+                'locked': final_lock[0] if final_lock else None,
+                'task_id': final_lock[1] if final_lock else None,
+                'locked_at': final_lock[2] if final_lock else None
+            }
+            
+            conn.commit()
+            
+            if released:
+                log_with_task_details('INFO', 
+                    "Successfully released pipeline lock",
+                    task_id=task_id,
+                    details=release_details)
+            else:
+                log_with_task_details('DEBUG', 
+                    "No lock needed to be released",
+                    task_id=task_id,
+                    details=release_details)
+            
+            return released
                 
         except Exception as e:
             release_details['error'] = str(e)
@@ -205,6 +249,14 @@ def release_lock(task_id=None):  # Add task_id parameter here
                 f"Error releasing pipeline lock: {str(e)}", 
                 task_id=task_id,
                 details=release_details)
+            
+            # Try to rollback if possible
+            if conn:
+                try:
+                    safe_rollback(conn)
+                except:
+                    pass
+                    
             # Try force release as last resort
             try:
                 force_release_lock()
@@ -215,6 +267,13 @@ def release_lock(task_id=None):  # Add task_id parameter here
                     task_id=task_id,
                     details=release_details)
             return False
+        finally:
+            # Always close the connection in finally block
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
 
 def update_task_status(task_id, status, processing_status=None, video_path=None, conn=None):
     """Update task status and processing details"""
@@ -280,7 +339,7 @@ def store_generated_video(task_id, original_name, processed_path, scheduled_time
         except Exception as e:
             # Only rollback if we started the transaction
             if not in_transaction:
-                c.execute("ROLLBACK")
+                safe_rollback(conn, c)
             raise
             
     except Exception as e:
@@ -395,7 +454,7 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
                 # Check if transaction is active before rolling back
                 try:
                     c.execute("SELECT 1")  # Quick test if transaction is active
-                    c.execute("ROLLBACK")
+                    safe_rollback(conn, c)
                 except sqlite3.OperationalError:
                     # Transaction wasn't active, that's okay
                     pass
@@ -440,7 +499,7 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
                         # Clean up on utility failure
                         if current_video_file and os.path.exists(current_video_file):
                             cleanup_video(current_video_file)
-                        c.execute("ROLLBACK")
+                        safe_rollback(conn, c)
                         raise
 
             # Handle preview mode
@@ -503,7 +562,7 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
             
         except Exception as e:
             # Rollback transaction on error
-            c.execute("ROLLBACK")
+            safe_rollback(conn, c)
             raise
             
     except Exception as e:
@@ -1097,49 +1156,68 @@ def force_release_lock():
         'timestamp': datetime.now().isoformat()
     }
     
+    conn = None
     try:
-        with db.get_connection() as conn:
-            c = conn.cursor()
-            
-            # Get current lock state for logging
-            c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
-            current_lock = c.fetchone()
-            release_details['before_release'] = {
-                'locked': current_lock[0] if current_lock else None,
-                'task_id': current_lock[1] if current_lock else None,
-                'locked_at': current_lock[2] if current_lock else None
-            }
-            
-            # Force release the lock
-            c.execute("""
-                UPDATE task_lock 
-                SET locked = 0, task_id = NULL, locked_at = NULL 
-                WHERE id = 1
-            """)
-            
-            released = c.rowcount > 0
-            release_details['released'] = released
-            
-            # Get final state for logging
-            c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
-            final_lock = c.fetchone()
-            release_details['after_release'] = {
-                'locked': final_lock[0] if final_lock else None,
-                'task_id': final_lock[1] if final_lock else None,
-                'locked_at': final_lock[2] if final_lock else None
-            }
-            
-            log_with_task_details('INFO', 
-                "Successfully force-released pipeline lock" if released else "No lock needed to be released",
-                task_id=None,
-                details=release_details)
-            
-            return released
-            
+        # Create a direct connection instead of using contextmanager
+        conn = db._create_connection()
+        c = conn.cursor()
+        
+        # Get current lock state for logging
+        c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
+        current_lock = c.fetchone()
+        release_details['before_release'] = {
+            'locked': current_lock[0] if current_lock else None,
+            'task_id': current_lock[1] if current_lock else None,
+            'locked_at': current_lock[2] if current_lock else None
+        }
+        
+        # Force release the lock
+        c.execute("""
+            UPDATE task_lock 
+            SET locked = 0, task_id = NULL, locked_at = NULL 
+            WHERE id = 1
+        """)
+        
+        released = c.rowcount > 0
+        release_details['released'] = released
+        
+        # Get final state for logging
+        c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
+        final_lock = c.fetchone()
+        release_details['after_release'] = {
+            'locked': final_lock[0] if final_lock else None,
+            'task_id': final_lock[1] if final_lock else None,
+            'locked_at': final_lock[2] if final_lock else None
+        }
+        
+        conn.commit()
+        
+        log_with_task_details('INFO', 
+            "Successfully force-released pipeline lock" if released else "No lock needed to be released",
+            task_id=None,
+            details=release_details)
+        
+        return released
+        
     except Exception as e:
         release_details['error'] = str(e)
         log_with_task_details('ERROR', 
             f"Failed to force release lock: {str(e)}", 
             task_id=None,
             details=release_details)
-        return False                    
+        
+        # Try to rollback if possible
+        if conn:
+            try:
+                safe_rollback(conn)
+            except:
+                pass
+        
+        return False
+    finally:
+        # Always close the connection in finally block
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
