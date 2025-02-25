@@ -10,7 +10,11 @@ logger = logging.getLogger('app')
 
 def get_db_path():
     """Get the path to the SQLite database file"""
-    return os.path.join('webapp', 'database', 'pipeline.db')
+    db_dir = os.path.join('webapp', 'database')
+    # Make sure the database directory exists
+    if not os.path.exists(db_dir):
+        os.makedirs(db_dir)
+    return os.path.join(db_dir, 'pipeline.db')
 
 class DatabaseManager:
     _instance = None
@@ -30,6 +34,15 @@ class DatabaseManager:
     
     def init_db(self):
         """Initialize database with improved settings"""
+        db_path = get_db_path()
+        logger.info(f"Initializing database at {db_path}")
+        
+        # Create database directory if it doesn't exist
+        db_dir = os.path.dirname(db_path)
+        if not os.path.exists(db_dir):
+            os.makedirs(db_dir)
+            logger.info(f"Created database directory: {db_dir}")
+            
         try:
             with self.get_connection() as conn:
                 # Set WAL mode and optimize for concurrency
@@ -62,6 +75,14 @@ class DatabaseManager:
                     
                     -- Ensure a single lock row exists
                     INSERT OR IGNORE INTO task_lock (id, locked) VALUES (1, 0);
+                    
+                    -- Create generators table if it doesn't exist
+                    CREATE TABLE IF NOT EXISTS generators (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        name TEXT NOT NULL,
+                        generator_curl TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
                 ''')
                 
                 logger.info("Database initialized with optimized settings")
@@ -72,23 +93,29 @@ class DatabaseManager:
     def reset_db_locks(self):
         """Reset all database locks in case of deadlock"""
         try:
-            with self.get_connection() as conn:
-                conn.execute("""
-                    UPDATE task_lock 
-                    SET locked = 0, 
-                        task_id = NULL, 
-                        locked_at = NULL
-                """)
-                logger.info("Database locks have been reset")
+            # Create a fresh connection for this operation to avoid using potentially closed connections
+            conn = self._create_connection()
+            conn.execute("""
+                UPDATE task_lock 
+                SET locked = 0, 
+                    task_id = NULL, 
+                    locked_at = NULL
+            """)
+            conn.commit()
+            conn.close()
+            logger.info("Database locks have been reset")
         except Exception as e:
             logger.error(f"Failed to reset database locks: {e}")
 
     def vacuum_db(self):
         """Optimize database and reclaim space"""
         try:
-            with self.get_connection() as conn:
-                conn.execute("VACUUM")
-                logger.info("Database vacuum completed")
+            # Create a fresh connection for this operation
+            conn = self._create_connection()
+            conn.execute("VACUUM")
+            conn.commit()
+            conn.close()
+            logger.info("Database vacuum completed")
         except Exception as e:
             logger.error(f"Failed to vacuum database: {e}")
 
@@ -98,8 +125,15 @@ class DatabaseManager:
 
     def _create_connection(self) -> sqlite3.Connection:
         """Create a new database connection with optimized settings"""
+        db_path = get_db_path()
+        
+        # Ensure the database directory exists
+        db_dir = os.path.dirname(db_path)
+        if not os.path.exists(db_dir):
+            os.makedirs(db_dir)
+            
         conn = sqlite3.connect(
-            get_db_path(),
+            db_path,
             timeout=60.0,  # 60-second connection timeout
             isolation_level=None,  # Autocommit mode
             check_same_thread=False  # Allow cross-thread access
@@ -129,7 +163,21 @@ class DatabaseManager:
         
         for attempt in range(max_retries):
             try:
-                # Try to get or create connection
+                # Check if connection exists and is valid
+                if conn_key in self._connection_pool:
+                    try:
+                        # Test existing connection
+                        self._connection_pool[conn_key].execute("SELECT 1")
+                    except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+                        # Connection is invalid, remove it from pool
+                        logger.warning(f"Detected invalid connection in pool. Creating new connection.")
+                        try:
+                            self._connection_pool[conn_key].close()
+                        except:
+                            pass
+                        del self._connection_pool[conn_key]
+                
+                # Create new connection if needed
                 if conn_key not in self._connection_pool:
                     self._connection_pool[conn_key] = self._create_connection()
                 
@@ -158,20 +206,25 @@ class DatabaseManager:
                     continue
                     
                 logger.error(f"Database error on attempt {attempt + 1}: {e}")
-                raise
-                
-            except Exception as e:
-                logger.error(f"Unexpected database error: {e}")
-                raise
-                
-            finally:
-                if attempt == max_retries - 1 and conn_key in self._connection_pool:
-                    # Close and remove connection on last attempt
+                # Force recreation of connection
+                if conn_key in self._connection_pool:
                     try:
                         self._connection_pool[conn_key].close()
                     except:
                         pass
                     del self._connection_pool[conn_key]
+                raise
+                
+            except Exception as e:
+                logger.error(f"Unexpected database error: {e}")
+                # Force recreation of connection
+                if conn_key in self._connection_pool:
+                    try:
+                        self._connection_pool[conn_key].close()
+                    except:
+                        pass
+                    del self._connection_pool[conn_key]
+                raise
         
         if last_error:
             raise last_error
