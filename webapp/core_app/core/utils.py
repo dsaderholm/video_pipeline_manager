@@ -18,8 +18,10 @@ from webapp.core_app.core.log_manager import add_log_entry
 def ensure_processed_videos_dir():
     """Ensure the processed videos directory exists"""
     videos_dir = 'processed_videos'
-    os.makedirs(videos_dir, exist_ok=True)
-    return videos_dir
+    # Use absolute path
+    abs_videos_dir = os.path.abspath(videos_dir)
+    os.makedirs(abs_videos_dir, exist_ok=True)
+    return abs_videos_dir
 
 def get_processed_video_path(task_id, schedule_time=None):
     """Get the permanent path for a processed video"""
@@ -188,8 +190,27 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
         }
         
         try:
+            # Fix: Ensure working directory is set to app root for consistent file paths
+            cwd = os.getcwd()
+            log_with_details('DEBUG', f"Current working directory: {cwd}",
+                details={'command': curl_command})
+            
+            # For improved file path handling, replace relative paths with absolute paths
+            modified_command = curl_command
+            if mode == 'utility' or mode == 'uploader':
+                # Check for file paths in the command and convert to absolute paths
+                path_matches = re.findall(r'((?:\.\/)?[\w\-\.\/]+\.mp4)', curl_command)
+                for path in path_matches:
+                    if path.startswith('./'):
+                        path = path[2:]  # Remove leading ./
+                    if not os.path.isabs(path):
+                        abs_path = os.path.abspath(path)
+                        modified_command = modified_command.replace(path, abs_path)
+                        log_with_details('DEBUG', f"Converted path: {path} to {abs_path}",
+                            details={'original_command': curl_command, 'modified_command': modified_command})
+            
             process = subprocess.Popen(
-                curl_command,
+                modified_command,
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
@@ -271,11 +292,15 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
 
 def validate_video_file(file_path, min_size_bytes=1024):
     """Validate video file by checking its header and structure"""
+    # Ensure file_path is absolute
+    abs_file_path = os.path.abspath(file_path)
+    
     validation_details = {
-        'file_path': file_path,
+        'file_path': abs_file_path,
+        'original_path': file_path,
         'min_size_bytes': min_size_bytes,
         'checks': [],
-        'is_processed': file_path.startswith('processed_videos/')
+        'is_processed': 'processed_videos' in abs_file_path
     }
     
     def add_check(name, result, message=None):
@@ -286,12 +311,12 @@ def validate_video_file(file_path, min_size_bytes=1024):
         })
         return result
     
-    if not add_check('file_exists', os.path.exists(file_path)):
+    if not add_check('file_exists', os.path.exists(abs_file_path)):
         log_with_details('ERROR', "Video file validation failed: File does not exist",
             details=validation_details)
         return False, "File does not exist"
     
-    file_size = os.path.getsize(file_path)
+    file_size = os.path.getsize(abs_file_path)
     validation_details['file_size'] = file_size
     
     if not add_check('size_check', file_size >= min_size_bytes):
@@ -300,7 +325,7 @@ def validate_video_file(file_path, min_size_bytes=1024):
         return False, f"File too small (< {min_size_bytes} bytes)"
     
     try:
-        with open(file_path, 'rb') as f:
+        with open(abs_file_path, 'rb') as f:
             # Check MP4 file signature
             header = f.read(8)
             has_valid_header = any(sig in header for sig in [b'ftyp', b'mdat', b'moov', b'free', b'wide', b'skip'])
@@ -316,13 +341,13 @@ def validate_video_file(file_path, min_size_bytes=1024):
             add_check('read_check', True)
             
             # Create a temporary file with a safe name for ffprobe
-            temp_dir = os.path.dirname(file_path) or '.'
+            temp_dir = os.path.dirname(abs_file_path) or '.'
             temp_name = f"temp_validate_{uuid.uuid4().hex[:8]}.mp4"
             temp_path = os.path.join(temp_dir, temp_name)
             
             try:
                 # Copy the file with a safe name
-                shutil.copy2(file_path, temp_path)
+                shutil.copy2(abs_file_path, temp_path)
                 validation_details['temp_path'] = temp_path
                 
                 # Run ffprobe on the temp file
@@ -411,15 +436,20 @@ def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
     }
     
     for attempt in range(max_retries):
-        # Search both in current directory and processed_videos
+        # Search in multiple locations for better compatibility with Docker
         video_files = glob.glob("*.mp4")
+        webapp_files = glob.glob(os.path.join('webapp', '*.mp4'))
         processed_files = glob.glob(os.path.join('processed_videos', '*.mp4'))
-        all_files = video_files + processed_files
+        webapp_processed_files = glob.glob(os.path.join('webapp', 'processed_videos', '*.mp4'))
+        all_files = video_files + processed_files + webapp_files + webapp_processed_files
         
+        # Log the current directory to help with debugging
+        cwd = os.getcwd()
         search_details.update({
             'attempt': attempt + 1,
             'found_files': len(all_files),
-            'files': all_files
+            'files': all_files,
+            'current_directory': cwd
         })
         
         log_with_details('INFO', f"Searching for valid video files (attempt {attempt + 1}/{max_retries})",
@@ -428,10 +458,11 @@ def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
         valid_videos = []
         for video in all_files:
             try:
-                if os.path.exists(video) and os.path.getsize(video) >= min_size_bytes:
-                    is_valid, _ = validate_video_file(video)
+                abs_path = os.path.abspath(video)
+                if os.path.exists(abs_path) and os.path.getsize(abs_path) >= min_size_bytes:
+                    is_valid, _ = validate_video_file(abs_path)
                     if is_valid:
-                        valid_videos.append(video)
+                        valid_videos.append(abs_path)
             except OSError as e:
                 search_details.update({
                     'failed_file': video,
@@ -576,16 +607,23 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
     }
     
     try:
-        safe_video_path, _ = create_safe_filename(video_file)
+        # Use absolute path for video file
+        abs_video_file = os.path.abspath(video_file)
+        safe_video_path, _ = create_safe_filename(abs_video_file)
         try:
             # For processed videos, make a copy instead of moving
-            if video_file.startswith('processed_videos/'):
-                shutil.copy2(video_file, safe_video_path)
+            if 'processed_videos' in abs_video_file:
+                shutil.copy2(abs_video_file, safe_video_path)
             else:
-                os.rename(video_file, safe_video_path)
+                # Try copying instead of renaming for better reliability
+                shutil.copy2(abs_video_file, safe_video_path)
+                try:
+                    os.remove(abs_video_file)
+                except:
+                    pass  # Ignore errors on removal
         except OSError as e:
             log_with_details('ERROR', f"Failed to prepare video file: {str(e)}", 
-                details={'video_file': video_file, 'safe_path': safe_video_path, 'error': str(e)})
+                details={'video_file': video_file, 'abs_path': abs_video_file, 'safe_path': safe_video_path, 'error': str(e)})
             return None, None
 
         # Always use the original name from the database
@@ -593,7 +631,7 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
         if not video_title:
             # Only fall back to task name if somehow original_name is empty
             video_title = task_data['name']
-            log_with_task_details('WARNING', "Using task name as fallback - original name was empty",
+            log_with_details('WARNING', "Using task name as fallback - original name was empty",
                 details={'task_id': task_data.get('id'), 'task_name': task_data['name']})
         
         # Set default values for platform data
