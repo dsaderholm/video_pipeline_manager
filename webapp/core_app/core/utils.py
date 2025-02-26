@@ -101,6 +101,12 @@ def parse_curl_response(stdout_str, stderr_str):
 
 def check_generator_response(stdout_str, stderr_str):
     """Check if generator successfully created a video file"""
+    # First check for HTTP 200 status code in the output
+    status_match = re.search(r'HTTP/\d\.\d\s+(\d{3})', stdout_str + stderr_str)
+    if status_match and status_match.group(1) == '200':
+        return True, ""
+    
+    # Also consider it a success if stderr is empty or only contains progress info
     if not stderr_str.strip() or all(
         line.startswith(('* ', '  % Total', '100', 'Warning: ')) 
         for line in stderr_str.strip().split('\n')
@@ -119,6 +125,10 @@ def check_generator_response(stdout_str, stderr_str):
         if re.search(pattern, stderr_str, re.IGNORECASE):
             return False, stderr_str
     
+    # Log what we're seeing for debugging
+    logger.debug(f"Generator output: stdout_length={len(stdout_str)}, stderr_length={len(stderr_str)}")
+    
+    # If we don't detect specific errors, assume success
     return True, ""
 
 def check_utility_response(stdout_str, stderr_str):
@@ -437,19 +447,39 @@ def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
     
     for attempt in range(max_retries):
         # Search in multiple locations for better compatibility with Docker
-        video_files = glob.glob("*.mp4")
-        webapp_files = glob.glob(os.path.join('webapp', '*.mp4'))
-        processed_files = glob.glob(os.path.join('processed_videos', '*.mp4'))
-        webapp_processed_files = glob.glob(os.path.join('webapp', 'processed_videos', '*.mp4'))
-        all_files = video_files + processed_files + webapp_files + webapp_processed_files
-        
-        # Log the current directory to help with debugging
         cwd = os.getcwd()
+        search_details['current_directory'] = cwd
+        
+        # Use a more comprehensive approach to find files
+        all_files = []
+        
+        # Check current directory with full pattern matching
+        for file in os.listdir('.'):
+            if file.lower().endswith('.mp4'):
+                all_files.append(os.path.abspath(file))
+                
+        # Check webapp directory if it exists
+        if os.path.exists('webapp'):
+            for file in os.listdir('webapp'):
+                if file.lower().endswith('.mp4'):
+                    all_files.append(os.path.abspath(os.path.join('webapp', file)))
+        
+        # Check processed_videos directory if it exists
+        if os.path.exists('processed_videos'):
+            for file in os.listdir('processed_videos'):
+                if file.lower().endswith('.mp4'):
+                    all_files.append(os.path.abspath(os.path.join('processed_videos', file)))
+        
+        # Check webapp/processed_videos directory if it exists
+        if os.path.exists(os.path.join('webapp', 'processed_videos')):
+            for file in os.listdir(os.path.join('webapp', 'processed_videos')):
+                if file.lower().endswith('.mp4'):
+                    all_files.append(os.path.abspath(os.path.join('webapp', 'processed_videos', file)))
+        
         search_details.update({
             'attempt': attempt + 1,
             'found_files': len(all_files),
-            'files': all_files,
-            'current_directory': cwd
+            'files': all_files
         })
         
         log_with_details('INFO', f"Searching for valid video files (attempt {attempt + 1}/{max_retries})",
@@ -458,11 +488,17 @@ def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
         valid_videos = []
         for video in all_files:
             try:
-                abs_path = os.path.abspath(video)
-                if os.path.exists(abs_path) and os.path.getsize(abs_path) >= min_size_bytes:
-                    is_valid, _ = validate_video_file(abs_path)
+                if os.path.exists(video) and os.path.getsize(video) >= min_size_bytes:
+                    # Skip validation for filenames we know are problematic for ffprobe
+                    if any(char in video for char in "'\"()[]{}$&%#@!"):
+                        valid_videos.append(video)
+                        log_with_details('INFO', f"Added file with special characters without validation: {video}")
+                        continue
+                        
+                    is_valid, _ = validate_video_file(video)
                     if is_valid:
-                        valid_videos.append(abs_path)
+                        valid_videos.append(video)
+                        log_with_details('INFO', f"Validated file: {video}")
             except OSError as e:
                 search_details.update({
                     'failed_file': video,
