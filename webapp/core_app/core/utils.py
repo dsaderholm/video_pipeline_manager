@@ -125,9 +125,6 @@ def check_generator_response(stdout_str, stderr_str):
         if re.search(pattern, stderr_str, re.IGNORECASE):
             return False, stderr_str
     
-    # Log what we're seeing for debugging
-    logger.debug(f"Generator output: stdout_length={len(stdout_str)}, stderr_length={len(stderr_str)}")
-    
     # If we don't detect specific errors, assume success
     return True, ""
 
@@ -243,10 +240,19 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
                 if cd_match:
                     generated_filename = cd_match.group(1)
                     attempt_details['generated_filename'] = generated_filename
+                    log_with_details('INFO', f"Found filename in Content-Disposition header: {generated_filename}",
+                        details={'stdout_length': len(stdout_str), 'stderr_length': len(stderr_str)})
+                else:
+                    log_with_details('WARNING', "No filename found in Content-Disposition header",
+                        details={'stderr_snippet': stderr_str[:500]})
             
             # Use appropriate response checker based on mode
             if mode == 'generator':
                 success, error_msg = check_generator_response(stdout_str, stderr_str)
+                # Explicitly log if we got HTTP 200
+                if re.search(r'HTTP/\d\.\d\s+200', stdout_str + stderr_str):
+                    log_with_details('INFO', "Generator returned HTTP 200 status",
+                        details={'stdout_snippet': stdout_str[:100], 'stderr_snippet': stderr_str[:100]})
             elif mode == 'utility':
                 success, error_msg = check_utility_response(stdout_str, stderr_str)
             else:  # uploader mode
@@ -257,16 +263,34 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
             
             if success:
                 if validate_output and mode == 'generator':
+                    # List files in current directory to help with debugging
+                    try:
+                        files = os.listdir('.')
+                        mp4_files = [f for f in files if f.lower().endswith('.mp4')]
+                        log_with_details('INFO', f"Files in directory after generator execution", 
+                            details={'all_files': files, 'mp4_files': mp4_files})
+                    except Exception as e:
+                        log_with_details('WARNING', f"Error listing directory contents: {str(e)}", 
+                            details={'error': str(e)})
+                        
+                    # Try to find the video file
                     video_file = get_latest_video()
                     if not video_file:
                         if attempt < retries - 1:
+                            log_with_details('WARNING', "No video file found, retrying...",
+                                details=attempt_details)
                             time.sleep(retry_delay * (2 ** attempt))
                             continue
                         return False, stdout_str, "No video file generated"
                     
+                    log_with_details('INFO', f"Found video file: {video_file}",
+                        details={'video_file': video_file})
+                    
                     is_valid, validation_msg = validate_video_file(video_file)
                     if not is_valid:
                         if attempt < retries - 1:
+                            log_with_details('WARNING', f"Invalid video file: {validation_msg}, retrying...",
+                                details=attempt_details)
                             time.sleep(retry_delay * (2 ** attempt))
                             continue
                         return False, stdout_str, f"Invalid video file: {validation_msg}"
@@ -277,6 +301,8 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
             
             if attempt < retries - 1:
                 retry_delay_time = retry_delay * (2 ** attempt)
+                log_with_details('WARNING', f"Command failed, retrying in {retry_delay_time} seconds",
+                    details={'error': error_msg, 'attempt': attempt + 1, 'max_retries': retries})
                 time.sleep(retry_delay_time)
                 execution_details['attempts'].append(attempt_details)
                 continue
@@ -489,16 +515,22 @@ def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
         for video in all_files:
             try:
                 if os.path.exists(video) and os.path.getsize(video) >= min_size_bytes:
-                    # Skip validation for filenames we know are problematic for ffprobe
-                    if any(char in video for char in "'\"()[]{}$&%#@!"):
+                    # For filenames with special characters or spaces, skip the ffprobe validation
+                    # which might fail due to shell escaping issues
+                    if "'" in video or '"' in video or ' ' in video or any(char in video for char in "()[]{}$&%#@!"):
                         valid_videos.append(video)
-                        log_with_details('INFO', f"Added file with special characters without validation: {video}")
+                        log_with_details('INFO', f"Added file with special characters without validation: {video}",
+                            details={'file': video, 'size': os.path.getsize(video)})
                         continue
                         
-                    is_valid, _ = validate_video_file(video)
+                    is_valid, validation_msg = validate_video_file(video)
                     if is_valid:
                         valid_videos.append(video)
-                        log_with_details('INFO', f"Validated file: {video}")
+                        log_with_details('INFO', f"Validated file: {video}",
+                            details={'file': video, 'size': os.path.getsize(video)})
+                    else:
+                        log_with_details('WARNING', f"File failed validation: {validation_msg}",
+                            details={'file': video, 'size': os.path.getsize(video), 'message': validation_msg})
             except OSError as e:
                 search_details.update({
                     'failed_file': video,
