@@ -473,100 +473,33 @@ def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
     
     for attempt in range(max_retries):
         # Search in multiple locations for better compatibility with Docker
-        cwd = os.getcwd()
-        search_details['current_directory'] = cwd
+        video_files = []
         
-        # Use a more comprehensive approach to find files
-        all_files = []
-        
-        # Check current directory with full pattern matching
+        # Look for all MP4 files in the root directory (simpler approach)
         for file in os.listdir('.'):
             if file.lower().endswith('.mp4'):
-                all_files.append(os.path.abspath(file))
+                video_files.append(os.path.abspath(file))
                 
-        # Check webapp directory if it exists
-        if os.path.exists('webapp'):
-            for file in os.listdir('webapp'):
-                if file.lower().endswith('.mp4'):
-                    all_files.append(os.path.abspath(os.path.join('webapp', file)))
+        # Log what we found
+        log_with_details('INFO', f"Searching for video files (attempt {attempt + 1}/{max_retries})",
+            details={'found_files': len(video_files), 'files': video_files})
         
-        # Check processed_videos directory if it exists
-        if os.path.exists('processed_videos'):
-            for file in os.listdir('processed_videos'):
-                if file.lower().endswith('.mp4'):
-                    all_files.append(os.path.abspath(os.path.join('processed_videos', file)))
-        
-        # Check webapp/processed_videos directory if it exists
-        if os.path.exists(os.path.join('webapp', 'processed_videos')):
-            for file in os.listdir(os.path.join('webapp', 'processed_videos')):
-                if file.lower().endswith('.mp4'):
-                    all_files.append(os.path.abspath(os.path.join('webapp', 'processed_videos', file)))
-        
-        search_details.update({
-            'attempt': attempt + 1,
-            'found_files': len(all_files),
-            'files': all_files
-        })
-        
-        log_with_details('INFO', f"Searching for valid video files (attempt {attempt + 1}/{max_retries})",
-            details=search_details)
-        
+        # Filter files by size
         valid_videos = []
-        for video in all_files:
-            try:
-                if os.path.exists(video) and os.path.getsize(video) >= min_size_bytes:
-                    # For filenames with special characters or spaces, skip the ffprobe validation
-                    # which might fail due to shell escaping issues
-                    if "'" in video or '"' in video or ' ' in video or any(char in video for char in "()[]{}$&%#@!"):
-                        valid_videos.append(video)
-                        log_with_details('INFO', f"Added file with special characters without validation: {video}",
-                            details={'file': video, 'size': os.path.getsize(video)})
-                        continue
-                        
-                    is_valid, validation_msg = validate_video_file(video)
-                    if is_valid:
-                        valid_videos.append(video)
-                        log_with_details('INFO', f"Validated file: {video}",
-                            details={'file': video, 'size': os.path.getsize(video)})
-                    else:
-                        log_with_details('WARNING', f"File failed validation: {validation_msg}",
-                            details={'file': video, 'size': os.path.getsize(video), 'message': validation_msg})
-            except OSError as e:
-                search_details.update({
-                    'failed_file': video,
-                    'error': str(e)
-                })
-                log_with_details('WARNING', f"Error checking video file {video}",
-                    details=search_details)
-                continue
-
+        for video in video_files:
+            if os.path.exists(video) and os.path.getsize(video) >= min_size_bytes:
+                valid_videos.append(video)
+                
         if valid_videos:
+            # Just use the most recent file
             latest_video = max(valid_videos, key=os.path.getctime)
-            search_details.update({
-                'valid_videos': valid_videos,
-                'selected_video': latest_video,
-                'success': True
-            })
-            log_with_details('INFO', f"Found valid video file: {latest_video}",
-                details=search_details)
+            log_with_details('INFO', f"Found valid video file: {latest_video}")
             return latest_video
-
-        elapsed = (datetime.now() - start_time).total_seconds()
-        if elapsed >= (max_retries * delay):
-            search_details.update({
-                'timeout': True,
-                'elapsed_seconds': elapsed
-            })
-            log_with_details('ERROR', "Timeout waiting for valid video file",
-                details=search_details)
-            break
             
-        log_with_details('INFO', f"No valid video file found yet",
-            details=search_details)
-        time.sleep(delay)
-
-    log_with_details('ERROR', "Failed to find valid video file",
-        details=search_details)
+        # No valid videos found, sleep and try again
+        if attempt < max_retries - 1:
+            time.sleep(delay)
+    
     return None
 
 def cleanup_video(video_file):
