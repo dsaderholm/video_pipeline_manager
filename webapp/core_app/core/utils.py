@@ -636,8 +636,19 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
                 details={'video_file': video_file, 'abs_path': abs_video_file, 'safe_path': safe_video_path, 'error': str(e)})
             return None, None
 
-        # Use the original name from the generator, falling back to the filename only if necessary
-        video_title = os.path.splitext(task_data.get('original_name', os.path.basename(video_file)))[0]
+        # Extract the original name, ensuring it exists
+        original_name = task_data.get('original_name', "").strip()
+
+        # If the original name is missing, log a warning and use the filename instead
+        if not original_name:
+            log_with_details('WARNING', "Original name is missing, falling back to filename",
+                             details={'task_id': task_data.get('id'), 'video_file': video_file})
+            original_name = os.path.basename(video_file)
+
+        video_title = os.path.splitext(original_name)[0]  # Remove extension
+
+        log_with_details('INFO', f"Final video title for description: {video_title}",
+                         details={'task_id': task_data.get('id'), 'original_name': original_name, 'video_file': video_file})
         
         log_with_details('INFO', f"Using video title for description: {video_title}",
             task_id=task_data.get('id'),
