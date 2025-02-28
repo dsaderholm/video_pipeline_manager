@@ -617,13 +617,8 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
     }
     
     try:
-        # Use absolute path for video file but avoid adding /app/ multiple times
+        # Use absolute path for video file
         abs_video_file = os.path.abspath(video_file)
-        # Log the original and absolute paths to debug
-        log_with_details('DEBUG', f"Video file paths",
-            task_id=task_data.get('id'),
-            details={'original_path': video_file, 'absolute_path': abs_video_file})
-            
         safe_video_path, _ = create_safe_filename(abs_video_file)
         try:
             # For processed videos, make a copy instead of moving
@@ -641,17 +636,14 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
                 details={'video_file': video_file, 'abs_path': abs_video_file, 'safe_path': safe_video_path, 'error': str(e)})
             return None, None
 
-        # Always use the original name from the database (without file extension) for the description
-        # This ensures consistent naming that doesn't get corrupted by path issues
-        if original_name := os.path.splitext(task_data['original_name'])[0]:
-            video_title = original_name
-        else:
-            # Fallback to the base filename without path if no original name
-            video_title = os.path.splitext(os.path.basename(video_file))[0]
-            
+        # CRITICAL FIX: Extract the actual video filename from the path, not the task data
+        # This ensures we use the actual video name, not the database-stored name
+        actual_filename = os.path.basename(video_file)
+        video_title = os.path.splitext(actual_filename)[0]  # Remove extension
+        
         log_with_details('INFO', f"Using video title for description: {video_title}",
             task_id=task_data.get('id'),
-            details={'original_name': task_data.get('original_name', 'None'), 'task_name': task_data['name']})
+            details={'video_title': video_title, 'from_path': video_file})
     
         # Set default values for platform data
         platform_defaults = {
@@ -676,43 +668,20 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
             hashtags = ' '.join(tags)
 
         # Format the command with all required parameters
-        # Use quotes for paths with spaces instead of backslashes to ensure consistent behavior
-        try:
-            formatted_cmd = cmd_template.format(
-                video=f'"{safe_video_path}"',  # Use quotes instead of escaping
-                description=video_title,
-                account=platform_data['account_name'],
-                sound=task_data['sound_name'],
-                volume=task_data['sound_volume'],
-                hashtags=hashtags,
-                input=f'"{safe_video_path}"'  # Also handle the input parameter for utilities
-            )
-        except KeyError as e:
-            # If the format string contains a key we don't have, log it and add defaults
-            log_with_details('WARNING', f"Missing key in command template: {str(e)}",
-                task_id=task_data.get('id'), 
-                details={'cmd_template': cmd_template})
-            
-            # Create a dict with all possible placeholders
-            all_params = {
-                'video': f'"{safe_video_path}"',
-                'description': video_title,
-                'account': platform_data['account_name'],
-                'sound': task_data['sound_name'],
-                'volume': task_data['sound_volume'],
-                'hashtags': hashtags,
-                'input': f'"{safe_video_path}"'
-            }
-            
-            # Try to format again with the complete dictionary
-            formatted_cmd = cmd_template.format(**all_params)
+        formatted_cmd = cmd_template.format(
+            video=f'"{safe_video_path}"',  # Use quotes to handle spaces in path
+            description=video_title,
+            account=platform_data['account_name'],
+            sound=task_data['sound_name'],
+            volume=task_data['sound_volume'],
+            hashtags=hashtags,
+            input=f'"{safe_video_path}"'  # Also handle the input parameter for utilities
+        )
         
-        # Log the original and formatted commands for debugging
         upload_details.update({
             'safe_video_path': safe_video_path,
             'video_title': video_title,
-            'formatted_command': formatted_cmd,
-            'original_command': cmd_template
+            'formatted_command': formatted_cmd
         })
         
         log_with_details('INFO', "Successfully formatted upload command", 
@@ -724,4 +693,4 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
         upload_details['error'] = str(e)
         log_with_details('ERROR', f"Error formatting upload command: {str(e)}", 
             details=upload_details)
-        return None, None  # Return None instead of raising to allow for fallbacks
+        raise

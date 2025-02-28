@@ -477,10 +477,13 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
                 update_task_status(task_id, 'failed', 'failed', None, conn)
                 raise Exception(error_msg)
 
+            # Get the full actual filename including extension
             original_name = os.path.basename(current_video_file)
+            # Get just the name part for logging
+            display_name = os.path.splitext(original_name)[0]
             log_with_task_details('INFO', f"Using generated video filename",
                 task_id=task_id,
-                details={'video_name': original_name})
+                details={'video_name': display_name})
 
             files_to_cleanup.add(current_video_file)
 
