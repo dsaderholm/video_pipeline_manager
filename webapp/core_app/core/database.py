@@ -20,6 +20,7 @@ class DatabaseManager:
     _instance = None
     _lock = threading.Lock()
     _connection_pool = {}
+    _in_transaction = {}  # Track which connections are in transactions
     
     def __init__(self):
         self.init_db()
@@ -48,11 +49,12 @@ class DatabaseManager:
                 # Set WAL mode and optimize for concurrency
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.execute("PRAGMA synchronous=NORMAL")
-                conn.execute("PRAGMA busy_timeout=60000")  # Increased to 60-second timeout
-                conn.execute("PRAGMA cache_size=-64000")   # Increased to 64MB cache
+                conn.execute("PRAGMA busy_timeout=120000")  # Increased to 120-second timeout
+                conn.execute("PRAGMA cache_size=-64000")    # 64MB cache
                 conn.execute("PRAGMA temp_store=MEMORY")
-                conn.execute("PRAGMA mmap_size=30000000000")  # 30GB memory map
+                conn.execute("PRAGMA mmap_size=30000000000") # 30GB memory map
                 conn.execute("PRAGMA page_size=4096")
+                conn.execute("PRAGMA wal_autocheckpoint=1000") # Increase checkpoint threshold
                 
                 # Create tables if they don't exist
                 conn.executescript('''
@@ -134,7 +136,7 @@ class DatabaseManager:
             
         conn = sqlite3.connect(
             db_path,
-            timeout=60.0,  # 60-second connection timeout
+            timeout=120.0,  # 120-second connection timeout
             isolation_level=None,  # Autocommit mode
             check_same_thread=False  # Allow cross-thread access
         )
@@ -142,7 +144,7 @@ class DatabaseManager:
         # Enable WAL mode for this connection
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=60000")
+        conn.execute("PRAGMA busy_timeout=120000")  # 120-second timeout
         conn.execute("PRAGMA temp_store=MEMORY")
         conn.execute("PRAGMA cache_size=-64000")
         
@@ -176,15 +178,37 @@ class DatabaseManager:
                         except:
                             pass
                         del self._connection_pool[conn_key]
+                        if conn_key in self._in_transaction:
+                            del self._in_transaction[conn_key]
                 
                 # Create new connection if needed
                 if conn_key not in self._connection_pool:
                     self._connection_pool[conn_key] = self._create_connection()
+                    self._in_transaction[conn_key] = False
                 
                 conn = self._connection_pool[conn_key]
                 
                 # Test connection
                 conn.execute("SELECT 1")
+                
+                # Track transaction state
+                def begin_transaction():
+                    self._in_transaction[conn_key] = True
+                
+                def end_transaction():
+                    self._in_transaction[conn_key] = False
+                
+                # Monkey patch the connection to track transactions
+                original_execute = conn.execute
+                def transaction_tracking_execute(sql, *args, **kwargs):
+                    sql_upper = sql.upper().strip()
+                    if sql_upper.startswith("BEGIN"):
+                        begin_transaction()
+                    elif sql_upper in ("COMMIT", "ROLLBACK"):
+                        end_transaction()
+                    return original_execute(sql, *args, **kwargs)
+                
+                conn.execute = transaction_tracking_execute
                 
                 yield conn
                 return
@@ -213,6 +237,8 @@ class DatabaseManager:
                     except:
                         pass
                     del self._connection_pool[conn_key]
+                    if conn_key in self._in_transaction:
+                        del self._in_transaction[conn_key]
                 raise
                 
             except Exception as e:
@@ -224,6 +250,8 @@ class DatabaseManager:
                     except:
                         pass
                     del self._connection_pool[conn_key]
+                    if conn_key in self._in_transaction:
+                        del self._in_transaction[conn_key]
                 raise
         
         if last_error:
@@ -242,10 +270,33 @@ class DatabaseManager:
         """Clean up all database connections"""
         for conn_key, conn in self._connection_pool.items():
             try:
+                # Check if transaction is active and try to rollback
+                if conn_key in self._in_transaction and self._in_transaction[conn_key]:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except:
+                        pass
                 conn.close()
             except:
                 pass
         self._connection_pool.clear()
+        self._in_transaction.clear()
+
+    def checkpoint_wal(self):
+        """Force a WAL checkpoint to prevent the WAL file from growing too large"""
+        conn = None
+        try:
+            conn = self._create_connection()
+            conn.execute("PRAGMA wal_checkpoint(FULL)")
+            conn.close()
+            logger.info("WAL checkpoint completed successfully")
+        except Exception as e:
+            logger.error(f"WAL checkpoint failed: {e}")
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
 
 # Create the singleton instance
 db = DatabaseManager.get_instance()
