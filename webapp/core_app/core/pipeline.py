@@ -90,11 +90,12 @@ def check_and_set_lock(task_id=None):
         try:
             # Create a new connection directly instead of using the contextmanager to avoid generator issues
             conn = db._create_connection()
+            c = conn.cursor()
+            
+            # Start transaction to prevent race conditions
+            db.begin_transaction(conn)
             
             # First check current lock status
-            c = conn.cursor()
-            c.execute("BEGIN IMMEDIATE")  # Start transaction to prevent race conditions
-            
             c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
             current_lock = c.fetchone()
             lock_details['current_lock'] = {
@@ -144,7 +145,7 @@ def check_and_set_lock(task_id=None):
             }
             
             # Commit the transaction
-            c.execute("COMMIT")
+            db.commit_transaction(conn)
             
             log_with_task_details('INFO', 
                 "Successfully acquired pipeline lock" if acquired else "Failed to acquire pipeline lock",
@@ -163,7 +164,7 @@ def check_and_set_lock(task_id=None):
             # Try to rollback if possible
             if conn:
                 try:
-                    conn.execute("ROLLBACK")
+                    db.rollback_transaction(conn)
                 except:
                     pass
             return False
@@ -189,7 +190,9 @@ def release_lock(task_id=None):
             # Create a new connection directly instead of using the contextmanager
             conn = db._create_connection()
             c = conn.cursor()
-            c.execute("BEGIN IMMEDIATE")  # Start transaction to prevent race conditions
+            
+            # Start transaction to prevent race conditions
+            db.begin_transaction(conn)
             
             # Get current lock status before release
             c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
@@ -233,7 +236,7 @@ def release_lock(task_id=None):
             }
             
             # Commit the transaction
-            c.execute("COMMIT")
+            db.commit_transaction(conn)
             
             if released:
                 log_with_task_details('INFO', 
@@ -258,7 +261,7 @@ def release_lock(task_id=None):
             # Try to rollback if possible
             if conn:
                 try:
-                    conn.execute("ROLLBACK")
+                    db.rollback_transaction(conn)
                 except:
                     pass
                     
@@ -1178,7 +1181,9 @@ def force_release_lock():
         # Create a direct connection instead of using contextmanager
         conn = db._create_connection()
         c = conn.cursor()
-        c.execute("BEGIN IMMEDIATE")  # Start transaction to prevent race conditions
+        
+        # Start transaction to prevent race conditions
+        db.begin_transaction(conn)
         
         # Get current lock state for logging
         c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
@@ -1208,7 +1213,7 @@ def force_release_lock():
             'locked_at': final_lock[2] if final_lock else None
         }
         
-        c.execute("COMMIT")
+        db.commit_transaction(conn)
         
         log_with_task_details('INFO', 
             "Successfully force-released pipeline lock" if released else "No lock needed to be released",
@@ -1227,7 +1232,7 @@ def force_release_lock():
         # Try to rollback if possible
         if conn:
             try:
-                conn.execute("ROLLBACK")
+                db.rollback_transaction(conn)
             except:
                 pass
         

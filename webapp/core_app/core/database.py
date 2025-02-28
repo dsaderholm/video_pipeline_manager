@@ -169,7 +169,7 @@ class DatabaseManager:
                 if conn_key in self._connection_pool:
                     try:
                         # Test existing connection
-                        self._connection_pool[conn_key].execute("SELECT 1")
+                        self._connection_pool[conn_key].cursor().execute("SELECT 1")
                     except (sqlite3.ProgrammingError, sqlite3.OperationalError):
                         # Connection is invalid, remove it from pool
                         logger.warning(f"Detected invalid connection in pool. Creating new connection.")
@@ -189,26 +189,10 @@ class DatabaseManager:
                 conn = self._connection_pool[conn_key]
                 
                 # Test connection
-                conn.execute("SELECT 1")
+                conn.cursor().execute("SELECT 1")
                 
-                # Track transaction state
-                def begin_transaction():
-                    self._in_transaction[conn_key] = True
-                
-                def end_transaction():
-                    self._in_transaction[conn_key] = False
-                
-                # Monkey patch the connection to track transactions
-                original_execute = conn.execute
-                def transaction_tracking_execute(sql, *args, **kwargs):
-                    sql_upper = sql.upper().strip()
-                    if sql_upper.startswith("BEGIN"):
-                        begin_transaction()
-                    elif sql_upper in ("COMMIT", "ROLLBACK"):
-                        end_transaction()
-                    return original_execute(sql, *args, **kwargs)
-                
-                conn.execute = transaction_tracking_execute
+                # We will track transactions through the execute_transaction method instead
+                # of monkey-patching the connection object
                 
                 yield conn
                 return
@@ -297,6 +281,24 @@ class DatabaseManager:
                     conn.close()
                 except:
                     pass
+                    
+    def begin_transaction(self, conn):
+        """Mark the connection as being in a transaction"""
+        conn_key = self._get_connection_key()
+        conn.execute("BEGIN IMMEDIATE")
+        self._in_transaction[conn_key] = True
+
+    def commit_transaction(self, conn):
+        """Commit the transaction and mark the connection as not in a transaction"""
+        conn_key = self._get_connection_key()
+        conn.commit()
+        self._in_transaction[conn_key] = False
+
+    def rollback_transaction(self, conn):
+        """Rollback the transaction and mark the connection as not in a transaction"""
+        conn_key = self._get_connection_key()
+        conn.rollback()
+        self._in_transaction[conn_key] = False
 
 # Create the singleton instance
 db = DatabaseManager.get_instance()
