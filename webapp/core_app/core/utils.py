@@ -639,7 +639,7 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
         # CRITICAL FIX: Extract the actual video filename from the path, not the task data
         # This ensures we use the actual video name, not the database-stored name
         actual_filename = os.path.basename(video_file)
-        video_title = os.path.splitext(actual_filename)[0]  # Remove extension
+        video_title = os.path.splitext(task_data.get('original_name', actual_filename))[0]
         
         log_with_details('INFO', f"Using video title for description: {video_title}",
             task_id=task_data.get('id'),
