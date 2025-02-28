@@ -477,7 +477,7 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
                 update_task_status(task_id, 'failed', 'failed', None, conn)
                 raise Exception(error_msg)
 
-            original_name = os.path.splitext(os.path.basename(current_video_file))[0]
+            original_name = os.path.basename(current_video_file)
             log_with_task_details('INFO', f"Using generated video filename",
                 task_id=task_id,
                 details={'video_name': original_name})
