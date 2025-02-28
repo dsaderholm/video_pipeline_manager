@@ -627,14 +627,12 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
                 details={'video_file': video_file, 'abs_path': abs_video_file, 'safe_path': safe_video_path, 'error': str(e)})
             return None, None
 
-        # Always use the original name from the database
-        video_title = os.path.splitext(task_data['original_name'])[0]
-        if not video_title:
-            # Only fall back to task name if somehow original_name is empty
-            video_title = task_data['name']
-            log_with_details('WARNING', "Using task name as fallback - original name was empty",
-                details={'task_id': task_data.get('id'), 'task_name': task_data['name']})
-        
+        # Always use the original name from the database - this is the name from the generator
+        video_title = task_data['original_name']
+        log_with_details('INFO', f"Using original video title for description: {video_title}",
+            task_id=task_data.get('id'),
+            details={'original_name': video_title, 'task_name': task_data['name']})
+    
         # Set default values for platform data
         platform_defaults = {
             'account_name': 'default_account',

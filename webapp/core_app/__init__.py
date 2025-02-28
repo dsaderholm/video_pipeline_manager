@@ -101,6 +101,32 @@ def cleanup_preview_files():
 
 from webapp.core_app.core.pipeline import process_night_queue, process_scheduled_uploads  # Updated import path
 
+def cleanup_all_processed_videos():
+    """Clean up all processed videos"""
+    processed_dir = os.path.join(APP_ROOT, 'processed_videos')
+    if not os.path.exists(processed_dir):
+        return
+        
+    app_logger.info("Starting processed videos cleanup")
+    deleted_count = 0
+    error_count = 0
+    
+    for file in os.listdir(processed_dir):
+        if not file.endswith('.mp4'):
+            continue
+            
+        file_path = os.path.join(processed_dir, file)
+        try:
+            os.remove(file_path)
+            deleted_count += 1
+            logger.debug(f"Deleted processed video: {file}")
+        except Exception as e:
+            error_count += 1
+            logger.error(f"Error cleaning up processed video {file_path}: {e}")
+    
+    if deleted_count > 0 or error_count > 0:
+        app_logger.info(f"Processed video cleanup complete. Deleted: {deleted_count}, Errors: {error_count}")
+
 def init_scheduler(app):
     """Initialize the APScheduler with improved settings and error handling"""
     global _scheduler_initialized
@@ -183,6 +209,15 @@ def init_scheduler(app):
             misfire_grace_time=240,  # 4 minute grace time
             max_instances=1,
             coalesce=True
+        )
+
+        # Add processed videos cleanup job
+        scheduler.add_job(
+            id='cleanup_processed',
+            func=cleanup_all_processed_videos,
+            trigger='interval',
+            hours=24,  # Run daily
+            next_run_time=datetime.now() + timedelta(minutes=10)
         )
 
         # Log existing tasks

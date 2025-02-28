@@ -852,6 +852,18 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=F
             WHERE id = ?
         """, (video_id,))
 
+        # Delete the processed video file after successful upload
+        if os.path.exists(processed_path):
+            try:
+                os.remove(processed_path)
+                log_with_task_details('INFO', f"Removed processed video after successful upload",
+                    task_id=task_id,
+                    details={'video_id': video_id, 'file_path': processed_path})
+            except Exception as e:
+                log_with_task_details('WARNING', f"Failed to remove processed video: {str(e)}",
+                    task_id=task_id,
+                    details={'error': str(e), 'video_id': video_id, 'file_path': processed_path})
+
         # Check if this is the last pending video for the task
         c.execute("""
             SELECT COUNT(*) 
