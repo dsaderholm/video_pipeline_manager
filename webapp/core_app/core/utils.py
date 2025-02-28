@@ -636,10 +636,8 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
                 details={'video_file': video_file, 'abs_path': abs_video_file, 'safe_path': safe_video_path, 'error': str(e)})
             return None, None
 
-        # CRITICAL FIX: Extract the actual video filename from the path, not the task data
-        # This ensures we use the actual video name, not the database-stored name
-        actual_filename = os.path.basename(video_file)
-        video_title = os.path.splitext(task_data.get('original_name', actual_filename))[0]
+        # Use the original name from the generator, falling back to the filename only if necessary
+        video_title = os.path.splitext(task_data.get('original_name', os.path.basename(video_file)))[0]
         
         log_with_details('INFO', f"Using video title for description: {video_title}",
             task_id=task_data.get('id'),
