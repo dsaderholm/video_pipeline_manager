@@ -478,7 +478,7 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
                 raise Exception(error_msg)
 
             # Get the full actual filename including extension
-            original_name = os.path.basename(current_video_file)
+            original_name = original_filename if original_filename else os.path.basename(current_video_file)
             # Get just the name part for logging
             display_name = os.path.splitext(original_name)[0]
             log_with_task_details('INFO', f"Using generated video filename",
