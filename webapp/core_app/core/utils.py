@@ -679,7 +679,7 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
 
         # Format the command with all required parameters
         formatted_cmd = cmd_template.format(
-            video=f'"{safe_video_path}"',  # Use quotes to handle spaces in path
+            video=f'{safe_video_path}',  # Use quotes to handle spaces in path
             description=video_title,
             account=platform_data['account_name'],
             sound=task_data['sound_name'],
