@@ -997,9 +997,23 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, dry_
                 # Immediate upload for manual runs or catchup
                 if not schedule_time or schedule_time <= datetime.now():
                     try:
-                        # Get the original name from the video path
-                        original_name = os.path.basename(video_path)
-
+                        # Fetch the correct original name from the database using video_id
+                        # This is the critical fix
+                        c = conn.cursor()
+                        c.execute("SELECT original_name FROM generated_videos WHERE id = ?", (video_id,))
+                        original_name_result = c.fetchone()
+                        if original_name_result and original_name_result[0]:
+                            original_name = original_name_result[0]
+                            log_with_task_details('INFO', f"Retrieved original name from database for upload",
+                                task_id=task_id,
+                                details={'original_name': original_name, 'video_id': video_id})
+                        else:
+                            # Fallback only if database lookup fails
+                            original_name = os.path.basename(video_path)
+                            log_with_task_details('WARNING', f"Failed to retrieve original name from database, using fallback",
+                                task_id=task_id,
+                                details={'fallback_name': original_name, 'video_id': video_id})
+                        
                         upload_result = process_video_upload(
                             task_id, 
                             (video_id, original_name, video_path, datetime.now().isoformat()),
