@@ -636,23 +636,22 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
                 details={'video_file': video_file, 'abs_path': abs_video_file, 'safe_path': safe_video_path, 'error': str(e)})
             return None, None
 
-        # Extract the original name, ensuring it exists
+        # Always use the original name from task_data for the description
+        # This is the key fix - use original_name directly without overwriting it
         original_name = task_data.get('original_name', "").strip()
 
         # If the original name is missing, log a warning and use the filename instead
         if not original_name:
             log_with_details('WARNING', "Original name is missing, falling back to filename",
-                             details={'task_id': task_data.get('id'), 'video_file': video_file})
+                            details={'task_id': task_data.get('id'), 'video_file': video_file})
             original_name = os.path.basename(video_file)
 
-        video_title = os.path.splitext(original_name)[0]  # Remove extension
+        # Remove extension for the description/title
+        video_title = os.path.splitext(original_name)[0]
 
-        log_with_details('INFO', f"Final video title for description: {video_title}",
-                         details={'task_id': task_data.get('id'), 'original_name': original_name, 'video_file': video_file})
-        
-        log_with_details('INFO', f"Using video title for description: {video_title}",
+        log_with_details('INFO', f"Using original video title for description: {video_title}",
             task_id=task_data.get('id'),
-            details={'video_title': video_title, 'from_path': video_file})
+            details={'original_name': original_name, 'video_title': video_title, 'from_path': video_file})
     
         # Set default values for platform data
         platform_defaults = {
