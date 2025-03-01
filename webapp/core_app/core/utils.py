@@ -608,6 +608,7 @@ def create_safe_filename(original_path):
         details=filename_details)
     return safe_path, original_name
 
+# This is the problematic function in utils.py that needs to be modified
 def format_upload_command(cmd_template, video_file, task_data, platform_data):
     """Format an upload command with improved error handling and validation"""
     upload_details = {
@@ -636,8 +637,9 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
                 details={'video_file': video_file, 'abs_path': abs_video_file, 'safe_path': safe_video_path, 'error': str(e)})
             return None, None
 
-        # Always use the original name from task_data for the description
-        # This is the key fix - use original_name directly without overwriting it
+        # THE FIX: Prioritize the original name from the database
+        # In process_video_upload, task_data already has original_name from the database
+        # This preserves the original name fetched from the generator
         original_name = task_data.get('original_name', "").strip()
 
         # If the original name is missing, log a warning and use the filename instead

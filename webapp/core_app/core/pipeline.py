@@ -709,7 +709,7 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=F
             'hashtags': task_data[1],
             'sound_name': task_data[2],
             'sound_volume': task_data[3],
-            'original_name': original_name  # Pass the full original name from database
+            'original_name': original_name  # This is the key change - make sure we're using the database value
         }
 
         if dry_run:
