@@ -328,6 +328,21 @@ def init_scheduler(app):
         scheduler.start()
         _scheduler_initialized = True
         logger.info("Scheduler initialized successfully")
+        
+        # Add startup check for missed night processing
+        if not scheduler.running:
+            logger.error("Scheduler not running, skipping missed processing check")
+        else:
+            # Add a job to check for missed processing on startup with a slight delay
+            scheduler.add_job(
+                id='startup_missed_processing_check',
+                func='webapp.core_app.core.pipeline:check_for_missed_processing',
+                trigger='date',
+                run_date=datetime.now() + timedelta(seconds=30),
+                args=[True],  # Force process
+                misfire_grace_time=3600  # 1 hour grace time
+            )
+            logger.info("Scheduled missed processing check for startup")
 
     return scheduler
 

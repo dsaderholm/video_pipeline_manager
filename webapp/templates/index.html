@@ -326,12 +326,7 @@
 								<i class="fas fa-eye mr-1"></i>
 								Preview
 							</button>
-							<button onclick="dryRunTask(${task.id})"
-								class="inline-flex items-center px-3 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded-md text-xs transition-colors"
-								data-tooltip="Test without uploading">
-								<i class="fas fa-vial mr-1"></i>
-								Dry Run
-							</button>
+							
                             <button onclick="deleteTask(${task.id})"
                                 class="inline-flex items-center px-3 py-1 bg-red-600 hover:bg-red-700 text-white rounded-md text-xs transition-colors"
                                 data-tooltip="Delete task">
@@ -516,17 +511,7 @@
 		}
 	}
 
-	async function dryRunTask(id) {
-		try {
-			const response = await fetch(`/api/tasks/${id}/dry-run`, {
-				method: 'POST'
-			});
-			const result = await response.json();
-			showToast(result.message, result.success ? 'success' : 'error');
-		} catch (error) {
-			showToast('Error during dry run: ' + error.message, 'error');
-		}
-	}
+
 
     // =====================================
     // Data Loading

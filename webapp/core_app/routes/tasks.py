@@ -723,35 +723,7 @@ def download_preview(id):
             'message': f'Error downloading preview: {str(e)}'
         }), 500
 
-@tasks_bp.route('/api/tasks/<int:id>/dry-run', methods=['POST'])
-def dry_run_task(id):
-    try:
-        # First verify task exists
-        with db.get_connection() as conn:
-            c = conn.cursor()
-            c.execute("SELECT id, status FROM tasks WHERE id = ?", (id,))
-            task = c.fetchone()
-            if not task:
-                return jsonify({
-                    'success': False,
-                    'message': f'Task {id} not found'
-                }), 404
 
-        # Run the pipeline in dry run mode
-        from webapp.core_app.core.pipeline import process_video_pipeline
-        success = process_video_pipeline(id, dry_run=True)
-        
-        return jsonify({
-            'success': success,
-            'message': 'Dry run completed successfully' if success else 'Dry run failed'
-        })
-            
-    except Exception as e:
-        logger.error(f"Error dry running task {id}: {str(e)}")
-        return jsonify({
-            'success': False,
-            'message': str(e)
-        }), 500
 
 @tasks_bp.route('/api/tasks/<int:id>/generate', methods=['POST'])
 def generate_task(id):
@@ -872,6 +844,33 @@ def upload_video(id, video_id):
             
     except Exception as e:
         logger.error(f"Error uploading video {video_id} for task {id}: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        }), 500
+
+@tasks_bp.route('/api/tasks/recover-missed', methods=['POST'])
+def recover_missed_processing():
+    """Force check and recovery of any missed night processing"""
+    try:
+        # Set flag for manual run to ensure uploads happen
+        setattr(current_app, 'manual_run', True)
+        
+        from webapp.core_app.core.pipeline import check_for_missed_processing
+        check_for_missed_processing(force_process=True)
+        
+        # Reset manual run flag
+        setattr(current_app, 'manual_run', False)
+        
+        return jsonify({
+            'success': True,
+            'message': 'Missed processing recovery completed'
+        })
+            
+    except Exception as e:
+        logger.error(f"Error recovering missed processing: {str(e)}")
+        # Reset manual run flag
+        setattr(current_app, 'manual_run', False)
         return jsonify({
             'success': False,
             'message': str(e)

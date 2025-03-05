@@ -58,7 +58,9 @@ Copy `.env.example` to `.env` and configure:
 - Application configuration
 - Upload folder path
 
-## Fallback System
+## Fallback Systems
+
+### Upload Fallback System
 
 The platform supports a cascading fallback system for uploads:
 1. Primary Upload: Main API endpoint for the platform
@@ -71,6 +73,18 @@ Each platform can be configured with:
 - Optional: Secondary fallback CURL command
 
 The system automatically tries each configured method in sequence until successful upload or all methods are exhausted.
+
+### Night Processing Fallback
+
+The application includes an intelligent fallback system for handling situations when the server is redeployed or restarted during the normal night processing window:
+
+1. **Automatic Detection**: On startup, the system automatically checks if any scheduled tasks from the previous day were missed due to downtime.
+
+2. **Recovery Process**: If missed tasks are detected, the system will automatically generate the videos and immediately upload them, avoiding the need for manual intervention.
+
+3. **Manual Recovery**: If needed, you can trigger a manual recovery using the API endpoint: `POST /api/tasks/recover-missed`
+
+This ensures that even if the server is redeployed during the day, your scheduled content will still be generated and uploaded appropriately.
 
 ## API Documentation
 

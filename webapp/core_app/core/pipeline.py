@@ -385,12 +385,12 @@ def get_next_day_schedules(schedule_str):
     
     return scheduled_times
 
-def process_video_generation(task_id, schedule_time=None, preview_mode=False, dry_run=False, conn=None, parent_has_lock=False):
+def process_video_generation(task_id, schedule_time=None, preview_mode=False, conn=None, parent_has_lock=False):
     """Handle video generation and utility processing"""
     lock_acquired = False
     generation_details = {
         'task_id': task_id,
-        'mode': 'dry_run' if dry_run else 'preview' if preview_mode else 'normal',
+        'mode': 'preview' if preview_mode else 'normal',
         'schedule_time': schedule_time.isoformat() if schedule_time else None,
         'start_time': datetime.now().isoformat()
     }
@@ -406,7 +406,7 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
     
     try:
         # Only acquire lock if parent doesn't have one
-        if not (dry_run or preview_mode or parent_has_lock):
+        if not (preview_mode or parent_has_lock):
             lock_acquired = check_and_set_lock(task_id)
             if not lock_acquired:
                 log_with_task_details('INFO', "Another task is currently running",
@@ -440,11 +440,6 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
                 return None
 
             # Generate video
-            if dry_run:
-                log_with_task_details('INFO', "[DRY RUN] Would execute generator",
-                    task_id=task_id,
-                    details=generation_details)
-                return True
 
             try:
                 success, stdout, original_filename = execute_curl(task_data[-1], retries=3, retry_delay=5, validate_output=True, mode='generator')
@@ -580,7 +575,7 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
         log_with_task_details('ERROR', f"Video generation failed: {str(e)}",
             task_id=task_id,
             details={'error': str(e), **generation_details})
-        if not (dry_run or preview_mode):
+        if not preview_mode:
             update_task_status(task_id, 'failed', 'failed', None, conn)
         raise
 
@@ -614,11 +609,11 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, dr
                     task_id=task_id,
                     details={'error': str(e)})
 
-def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=False, conn=None):
+def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None):
     """Handle video uploading to platforms"""
     upload_details = {
         'task_id': task_id,
-        'mode': 'dry_run' if dry_run else 'preview' if preview_mode else 'normal',
+        'mode': 'preview' if preview_mode else 'normal',
         'start_time': datetime.now().isoformat()
     }
     
@@ -712,8 +707,7 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=F
             'original_name': original_name  # This is the key change - make sure we're using the database value
         }
 
-        if dry_run:
-            return True
+
 
         # Process uploads
         c.execute("""
@@ -922,7 +916,7 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=F
         log_with_task_details('ERROR', f"Upload process failed: {str(e)}",
             task_id=task_id,
             details={'error': str(e), **upload_details})
-        if not (dry_run or preview_mode):
+        if not preview_mode:
             if video_info:
                 c.execute("""
                     UPDATE generated_videos 
@@ -938,11 +932,11 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=F
     finally:
         cleanup_files(files_to_cleanup)
 
-def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, dry_run=False):
+def process_video_pipeline(task_id, schedule_time=None, preview_mode=False):
     """Main pipeline process that coordinates generation and upload"""
     pipeline_details = {
         'task_id': task_id,
-        'mode': 'dry_run' if dry_run else 'preview' if preview_mode else 'normal',
+        'mode': 'preview' if preview_mode else 'normal',
         'schedule_time': schedule_time.isoformat() if schedule_time else None,
         'start_time': datetime.now().isoformat()
     }
@@ -951,14 +945,14 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, dry_
         task_id=task_id,
         details=pipeline_details)
     
-    # Don't update status or acquire lock for dry runs and previews
-    if not (dry_run or preview_mode):
+    # Don't update status or acquire lock for previews
+    if not preview_mode:
         update_task_status(task_id, 'running', 'pending')
     
     lock_acquired = False
     try:
         # Lock handling
-        if not (dry_run or preview_mode):
+        if not preview_mode:
             lock_acquired = check_and_set_lock(task_id)
             if not lock_acquired:
                 log_with_task_details('INFO', 
@@ -969,7 +963,7 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, dry_
         
         with db.get_connection() as conn:
             # Night processing check
-            if not (preview_mode or dry_run) and not should_process_at_night():
+            if not preview_mode and not should_process_at_night():
                 # Only proceed if this is a manual run
                 if not getattr(current_app, 'manual_run', False):
                     log_with_task_details('INFO', 
@@ -984,7 +978,6 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, dry_
                     task_id, 
                     schedule_time, 
                     preview_mode, 
-                    dry_run, 
                     conn,
                     parent_has_lock=lock_acquired
                 )
@@ -998,9 +991,6 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, dry_
             if preview_mode:
                 return generation_result[0] if isinstance(generation_result, tuple) else generation_result
             
-            if dry_run:
-                return True
-            
             # Handle upload for normal runs
             if generation_result and isinstance(generation_result, tuple):
                 video_path, video_id = generation_result
@@ -1009,11 +999,16 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, dry_
                     'id': video_id
                 }
                 
-                # Immediate upload for manual runs or catchup
-                if not schedule_time or schedule_time <= datetime.now():
+                # Immediate upload for manual runs, catchup, or fallback recovery
+                # Manual run is indicated by current_app.manual_run flag or missing schedule time
+                if not schedule_time or schedule_time <= datetime.now() or getattr(current_app, 'manual_run', False):
+                    log_with_task_details('INFO', f"Executing immediate video upload" + 
+                                               (" (manual run)" if getattr(current_app, 'manual_run', False) else ""),
+                        task_id=task_id,
+                        details={'manual_run': getattr(current_app, 'manual_run', False)})
+                    
                     try:
                         # Fetch the correct original name from the database using video_id
-                        # This is the critical fix
                         c = conn.cursor()
                         c.execute("SELECT original_name FROM generated_videos WHERE id = ?", (video_id,))
                         original_name_result = c.fetchone()
@@ -1033,7 +1028,6 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, dry_
                             task_id, 
                             (video_id, original_name, video_path, datetime.now().isoformat()),
                             preview_mode, 
-                            dry_run, 
                             conn
                         )
                         pipeline_details['upload_result'] = upload_result
@@ -1054,7 +1048,7 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, dry_
             f"Pipeline failed: {str(e)}",
             task_id=task_id,
             details={'error': str(e), **pipeline_details})
-        if not (dry_run or preview_mode):
+        if not preview_mode:
             update_task_status(task_id, 'failed', 'failed')
         raise
         
@@ -1077,8 +1071,81 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, dry_
                         task_id=task_id,
                         details={'error': str(force_e), **pipeline_details})
 
+def check_for_missed_processing(force_process=False):
+    """Check if any night processing was missed, typically after a restart
+    
+    Args:
+        force_process: If True, will process regardless of time window
+    """
+    try:
+        today = datetime.now().date()
+        yesterday = today - timedelta(days=1)
+        yesterday_day = yesterday.strftime('%A')[:3].lower()
+        
+        # Get yesterday's date at start of night processing time
+        night_hour, night_minute = map(int, os.getenv('NIGHT_PROCESSING_START', '22:00').split(':'))
+        yesterday_night_time = datetime.combine(yesterday, datetime.min.time().replace(hour=night_hour, minute=night_minute))
+        
+        logger.info(f"Checking for missed night processing from {yesterday_night_time}")
+        
+        with db.get_connection() as conn:
+            c = conn.cursor()
+            
+            # Find all tasks that should have run yesterday
+            c.execute("""
+                SELECT id, schedule 
+                FROM tasks 
+                WHERE status != 'failed'
+                AND processing_status != 'failed'
+                AND schedule LIKE ?
+            """, (f'%{yesterday_day}|%',))
+            
+            tasks = c.fetchall()
+            processed_count = 0
+            
+            for task_id, schedule in tasks:
+                # Check if we have any generated videos from yesterday
+                c.execute("""
+                    SELECT COUNT(*) FROM generated_videos
+                    WHERE task_id = ?
+                    AND DATE(generated_at) = DATE(?) 
+                """, (task_id, yesterday.strftime('%Y-%m-%d')))
+                
+                existing_count = c.fetchone()[0]
+                
+                if existing_count == 0 and (force_process or getattr(current_app, 'manual_run', False)):
+                    # No videos were generated yesterday for this task, generate now
+                    log_with_task_details('INFO', 
+                        f"Detected missed night processing for yesterday ({yesterday_day})",
+                        task_id=task_id)
+                    
+                    # Get today's schedule times for this task
+                    today_schedules = get_next_day_schedules(schedule)
+                    
+                    if today_schedules:
+                        # Process the task for today's schedules
+                        try:
+                            for schedule_time in today_schedules:
+                                process_video_generation(task_id, schedule_time, conn=conn)
+                                processed_count += 1
+                        except Exception as e:
+                            log_with_task_details('ERROR', 
+                                f"Failed to process missed task {task_id}: {str(e)}",
+                                task_id=task_id)
+            
+            if processed_count > 0:
+                logger.info(f"Recovered {processed_count} missed video generations")
+            else:
+                logger.info("No missed processing detected or recovery not needed")
+                
+    except Exception as e:
+        logger.error(f"Error checking for missed processing: {str(e)}")
+
 def process_night_queue():
     """Process pending tasks during night window"""
+    # First check if we need to recover from missed processing
+    check_for_missed_processing()
+    
     if not should_process_at_night():
         logger.debug("Outside night processing window, skipping night queue")
         return
