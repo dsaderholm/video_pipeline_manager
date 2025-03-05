@@ -884,7 +884,22 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, dry_run=F
         pending_count = c.fetchone()[0]
 
         if pending_count == 0:
-            update_task_status(task_id, 'completed', 'completed', None, conn)
+            # Make sure we check for ALL pending videos, not just ones with current status
+            c.execute("""
+                SELECT COUNT(*) 
+                FROM generated_videos 
+                WHERE task_id = ? AND upload_status = 'pending'
+                AND scheduled_time > datetime('now', 'localtime')
+            """, (task_id,))
+            future_pending_count = c.fetchone()[0]
+            
+            if future_pending_count == 0:
+                # Only mark the task as fully completed when there are no more pending videos at all
+                update_task_status(task_id, 'completed', 'completed', None, conn)
+            else:
+                # If there are still future scheduled videos, keep the task in progress
+                logger.info(f"Task {task_id} has {future_pending_count} future videos scheduled for upload")
+                update_task_status(task_id, 'pending', 'processed', None, conn)
 
         # Send email notification if enabled
         if task_data[4]:  # email_notify
@@ -1123,7 +1138,7 @@ def process_night_queue():
                     logger.error(f"Force release also failed after night processing: {str(force_e)}")
 
 def process_scheduled_uploads():
-    """Process tasks that are ready for upload"""
+    """Process tasks that are ready for upload - Modified to process ALL pending videos"""
     lock_acquired = False
     try:
         if not check_and_set_lock():
@@ -1133,6 +1148,8 @@ def process_scheduled_uploads():
         lock_acquired = True
         with db.get_connection() as conn:
             c = conn.cursor()
+            # Modified query to get ALL pending uploads for the current time
+            # Removed LIMIT 1 to process all pending videos
             c.execute('''
                 SELECT v.task_id, v.id, v.original_name, v.processed_path, v.scheduled_time
                 FROM generated_videos v
@@ -1141,31 +1158,44 @@ def process_scheduled_uploads():
                 AND v.scheduled_time <= datetime('now', 'localtime')
                 AND t.status != 'failed'
                 ORDER BY v.scheduled_time ASC
-                LIMIT 1
             ''')
-            pending_upload = c.fetchone()
+            pending_uploads = c.fetchall()
             
-            if pending_upload:
-                task_id, video_id, original_name, processed_path, scheduled_time = pending_upload
-                try:
-                    process_video_upload(
-                        task_id, 
-                        (video_id, original_name, processed_path, scheduled_time), 
-                        conn=conn
-                    )
-                except Exception as e:
-                    log_with_task_details('ERROR', 
-                        f"Failed to process upload for task {task_id}: {str(e)}",
-                        task_id=task_id,
-                        details={
-                            'error': str(e),
-                            'video_id': video_id,
-                            'scheduled_time': scheduled_time
-                        })
+            processed_count = 0
+            error_count = 0
+            
+            if pending_uploads:
+                logger.info(f"Found {len(pending_uploads)} pending videos to upload")
+                
+                for pending_upload in pending_uploads:
+                    task_id, video_id, original_name, processed_path, scheduled_time = pending_upload
+                    try:
+                        # Important: Don't let one failure prevent other uploads
+                        process_video_upload(
+                            task_id, 
+                            (video_id, original_name, processed_path, scheduled_time), 
+                            conn=conn
+                        )
+                        processed_count += 1
+                        logger.info(f"Successfully processed upload for video {video_id}, task {task_id}")
+                    except Exception as e:
+                        error_count += 1
+                        log_with_task_details('ERROR', 
+                            f"Failed to process upload for task {task_id}: {str(e)}",
+                            task_id=task_id,
+                            details={
+                                'error': str(e),
+                                'video_id': video_id,
+                                'scheduled_time': scheduled_time
+                            })
     except Exception as e:
         logger.error(f"Error in scheduled uploads processor: {str(e)}")
         
     finally:
+        # Log the summary of processed videos
+        if 'processed_count' in locals() and processed_count > 0:
+            logger.info(f"Scheduled uploads complete: Processed {processed_count} videos with {error_count} errors")
+            
         if lock_acquired:
             try:
                 release_lock()

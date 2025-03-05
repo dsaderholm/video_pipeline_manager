@@ -66,6 +66,7 @@ logger = app_logger
 # Now do the rest of the imports
 from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.jobstores.base import JobLookupError
 from webapp.core_app.core.database import db  # Updated import path
 
 load_dotenv()
@@ -220,7 +221,7 @@ def init_scheduler(app):
             next_run_time=datetime.now() + timedelta(minutes=10)
         )
 
-        # Log existing tasks
+        # Rebuild schedules for existing tasks
         try:
             with db.get_connection() as conn:
                 c = conn.cursor()
@@ -234,13 +235,91 @@ def init_scheduler(app):
                     
                     logger.info(f"Initializing scheduler with {len(tasks)} active tasks")
                     for task in tasks:
+                        task_id = task[0]
+                        task_name = task[1]
+                        task_schedule = task[2]
+                        processing_status = task[3]
+                        
                         task_dict = {
-                            'id': task[0],
-                            'name': task[1],
-                            'schedule': task[2],
-                            'processing_status': task[3]
+                            'id': task_id,
+                            'name': task_name,
+                            'schedule': task_schedule,
+                            'processing_status': processing_status
                         }
                         logger.info(f"Task {task_dict['id']} ({task_dict['name']}): Schedule = {task_dict['schedule']}, Processing = {task_dict['processing_status']}")
+                        
+                        # Add night processing job for each task
+                        night_job_id = f'task_{task_id}_night_processing'
+                        night_hour, night_minute = os.getenv('NIGHT_PROCESSING_START', '22:00').split(':')
+                        
+                        # Replace the job if it exists
+                        try:
+                            # First try to remove any existing job
+                            try:
+                                scheduler.remove_job(night_job_id)
+                            except JobLookupError:
+                                pass  # Job doesn't exist yet
+                            try:
+                                scheduler.add_job(
+                                    func='webapp.core_app.core.pipeline:process_night_queue',
+                                    trigger='cron',
+                                    hour=int(night_hour),
+                                    minute=int(night_minute),
+                                    id=night_job_id,
+                                    misfire_grace_time=3600,  # 1 hour grace time
+                                    replace_existing=True
+                                )
+                                logger.info(f"Scheduled night processing for task {task_id} at {night_hour}:{night_minute}")
+                            except Exception as e:
+                                logger.error(f"Failed to schedule night processing for task {task_id}: {e}")
+                        except Exception as e:
+                            logger.error(f"Error scheduling night processing for task {task_id}: {e}")
+                        
+                        # Parse schedule for uploads and recreate upload jobs
+                        day_schedules = task_schedule.split(';')
+                        for day_schedule in day_schedules:
+                            if not day_schedule.strip():
+                                continue
+                                
+                            day, times = day_schedule.split('|')
+                            day_number = {
+                                'sun': 0, 'mon': 1, 'tue': 2, 'wed': 3, 
+                                'thu': 4, 'fri': 5, 'sat': 6
+                            }[day.lower()]
+                            
+                            # Schedule each upload time slot
+                            for time_str in times.split(','):
+                                hour, minute = map(int, time_str.strip().split(':'))
+                                
+                                # Schedule the upload job
+                                upload_job_id = f'task_{task_id}_{day}_{hour}_{minute}'
+                                
+                                # Replace the job if it exists
+                                try:
+                                    # First try to remove any existing job
+                                    try:
+                                        scheduler.remove_job(upload_job_id)
+                                    except JobLookupError:
+                                        pass  # Job doesn't exist yet
+                                    try:
+                                        from webapp.core_app.core.pipeline import process_video_upload
+                                        scheduler.add_job(
+                                            func=process_video_upload,
+                                            trigger='cron',
+                                            day_of_week=day_number,
+                                            hour=hour,
+                                            minute=minute,
+                                            args=[task_id],
+                                            id=upload_job_id,
+                                            misfire_grace_time=300,  # 5 minutes grace time
+                                            replace_existing=True
+                                        )
+                                        logger.info(f"Scheduled upload for task {task_id} on {day} at {hour:02d}:{minute:02d}")
+                                    except Exception as e:
+                                        logger.error(f"Failed to schedule upload for task {task_id} on {day} at {hour}:{minute}: {e}")
+                                except Exception as e:
+                                    logger.error(f"Error scheduling upload for task {task_id} on {day} at {hour}:{minute}: {e}")
+                    
                 except sqlite3.OperationalError as e:
                     logger.warning(f"Could not load existing tasks: {e}")
         except Exception as e:
