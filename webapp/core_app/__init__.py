@@ -399,11 +399,11 @@ def init_scheduler(app):
                 id='startup_missed_processing_check',
                 func='webapp.core_app.core.pipeline:check_for_missed_processing',
                 trigger='date',
-                run_date=datetime.now() + timedelta(seconds=30),
+                run_date=datetime.now() + timedelta(seconds=60),  # Increased to 60 seconds delay
                 args=[True],  # Force process
                 misfire_grace_time=3600  # 1 hour grace time
             )
-            logger.info("Scheduled missed processing check for startup")
+            logger.info("Scheduled missed processing check for startup with 60 second delay")
 
     return scheduler
 

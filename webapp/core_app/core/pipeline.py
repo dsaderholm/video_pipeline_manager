@@ -466,8 +466,9 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                 return None
 
             # Generate video
-
             try:
+                # Add short delay to ensure any file system operations are complete
+                time.sleep(1)
                 success, stdout, original_filename = execute_curl(task_data[-1], retries=3, retry_delay=5, validate_output=True, mode='generator')
                 if not success:
                     error_msg = f"Generator failed: {original_filename}"  # original_filename contains error in case of failure
@@ -476,6 +477,9 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                         details={'stdout': stdout, 'stderr': original_filename, **generation_details})
                     update_task_status(task_id, 'failed', 'failed', None, conn)
                     return None
+                
+                # Add short delay to ensure file is available
+                time.sleep(1)
             except Exception as e:
                 # Make sure to clean up any temporary files
                 if current_video_file and os.path.exists(current_video_file):
@@ -490,6 +494,11 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                 return None
 
             current_video_file = get_latest_video()
+            if not current_video_file:
+                # Retry after a short delay
+                time.sleep(3)
+                current_video_file = get_latest_video()
+                
             if not current_video_file:
                 error_msg = "No video file was generated"
                 log_with_task_details('ERROR', error_msg,
@@ -518,7 +527,25 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                         continue
 
                     try:
+                        # Ensure the video file exists and is accessible
+                        if not os.path.exists(current_video_file):
+                            log_with_task_details('ERROR', f"Video file not found for utility: {current_video_file}",
+                                task_id=task_id,
+                                details=generation_details)
+                            # Try to get the latest video again
+                            time.sleep(2)
+                            latest = get_latest_video()
+                            if latest:
+                                current_video_file = latest
+                                log_with_task_details('INFO', f"Retrieved alternative video file: {current_video_file}",
+                                    task_id=task_id,
+                                    details=generation_details)
+                            else:
+                                raise Exception("Could not find video file for utility processing")
+                                
                         util_cmd = util[0].format(input=current_video_file)
+                        # Allow time for file availability
+                        time.sleep(1)
                         success, stdout, stderr = execute_curl(util_cmd, retries=3, retry_delay=5, validate_output=True, mode='utility')
                         if not success:
                             error_msg = f"Utility failed: {stderr}"
@@ -527,8 +554,15 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                                 details={'stdout': stdout, 'stderr': stderr, **generation_details})
                             update_task_status(task_id, 'failed', 'failed', None, conn)
                             raise Exception(error_msg)
+                        
+                        # Allow time for file operations to complete
+                        time.sleep(1)
+                        
                     except Exception as e:
                         # Clean up on utility failure
+                        log_with_task_details('ERROR', f"Utility failed with error: {str(e)}",
+                            task_id=task_id,
+                            details=generation_details)
                         if current_video_file and os.path.exists(current_video_file):
                             cleanup_video(current_video_file)
                         safe_rollback(conn, c)

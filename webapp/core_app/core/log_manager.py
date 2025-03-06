@@ -72,45 +72,50 @@ class DatabaseLogHandler(logging.Handler):
             return
             
         conn = None
-        try:
-            # Create a dedicated connection for logging
-            conn = db._create_connection()
-            c = conn.cursor()
-            c.execute("BEGIN IMMEDIATE")
-            
-            for record in records:
-                current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
-                task_id = getattr(record, 'task_id', None)
+        retry_count = 0
+        max_retries = 3
+        
+        while retry_count < max_retries:
+            try:
+                # Create a dedicated connection for logging
+                conn = db._create_connection()
+                c = conn.cursor()
                 
-                c.execute('''
-                    INSERT INTO logs (timestamp, level, message, task_id, details, source)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (
-                    current_time,
-                    record.levelname,
-                    record.getMessage(),
-                    task_id,
-                    json.dumps(getattr(record, 'details', None)) if hasattr(record, 'details') else None,
-                    record.module
-                ))
-            
-            c.execute("COMMIT")
+                # Don't use transactions for logging to avoid locks
+                for record in records:
+                    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+                    task_id = getattr(record, 'task_id', None)
+                    
+                    c.execute('''
+                        INSERT INTO logs (timestamp, level, message, task_id, details, source)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    ''', (
+                        current_time,
+                        record.levelname,
+                        record.getMessage(),
+                        task_id,
+                        json.dumps(getattr(record, 'details', None)) if hasattr(record, 'details') else None,
+                        record.module
+                    ))
+                    # Commit each record individually to avoid holding locks
+                    conn.commit()
                 
-        except Exception as e:
-            print(f"Error saving log records: {e}")
-            # Try to rollback if possible
-            if conn:
-                try:
-                    conn.execute("ROLLBACK")
-                except:
-                    pass
-        finally:
-            # Always close the connection in finally block
-            if conn:
-                try:
-                    conn.close()
-                except:
-                    pass
+                # Success, exit the retry loop
+                break
+                    
+            except Exception as e:
+                retry_count += 1
+                if retry_count >= max_retries:
+                    print(f"Error saving log records after {max_retries} attempts: {e}")
+                # Sleep briefly before retrying
+                time.sleep(0.5 * retry_count)
+            finally:
+                # Always close the connection in finally block
+                if conn:
+                    try:
+                        conn.close()
+                    except:
+                        pass
     
     def flush(self):
         """Process remaining log records immediately"""
