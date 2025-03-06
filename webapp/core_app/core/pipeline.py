@@ -23,17 +23,9 @@ def log_with_task_details(level, message, task_id, details=None):
         details = {}
     details['task_id'] = task_id
     
-    # First log to standard logger
-    logger_level = getattr(logging, level.upper())
-    logger.log(logger_level, f"{message} (Task {task_id})")
-    
-    # Then try to log to database
     try:
-        # Import here to avoid circular imports
-        from webapp.core_app.core.log_manager import add_log_entry
-        add_log_entry(level, message, task_id=task_id, details=details, source='pipeline')
+        log_with_details(level, message, task_id=task_id, details=details, source='pipeline')
     except Exception as e:
-        # If database logging fails, make sure we still log to stdout
         print(f"ERROR: Failed to log to database: {str(e)}", file=sys.stderr)
         print(f"{level}: {message} (Task {task_id})", file=sys.stderr)
 
