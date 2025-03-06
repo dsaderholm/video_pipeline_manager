@@ -586,30 +586,20 @@ def send_task_completion_notification(task_id, task_name, to_email, success=True
         used_fallbacks = len(execution.get('fallback_usage', [])) > 0
         preview_mode = task_info.get('status') == 'preview'
         retry_count = len(execution.get('upload_attempts', {})) - 1 if execution.get('upload_attempts') else 0
-    
-    # Categorize task outcome more precisely
-    if not success:
-        status = 'Failed'
-        status_class = 'status-error'
-    elif preview_mode:
-        status = 'Preview Generated'
-        status_class = 'status-warning'
-    elif used_fallbacks:
-        status = 'Completed with Issues'
-        status_class = 'status-warning'
-    else:
-        status = 'Completed Successfully'
-        status_class = 'status-success'
-        
-        # Build a descriptive status
+
+        # Categorize task outcome more precisely
         if not success:
             status = "Failed"
+            status_class = 'status-error'
         elif preview_mode:
             status = "Preview Generated"
+            status_class = 'status-warning'
         elif used_fallbacks:
             status = "Completed with Fallbacks"
+            status_class = 'status-warning'
         else:
             status = "Completed Successfully"
+            status_class = 'status-success'
 
         # Add retry info if relevant
         if retry_count > 0:
