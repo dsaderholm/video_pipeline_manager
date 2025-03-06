@@ -134,24 +134,58 @@ db_log_handler = DatabaseLogHandler()
 
 def add_log_entry(level, message, task_id=None, details=None, source=None):
     """Add a new log entry to the database with improved error handling"""
-    # Create a log record and add it to the handler's queue
-    record = logging.LogRecord(
-        name="app",
-        level=getattr(logging, level),
-        pathname="",
-        lineno=0,
-        msg=message,
-        args=(),
-        exc_info=None
-    )
-    
-    # Add custom attributes
-    record.task_id = task_id
-    record.details = details
-    record.source = source
-    
-    # Add to handler queue for processing
-    db_log_handler.emit(record)
+    # Direct database insert for reliability
+    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
+    conn = None
+    try:
+        # Create a dedicated connection for logging
+        conn = db._create_connection()
+        c = conn.cursor()
+        
+        c.execute('''
+            INSERT INTO logs (timestamp, level, message, task_id, details, source)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (
+            current_time,
+            level,
+            message,
+            task_id,
+            json.dumps(details) if details else None,
+            source or "direct"
+        ))
+        conn.commit()
+        
+    except Exception as e:
+        print(f"Direct log entry failed: {e}")
+    finally:
+        # Always close the connection in finally block
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+                
+    # Also create a log record for the handler queue as backup
+    try:
+        record = logging.LogRecord(
+            name="app",
+            level=getattr(logging, level.upper()),
+            pathname="",
+            lineno=0,
+            msg=message,
+            args=(),
+            exc_info=None
+        )
+        
+        # Add custom attributes
+        record.task_id = task_id
+        record.details = details
+        record.source = source
+        
+        # Add to handler queue for processing
+        db_log_handler.emit(record)
+    except Exception as e:
+        print(f"Log record creation failed: {e}")
 
 def get_logs(limit=100, level=None, task_id=None, since=None, processing_status=None):
     """Retrieve logs with optional filtering"""

@@ -23,9 +23,17 @@ def log_with_task_details(level, message, task_id, details=None):
         details = {}
     details['task_id'] = task_id
     
+    # First log to standard logger
+    logger_level = getattr(logging, level.upper())
+    logger.log(logger_level, f"{message} (Task {task_id})")
+    
+    # Then try to log to database
     try:
-        log_with_details(level, message, task_id=task_id, details=details, source='pipeline')
+        # Import here to avoid circular imports
+        from webapp.core_app.core.log_manager import add_log_entry
+        add_log_entry(level, message, task_id=task_id, details=details, source='pipeline')
     except Exception as e:
+        # If database logging fails, make sure we still log to stdout
         print(f"ERROR: Failed to log to database: {str(e)}", file=sys.stderr)
         print(f"{level}: {message} (Task {task_id})", file=sys.stderr)
 
@@ -1242,6 +1250,8 @@ def process_night_queue():
             return
 
         lock_acquired = True
+        logger.info("Starting night processing queue")
+        
         with db.get_connection() as conn:
             c = conn.cursor()
             
@@ -1258,6 +1268,8 @@ def process_night_queue():
             """, (f'%{tomorrow_day}|%',))
             
             tasks = c.fetchall()
+            
+            logger.info(f"Found {len(tasks)} tasks to process for {tomorrow_day}")
 
             for task_id, schedule in tasks:
                 schedule_times = get_next_day_schedules(schedule)
@@ -1267,6 +1279,7 @@ def process_night_queue():
                 try:
                     # Generate a video for each scheduled time
                     for schedule_time in schedule_times:
+                        logger.info(f"Processing night task {task_id} for time {schedule_time}")
                         process_video_generation(task_id, schedule_time, conn=conn)
                 except Exception as e:
                     log_with_task_details('ERROR', 
@@ -1278,13 +1291,16 @@ def process_night_queue():
         logger.error(f"Error in night processing queue: {str(e)}")
         
     finally:
+        # Make sure we always release the lock
         if lock_acquired:
             try:
                 release_lock()
+                logger.info("Released night processing lock")
             except Exception as e:
                 logger.error(f"Failed to release lock after night processing: {str(e)}")
                 try:
                     force_release_lock()
+                    logger.info("Force-released night processing lock")
                 except Exception as force_e:
                     logger.error(f"Force release also failed after night processing: {str(force_e)}")
 
@@ -1300,6 +1316,8 @@ def process_scheduled_uploads():
             return
             
         lock_acquired = True
+        logger.info("Starting scheduled uploads processor")
+        
         with db.get_connection() as conn:
             c = conn.cursor()
             # Modified query to get ALL pending uploads for the current time
@@ -1325,6 +1343,7 @@ def process_scheduled_uploads():
                     task_id, video_id, original_name, processed_path, scheduled_time = pending_upload
                     try:
                         # Important: Don't let one failure prevent other uploads
+                        logger.info(f"Processing upload for task {task_id}, video {video_id}")
                         process_video_upload(
                             task_id, 
                             (video_id, original_name, processed_path, scheduled_time), 
@@ -1342,6 +1361,8 @@ def process_scheduled_uploads():
                                 'video_id': video_id,
                                 'scheduled_time': scheduled_time
                             })
+            else:
+                logger.info("No pending videos found for upload at this time")
     except Exception as e:
         logger.error(f"Error in scheduled uploads processor: {str(e)}")
         
@@ -1349,14 +1370,18 @@ def process_scheduled_uploads():
         # Log the summary of processed videos
         if 'processed_count' in locals() and processed_count > 0:
             logger.info(f"Scheduled uploads complete: Processed {processed_count} videos with {error_count} errors")
+        elif 'processed_count' in locals():
+            logger.info("No videos were processed in this run")
             
         if lock_acquired:
             try:
                 release_lock()
+                logger.info("Released scheduled uploads lock")
             except Exception as e:
                 logger.error(f"Failed to release lock after scheduled uploads: {str(e)}")
                 try:
                     force_release_lock()
+                    logger.info("Force-released scheduled uploads lock")
                 except Exception as force_e:
                     logger.error(f"Force release also failed after scheduled uploads: {str(force_e)}")
 

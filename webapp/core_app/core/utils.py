@@ -34,11 +34,18 @@ def get_processed_video_path(task_id, schedule_time=None):
     return os.path.join(videos_dir, f'task_{task_id}_{timestamp}.mp4')
 
 def log_with_details(level, message, task_id=None, details=None, source=None):
+    """Log message with structured details to database"""
     if details is None:
         details = {}
     details['task_id'] = task_id
     
+    # First log to standard logger
+    logger_level = getattr(logging, level.upper())
+    logger.log(logger_level, f"{message} {' (Task ' + str(task_id) + ')' if task_id else ''}")
+    
     try:
+        # Import here to avoid circular imports
+        from webapp.core_app.core.log_manager import add_log_entry
         add_log_entry(level, message, task_id=task_id, details=details, source=source)
     except Exception as e:
         print(f"ERROR: Failed to log to database: {str(e)}", file=sys.stderr)
