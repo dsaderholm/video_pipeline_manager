@@ -11,7 +11,12 @@ logger = logging.getLogger('app')
 def get_db_path():
     return os.path.join('webapp', 'database', 'pipeline.db')
 
-def load_smtp_config():
+def load_smtp_config(silent=False):
+    """Load SMTP configuration with optional silent mode
+    
+    Args:
+        silent (bool): If True, suppresses logging warnings
+    """
     """Load SMTP configuration from environment variables"""
     required_vars = [
         'SMTP_SERVER',
@@ -32,7 +37,8 @@ def load_smtp_config():
         config[var] = value
     
     if missing_vars:
-        logger.warning(f"Missing SMTP environment variables: {', '.join(missing_vars)}")
+        if not silent:
+            logger.warning(f"Missing SMTP environment variables: {', '.join(missing_vars)}")
         return None
     
     return config
@@ -186,6 +192,46 @@ def get_task_details(task_id):
         return None
 
 def format_task_info_html(task_info, success, base_url=None, night_processing=False):
+    """Generate a comprehensive and visually appealing HTML email report
+    
+    Prioritizes key information and provides clear, contextual insights
+    """
+    from datetime import datetime
+    import json
+    
+    def calculate_time_since(timestamp):
+        """Calculate human-readable time difference"""
+        try:
+            created_time = datetime.fromisoformat(timestamp) if timestamp else datetime.now()
+            now = datetime.now()
+            diff = now - created_time
+            
+            if diff.days > 0:
+                return f"{diff.days} day{'s' if diff.days > 1 else ''} ago"
+            elif diff.seconds // 3600 > 0:
+                hours = diff.seconds // 3600
+                return f"{hours} hour{'s' if hours > 1 else ''} ago"
+            elif diff.seconds // 60 > 0:
+                minutes = diff.seconds // 60
+                return f"{minutes} minute{'s' if minutes > 1 else ''} ago"
+            else:
+                return "just now"
+        except Exception:
+            return "timestamp unavailable"
+    
+    def create_status_badge(status, is_success):
+        """Create a visually distinct status badge"""
+        status_class = 'status-success' if is_success else 'status-error'
+        return f'<span class="status-indicator {status_class}">{status}</span>'
+    """Generate a comprehensive HTML email report with improved layout and information hierarchy.
+    
+    Priority Ordering:
+    1. High-level task status and overview
+    2. Upload results and platform performance
+    3. Video generation details
+    4. Configuration and settings
+    5. Additional insights and warnings
+    """
     if not task_info:
         return """
         <html>
@@ -274,28 +320,67 @@ def format_task_info_html(task_info, success, base_url=None, night_processing=Fa
     <html>
     <head>
         <style>
-            body {{
-                font-family: Inter, sans-serif;
-                background-color: #111827;
-                color: #f3f4f6;
+            body {
+                font-family: 'Inter', 'Helvetica Neue', Arial, sans-serif;
+                background-color: #0f172a;
+                color: #e2e8f0;
                 padding: 2rem;
                 margin: 0;
-                line-height: 1.5;
-            }}
-            h1, h2, h3 {{
-                color: #fc4828;
+                line-height: 1.6;
+                max-width: 800px;
+                margin: 0 auto;
+            }
+            .container {
+                background-color: #1e293b;
+                border-radius: 0.75rem;
+                box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
+                overflow: hidden;
+            }
+            h1, h2, h3 {
+                color: #38bdf8;
                 margin-bottom: 1rem;
-            }}
-            h1 {{ font-size: 1.5rem; }}
-            h2 {{ font-size: 1.2rem; margin-top: 1.5rem; }}
-            h3 {{ font-size: 1.1rem; color: #f3f4f6; }}
-            .section {{
-                background: rgba(31, 41, 55, 0.5);
-                border: 1px solid #374151;
-                border-radius: 0.5rem;
+                font-weight: 600;
+            }
+            h1 {
+                font-size: 1.8rem;
+                border-bottom: 2px solid #334155;
+                padding-bottom: 0.5rem;
+            }
+            h2 {
+                font-size: 1.4rem;
+                margin-top: 1.5rem;
+                color: #22d3ee;
+            }
+            h3 {
+                font-size: 1.2rem;
+                color: #67e8f9;
+            }
+            .section {
+                background: rgba(30, 41, 59, 0.7);
+                border-bottom: 1px solid #334155;
                 padding: 1.5rem;
-                margin-bottom: 1.5rem;
-            }}
+                margin-bottom: 0;
+            }
+            .status-indicator {
+                display: inline-block;
+                padding: 0.25rem 0.75rem;
+                border-radius: 9999px;
+                font-weight: 600;
+                font-size: 0.875rem;
+                margin-left: 0.5rem;
+            }
+            .status-success {
+                background-color: rgba(16, 185, 129, 0.2);
+                color: #10b981;
+            }
+            .status-warning {
+                background-color: rgba(245, 158, 11, 0.2);
+                color: #f59e0b;
+            }
+            .status-error {
+                background-color: rgba(239, 68, 68, 0.2);
+                color: #ef4444;
+            }
             .night-processing {{
                 background: rgba(25, 47, 89, 0.5);
                 border: 1px solid #3b82f6;
@@ -414,7 +499,15 @@ def format_task_info_html(task_info, success, base_url=None, night_processing=Fa
     </html>
     """
 
-def send_notification(to_emails, subject, message_html):
+def send_notification(to_emails, subject, message_html, retry_count=2):
+    """Send an HTML email notification with optional retry mechanism
+    
+    Args:
+        to_emails (list or str): Recipient email(s)
+        subject (str): Email subject
+        message_html (str): HTML content of the email
+        retry_count (int): Number of retry attempts on failure
+    """
     """Send an HTML email notification to one or multiple recipients"""
     if not to_emails:
         logger.warning("No recipient emails provided, skipping notification")
@@ -447,20 +540,34 @@ def send_notification(to_emails, subject, message_html):
         msg.attach(html_part)
         
         # Send to all recipients (BCC)
-        with smtplib.SMTP(config['SMTP_SERVER'], int(config['SMTP_PORT'])) as server:
-            server.starttls()
-            server.login(config['SMTP_USERNAME'], config['SMTP_PASSWORD'])
-            
-            # Send individual emails to prevent recipients from seeing each other's addresses
-            for email in to_emails:
-                msg['To'] = email
-                try:
-                    server.send_message(msg)
-                    logger.info(f"Successfully sent email notification to {email}")
-                except Exception as e:
-                    logger.error(f"Failed to send email to {email}: {str(e)}")
-            
-        return True
+        for attempt in range(retry_count + 1):
+            try:
+                with smtplib.SMTP(config['SMTP_SERVER'], int(config['SMTP_PORT'])) as server:
+                    server.starttls()
+                    server.login(config['SMTP_USERNAME'], config['SMTP_PASSWORD'])
+                    
+                    # Send individual emails to prevent recipients from seeing each other's addresses
+                    sent_emails = []
+                    for email in to_emails:
+                        msg['To'] = email
+                        try:
+                            server.send_message(msg)
+                            logger.info(f"Successfully sent email notification to {email}")
+                            sent_emails.append(email)
+                        except Exception as inner_e:
+                            logger.error(f"Failed to send email to {email}: {str(inner_e)}")
+                    
+                    return len(sent_emails) > 0
+            except Exception as e:
+                if attempt < retry_count:
+                    delay = (attempt + 1) * 2  # Exponential backoff
+                    logger.warning(f"SMTP connection failed (attempt {attempt + 1}/{retry_count + 1}). Retrying in {delay} seconds: {str(e)}")
+                    import time
+                    time.sleep(delay)
+                else:
+                    logger.error(f"Failed to send email after {retry_count + 1} attempts: {str(e)}")
+        
+        return False
         
     except Exception as e:
         logger.error(f"Failed to send email notifications: {str(e)}")
@@ -474,11 +581,25 @@ def send_task_completion_notification(task_id, task_name, to_email, success=True
             logger.warning(f"No task info found for task {task_id}")
             return False
 
-        # Determine the detailed status
+        # Enhanced status determination with more nuanced categorization
         execution = task_info.get('execution', {})
         used_fallbacks = len(execution.get('fallback_usage', [])) > 0
         preview_mode = task_info.get('status') == 'preview'
         retry_count = len(execution.get('upload_attempts', {})) - 1 if execution.get('upload_attempts') else 0
+    
+    # Categorize task outcome more precisely
+    if not success:
+        status = 'Failed'
+        status_class = 'status-error'
+    elif preview_mode:
+        status = 'Preview Generated'
+        status_class = 'status-warning'
+    elif used_fallbacks:
+        status = 'Completed with Issues'
+        status_class = 'status-warning'
+    else:
+        status = 'Completed Successfully'
+        status_class = 'status-success'
         
         # Build a descriptive status
         if not success:
