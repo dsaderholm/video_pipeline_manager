@@ -216,11 +216,18 @@ def init_scheduler(app):
         )
         
         # Add a job to run 15 minutes after the start time to ensure processing happens
+        next_minute = int(night_minute) + 15
+        next_hour = int(night_hour)
+        
+        # Handle minute overflow
+        if next_minute >= 60:
+            next_minute = next_minute % 60
+            next_hour = (next_hour + 1) % 24
+            
         scheduler.add_job(
             id='night_processing_followup',
             func=process_night_queue,
-            trigger=CronTrigger(hour=int(night_hour), minute=int(night_minute) + 15 if int(night_minute) + 15 < 60 else (int(night_minute) + 15) % 60, 
-                            hour=(int(night_hour) + 1) if int(night_minute) + 15 >= 60 else int(night_hour)),
+            trigger=CronTrigger(hour=next_hour, minute=next_minute),
             name='Night Processing Followup',
             misfire_grace_time=3600,  # 1 hour grace time
             max_instances=1,
