@@ -836,8 +836,6 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
             # Try primary upload
             success, stdout, stderr = execute_curl(upload_cmd, retries=3, retry_delay=5, mode='uploader')
             current_stdout, current_stderr = stdout, stderr
-            used_fallback = False
-            fallback_level = 0  # 0 = no fallback, 1 = primary fallback, 2 = secondary fallback
 
             # If primary fails, try fallback
             if not success and fallback_curl:
@@ -857,8 +855,6 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
                     
                 success, stdout, stderr = execute_curl(fallback_cmd, retries=3, retry_delay=5, mode='uploader')
                 if success:
-                    used_fallback = True
-                    fallback_level = 1
                     current_stdout, current_stderr = stdout, stderr
 
             # If fallback fails, try secondary fallback
@@ -879,8 +875,6 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
                     
                 success, stdout, stderr = execute_curl(fallback_cmd_2, retries=3, retry_delay=5, mode='uploader')
                 if success:
-                    used_fallback = True
-                    fallback_level = 2
                     current_stdout, current_stderr = stdout, stderr
 
             if success:
