@@ -190,25 +190,53 @@ def init_scheduler(app):
             next_run_time=datetime.now() + timedelta(minutes=1)
         )
 
-        # Add night processing job
+        # Add night processing job - run every 15 minutes to ensure processing happens
         scheduler.add_job(
             id='night_processing',
             func=process_night_queue,
-            trigger=CronTrigger(minute='0,15,30,45'),  # Run at specific minutes
+            trigger=CronTrigger(minute='0,15,30,45'),  # Run at specific minutes every hour
             name='Night Video Processing',
-            misfire_grace_time=300,  # 5 minute grace time
+            misfire_grace_time=900,  # 15 minute grace time
             max_instances=1,
+            replace_existing=True,
+            coalesce=True
+        )
+        
+        # Add an additional dedicated night processing job at the exact start time
+        night_hour, night_minute = os.getenv('NIGHT_PROCESSING_START', '01:30').split(':')
+        scheduler.add_job(
+            id='dedicated_night_processing',
+            func=process_night_queue,
+            trigger=CronTrigger(hour=int(night_hour), minute=int(night_minute)),
+            name='Dedicated Night Processing',
+            misfire_grace_time=3600,  # 1 hour grace time
+            max_instances=1,
+            replace_existing=True,
+            coalesce=True
+        )
+        
+        # Add a job to run 15 minutes after the start time to ensure processing happens
+        scheduler.add_job(
+            id='night_processing_followup',
+            func=process_night_queue,
+            trigger=CronTrigger(hour=int(night_hour), minute=int(night_minute) + 15 if int(night_minute) + 15 < 60 else (int(night_minute) + 15) % 60, 
+                            hour=(int(night_hour) + 1) if int(night_minute) + 15 >= 60 else int(night_hour)),
+            name='Night Processing Followup',
+            misfire_grace_time=3600,  # 1 hour grace time
+            max_instances=1,
+            replace_existing=True,
             coalesce=True
         )
 
-        # Add scheduled uploads job
+        # Add scheduled uploads job - run every 5 minutes to ensure timely uploads
         scheduler.add_job(
             id='scheduled_uploads',
             func=process_scheduled_uploads,
-            trigger=CronTrigger(minute='2,7,12,17,22,27,32,37,42,47,52,57'),  # Offset from night processing
+            trigger=CronTrigger(minute='*/5'),  # Run every 5 minutes
             name='Scheduled Video Uploads',
             misfire_grace_time=240,  # 4 minute grace time
             max_instances=1,
+            replace_existing=True,
             coalesce=True
         )
 
@@ -220,6 +248,32 @@ def init_scheduler(app):
             hours=24,  # Run daily
             next_run_time=datetime.now() + timedelta(minutes=10)
         )
+        
+        # Add scheduled database maintenance job
+        scheduler.add_job(
+            id='database_maintenance',
+            func=db.checkpoint_wal,  # Force WAL checkpoint
+            trigger='interval',
+            hours=4,  # Run every 4 hours
+            name='Database Maintenance',
+            misfire_grace_time=3600,  # 1 hour grace time 
+            max_instances=1,
+            replace_existing=True
+        )
+        logger.info("Scheduled database maintenance job")
+        
+        # Add automatic lock reset job to clear any stuck locks
+        scheduler.add_job(
+            id='auto_lock_reset',
+            func='webapp.core_app.core.pipeline:force_release_lock',
+            trigger='interval',
+            hours=1,  # Run every hour
+            name='Automatic Lock Reset',
+            misfire_grace_time=1800,  # 30 minute grace time
+            max_instances=1,
+            replace_existing=True
+        )
+        logger.info("Scheduled automatic lock reset job")
 
         # Rebuild schedules for existing tasks
         try:

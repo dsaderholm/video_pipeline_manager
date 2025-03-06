@@ -42,15 +42,41 @@ def create_logger_with_task_id(task_id):
     return logger_instance
 
 def should_process_at_night():
-    """Check if current time is within night processing window"""
-    current_time = datetime.now().time()
-    start_time = datetime.strptime(os.getenv('NIGHT_PROCESSING_START', '22:00'), '%H:%M').time()
-    end_time = datetime.strptime(os.getenv('NIGHT_PROCESSING_END', '06:00'), '%H:%M').time()
+    """Check if current time is within night processing window
     
-    if start_time < end_time:
-        return start_time <= current_time <= end_time
-    else:  # Handles case where night window crosses midnight
-        return current_time >= start_time or current_time <= end_time
+    Handles cases where the night window crosses midnight by considering
+    the full date+time instead of just the time component.
+    """
+    now = datetime.now()
+    current_time = now.time()
+    
+    # Get start and end times from environment or use defaults
+    start_time_str = os.getenv('NIGHT_PROCESSING_START', '22:00')
+    end_time_str = os.getenv('NIGHT_PROCESSING_END', '06:00')
+    
+    # Parse the time strings
+    start_time = datetime.strptime(start_time_str, '%H:%M').time()
+    end_time = datetime.strptime(end_time_str, '%H:%M').time()
+    
+    # Create full datetime objects for comparison
+    start_datetime = datetime.combine(now.date(), start_time)
+    end_datetime = datetime.combine(now.date(), end_time)
+    
+    # If end time is earlier than start time, it crosses midnight, so add a day
+    if end_time < start_time:
+        end_datetime = end_datetime + timedelta(days=1)
+    
+    # Check if current time is in the window
+    current_datetime = datetime.combine(now.date(), current_time)
+    
+    # Handle the case where we're after midnight but before end time
+    if current_time < end_time and start_time > end_time:
+        # We're in the early morning hours, so start time was yesterday
+        yesterday_start = start_datetime - timedelta(days=1)
+        return yesterday_start <= current_datetime <= end_datetime
+    
+    # Normal check if current time is between start and end
+    return start_datetime <= current_datetime <= end_datetime
 
 def safe_rollback(conn, cursor=None):
     """Safely roll back a transaction with proper error handling"""
@@ -1083,60 +1109,84 @@ def check_for_missed_processing(force_process=False):
         yesterday_day = yesterday.strftime('%A')[:3].lower()
         
         # Get yesterday's date at start of night processing time
-        night_hour, night_minute = map(int, os.getenv('NIGHT_PROCESSING_START', '22:00').split(':'))
+        night_hour, night_minute = map(int, os.getenv('NIGHT_PROCESSING_START', '01:30').split(':'))
         yesterday_night_time = datetime.combine(yesterday, datetime.min.time().replace(hour=night_hour, minute=night_minute))
         
         logger.info(f"Checking for missed night processing from {yesterday_night_time}")
         
-        with db.get_connection() as conn:
-            c = conn.cursor()
+        # Try to acquire lock
+        lock_acquired = check_and_set_lock()
+        if not lock_acquired and not force_process:
+            logger.info("Could not acquire lock for missed processing check, will try later")
+            return
             
-            # Find all tasks that should have run yesterday
-            c.execute("""
-                SELECT id, schedule 
-                FROM tasks 
-                WHERE status != 'failed'
-                AND processing_status != 'failed'
-                AND schedule LIKE ?
-            """, (f'%{yesterday_day}|%',))
-            
-            tasks = c.fetchall()
-            processed_count = 0
-            
-            for task_id, schedule in tasks:
-                # Check if we have any generated videos from yesterday
+        try:
+            with db.get_connection() as conn:
+                c = conn.cursor()
+                
+                # Find all tasks that should have run yesterday
                 c.execute("""
-                    SELECT COUNT(*) FROM generated_videos
-                    WHERE task_id = ?
-                    AND DATE(generated_at) = DATE(?) 
-                """, (task_id, yesterday.strftime('%Y-%m-%d')))
+                    SELECT id, schedule 
+                    FROM tasks 
+                    WHERE status != 'failed'
+                    AND processing_status != 'failed'
+                    AND schedule LIKE ?
+                """, (f'%{yesterday_day}|%',))
                 
-                existing_count = c.fetchone()[0]
+                tasks = c.fetchall()
+                processed_count = 0
                 
-                if existing_count == 0 and (force_process or getattr(current_app, 'manual_run', False)):
-                    # No videos were generated yesterday for this task, generate now
-                    log_with_task_details('INFO', 
-                        f"Detected missed night processing for yesterday ({yesterday_day})",
-                        task_id=task_id)
+                for task_id, schedule in tasks:
+                    # Check if we have any generated videos from yesterday
+                    c.execute("""
+                        SELECT COUNT(*) FROM generated_videos
+                        WHERE task_id = ?
+                        AND DATE(generated_at) = DATE(?) 
+                    """, (task_id, yesterday.strftime('%Y-%m-%d')))
                     
-                    # Get today's schedule times for this task
-                    today_schedules = get_next_day_schedules(schedule)
+                    existing_count = c.fetchone()[0]
                     
-                    if today_schedules:
-                        # Process the task for today's schedules
-                        try:
-                            for schedule_time in today_schedules:
-                                process_video_generation(task_id, schedule_time, conn=conn)
-                                processed_count += 1
-                        except Exception as e:
-                            log_with_task_details('ERROR', 
-                                f"Failed to process missed task {task_id}: {str(e)}",
-                                task_id=task_id)
-            
-            if processed_count > 0:
-                logger.info(f"Recovered {processed_count} missed video generations")
-            else:
-                logger.info("No missed processing detected or recovery not needed")
+                    # Also check today, as sometimes night processing happens right after midnight
+                    c.execute("""
+                        SELECT COUNT(*) FROM generated_videos
+                        WHERE task_id = ?
+                        AND DATE(generated_at) = DATE(?) 
+                    """, (task_id, today.strftime('%Y-%m-%d')))
+                    
+                    today_count = c.fetchone()[0]
+                    total_count = existing_count + today_count
+                    
+                    if total_count == 0 or force_process:
+                        # No videos were generated yesterday or today for this task, generate now
+                        log_with_task_details('INFO', 
+                            f"Detected missed night processing for yesterday ({yesterday_day}) or startup recovery",
+                            task_id=task_id)
+                        
+                        # Get today's schedule times for this task
+                        today_schedules = get_next_day_schedules(schedule)
+                        
+                        if today_schedules:
+                            # Process the task for today's schedules
+                            try:
+                                for schedule_time in today_schedules:
+                                    # Use process_video_pipeline for complete handling
+                                    current_app.manual_run = True  # Set manual flag to force processing
+                                    process_video_pipeline(task_id, schedule_time)
+                                    current_app.manual_run = False  # Reset flag
+                                    processed_count += 1
+                            except Exception as e:
+                                log_with_task_details('ERROR', 
+                                    f"Failed to process missed task {task_id}: {str(e)}",
+                                    task_id=task_id)
+                
+                if processed_count > 0:
+                    logger.info(f"Recovered {processed_count} missed video generations")
+                else:
+                    logger.info("No missed processing detected or recovery not needed")
+                    
+        finally:
+            if lock_acquired:
+                release_lock()
                 
     except Exception as e:
         logger.error(f"Error checking for missed processing: {str(e)}")
@@ -1208,6 +1258,9 @@ def process_scheduled_uploads():
     """Process tasks that are ready for upload - Modified to process ALL pending videos"""
     lock_acquired = False
     try:
+        # Always log that we're checking for uploads
+        logger.info("Checking for videos ready to upload...")
+        
         if not check_and_set_lock():
             logger.debug("Task lock is held, skipping scheduled uploads")
             return

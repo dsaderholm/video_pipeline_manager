@@ -13,6 +13,7 @@ services:
       - PYTHONPATH=/app
       - FLASK_APP=webapp.core_app:app
       - PYTHONDONTWRITEBYTECODE=1
+      - TZ=${TIMEZONE:-America/Denver}
     volumes:
       - video_pipeline_manager_db_data:/app/webapp/database
       - ./webapp/previews:/app/webapp/previews
