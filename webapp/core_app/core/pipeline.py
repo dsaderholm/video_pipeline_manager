@@ -844,6 +844,8 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
             # Try primary upload
             success, stdout, stderr = execute_curl(upload_cmd, retries=3, retry_delay=5, mode='uploader')
             current_stdout, current_stderr = stdout, stderr
+            used_fallback = False
+            fallback_level = 0  # 0 = no fallback, 1 = primary fallback, 2 = secondary fallback
 
             # If primary fails, try fallback
             if not success and fallback_curl:
@@ -863,6 +865,8 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
                     
                 success, stdout, stderr = execute_curl(fallback_cmd, retries=3, retry_delay=5, mode='uploader')
                 if success:
+                    used_fallback = True
+                    fallback_level = 1
                     current_stdout, current_stderr = stdout, stderr
 
             # If fallback fails, try secondary fallback
@@ -883,6 +887,8 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
                     
                 success, stdout, stderr = execute_curl(fallback_cmd_2, retries=3, retry_delay=5, mode='uploader')
                 if success:
+                    used_fallback = True
+                    fallback_level = 2
                     current_stdout, current_stderr = stdout, stderr
 
             if success:
@@ -1260,7 +1266,7 @@ def process_night_queue():
             tomorrow_day = tomorrow.strftime('%A')[:3].lower()
             
             c.execute("""
-                SELECT id, schedule 
+                SELECT id, schedule, name, email_notify 
                 FROM tasks 
                 WHERE status != 'failed'
                 AND processing_status != 'failed'
@@ -1270,22 +1276,45 @@ def process_night_queue():
             tasks = c.fetchall()
             
             logger.info(f"Found {len(tasks)} tasks to process for {tomorrow_day}")
+            successful_tasks = []
 
-            for task_id, schedule in tasks:
+            for task_data in tasks:
+                task_id, schedule, task_name, email_notify = task_data
                 schedule_times = get_next_day_schedules(schedule)
                 if not schedule_times:
                     continue
                     
                 try:
+                    task_success = True
                     # Generate a video for each scheduled time
                     for schedule_time in schedule_times:
                         logger.info(f"Processing night task {task_id} for time {schedule_time}")
-                        process_video_generation(task_id, schedule_time, conn=conn)
+                        result = process_video_generation(task_id, schedule_time, conn=conn)
+                        if not result:
+                            task_success = False
+                    
+                    # If successful and email notification is enabled, add to list for notification
+                    if task_success and email_notify:
+                        successful_tasks.append((task_id, task_name, email_notify))
                 except Exception as e:
                     log_with_task_details('ERROR', 
                         f"Night processing failed for task {task_id}: {str(e)}",
                         task_id=task_id,
-                        details={'error': str(e), 'schedule_time': schedule_time})
+                        details={'error': str(e), 'schedule_time': str(schedule_times)})
+            
+            # Send notifications for successful night processing
+            for task_id, task_name, email in successful_tasks:
+                try:
+                    send_task_completion_notification(
+                        task_id,
+                        task_name,
+                        email,
+                        success=True,
+                        night_processing=True  # Indicate this is a night processing notification
+                    )
+                    logger.info(f"Sent night processing completion notification for task {task_id}")
+                except Exception as e:
+                    logger.error(f"Failed to send night processing notification for task {task_id}: {str(e)}")
 
     except Exception as e:
         logger.error(f"Error in night processing queue: {str(e)}")

@@ -111,6 +111,14 @@ def get_task_details(task_id):
                     execution_details['fallback_usage'].append({
                         'platform': details.get('platform', {}).get('name'),
                         'reason': details.get('stderr', 'Primary upload failed'),
+                        'fallback_level': 1,
+                        'timestamp': timestamp
+                    })
+                elif "Fallback upload failed, attempting secondary fallback" in message:
+                    execution_details['fallback_usage'].append({
+                        'platform': details.get('platform', {}).get('name'),
+                        'reason': details.get('stderr', 'Fallback upload failed'),
+                        'fallback_level': 2,
                         'timestamp': timestamp
                     })
                 
@@ -177,7 +185,7 @@ def get_task_details(task_id):
         logger.error(f"Error getting task details: {str(e)}")
         return None
 
-def format_task_info_html(task_info, success, base_url=None):
+def format_task_info_html(task_info, success, base_url=None, night_processing=False):
     if not task_info:
         return """
         <html>
@@ -231,17 +239,37 @@ def format_task_info_html(task_info, success, base_url=None):
     upload_html = ""
     if execution.get('upload_attempts'):
         for platform, attempts in execution['upload_attempts'].items():
-            fallback_info = next((f for f in execution.get('fallback_usage', []) if f['platform'] == platform), None)
+            # Get all fallback infos for this platform to show progression
+            platform_fallbacks = [f for f in execution.get('fallback_usage', []) if f['platform'] == platform]
             url = execution.get('upload_urls', {}).get(platform, 'N/A')
+            
+            fallback_html = ""
+            if platform_fallbacks:
+                for fallback in platform_fallbacks:
+                    fallback_level = fallback.get('fallback_level', 1)
+                    fallback_name = "Primary" if fallback_level == 1 else "Secondary"
+                    fallback_html += f"<div class=\"fallback-info\">Used {fallback_name} fallback: {fallback['reason']}</div>"
+            
             upload_html += f"""
                 <div class="upload-attempt">
                     <h3>{platform}</h3>
                     <div>Attempts: {attempts}</div>
-                    {f'<div class="fallback-info">Used fallback: {fallback_info["reason"]}</div>' if fallback_info else ''}
+                    {fallback_html}
                     <div>Upload URL: {url}</div>
                 </div>
             """
 
+    # Create a highlighted banner for night processing if applicable
+    night_processing_banner = ""
+    if night_processing:
+        night_processing_banner = f"""
+        <div class="section night-processing">
+            <h2>Night Processing Completed</h2>
+            <div class="details-line">Your scheduled night processing has completed successfully.</div>
+            <div class="details-line">Videos are ready for publishing according to your schedule.</div>
+        </div>
+        """
+    
     return f"""
     <html>
     <head>
@@ -267,6 +295,10 @@ def format_task_info_html(task_info, success, base_url=None):
                 border-radius: 0.5rem;
                 padding: 1.5rem;
                 margin-bottom: 1.5rem;
+            }}
+            .night-processing {{
+                background: rgba(25, 47, 89, 0.5);
+                border: 1px solid #3b82f6;
             }}
             .sound-volume {{
                 display: flex;
@@ -308,11 +340,33 @@ def format_task_info_html(task_info, success, base_url=None):
             .details-line {{
                 margin: 0.5rem 0;
             }}
+            .highlight {{
+                color: #10b981;
+                font-weight: bold;
+            }}
         </style>
     </head>
     <body>
         <h1>Video Pipeline Pro - Task Report</h1>
         
+        {night_processing_banner}
+        
+        <div class="section">
+            <h2>Task Overview</h2>
+            <div class="details-line">Name: <span class="highlight">{task_info['name']}</span></div>
+            <div class="details-line">ID: {task_info['id']}</div>
+            <div class="details-line">Status: <span class="highlight">{task_info['status']}</span></div>
+            <div class="details-line">Created: {task_info['created_at']}</div>
+            {timeline_html}
+        </div>
+
+        {f'''
+        <div class="section">
+            <h2>Upload Results</h2>
+            {upload_html}
+        </div>
+        ''' if upload_html else ''}
+
         <div class="section">
             <h2>Video Generation</h2>
             <div class="details-line">Generator: {task_info.get('generator', 'N/A')}</div>
@@ -335,22 +389,6 @@ def format_task_info_html(task_info, success, base_url=None):
                 {platforms_html}
             </ul>
         </div>
-
-        <div class="section">
-            <h2>Task Overview</h2>
-            <div class="details-line">Name: {task_info['name']}</div>
-            <div class="details-line">ID: {task_info['id']}</div>
-            <div class="details-line">Created: {task_info['created_at']}</div>
-            <div class="details-line">Status: {task_info['status']}</div>
-            {timeline_html}
-        </div>
-
-        {f'''
-        <div class="section">
-            <h2>Upload Results</h2>
-            {upload_html}
-        </div>
-        ''' if upload_html else ''}
 
         {f'''
         <div class="section">
@@ -428,7 +466,7 @@ def send_notification(to_emails, subject, message_html):
         logger.error(f"Failed to send email notifications: {str(e)}")
         return False
 
-def send_task_completion_notification(task_id, task_name, to_email, success=True, platforms=None):
+def send_task_completion_notification(task_id, task_name, to_email, success=True, platforms=None, night_processing=False):
     """Send a notification about task completion status with detailed information"""
     try:
         task_info = get_task_details(task_id)
@@ -438,7 +476,7 @@ def send_task_completion_notification(task_id, task_name, to_email, success=True
 
         # Determine the detailed status
         execution = task_info.get('execution', {})
-        used_fallbacks = bool(execution.get('fallback_usage'))
+        used_fallbacks = len(execution.get('fallback_usage', [])) > 0
         preview_mode = task_info.get('status') == 'preview'
         retry_count = len(execution.get('upload_attempts', {})) - 1 if execution.get('upload_attempts') else 0
         
@@ -473,7 +511,7 @@ def send_task_completion_notification(task_id, task_name, to_email, success=True
             return False
             
         base_url = config['APP_URL'].rstrip('/')
-        message_html = format_task_info_html(task_info, success, base_url)
+        message_html = format_task_info_html(task_info, success, base_url, night_processing)
         
         return send_notification(to_emails, subject, message_html)
     except Exception as e:
