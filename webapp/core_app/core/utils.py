@@ -13,7 +13,12 @@ import logging
 logger = logging.getLogger('app')
 import sys
 from webapp.core_app.core.database import db
-from webapp.core_app.core.log_manager import add_log_entry
+# Import log_manager directly here to ensure handler is activated
+from webapp.core_app.core.log_manager import add_log_entry, db_log_handler
+
+# Add the handler to the logger if not already added
+if db_log_handler not in logger.handlers:
+    logger.addHandler(db_log_handler)
 
 def ensure_processed_videos_dir():
     """Ensure the processed videos directory exists"""
@@ -44,8 +49,7 @@ def log_with_details(level, message, task_id=None, details=None, source=None):
     logger.log(logger_level, f"{message} {' (Task ' + str(task_id) + ')' if task_id else ''}")
     
     try:
-        # Import here to avoid circular imports
-        from webapp.core_app.core.log_manager import add_log_entry
+        # Use the imported add_log_entry from the top of the file
         add_log_entry(level, message, task_id=task_id, details=details, source=source)
     except Exception as e:
         print(f"ERROR: Failed to log to database: {str(e)}", file=sys.stderr)
@@ -108,16 +112,32 @@ def parse_curl_response(stdout_str, stderr_str):
 
 def check_generator_response(stdout_str, stderr_str):
     """Check if generator successfully created a video file"""
+    response_details = {
+        'stdout_length': len(stdout_str),
+        'stderr_length': len(stderr_str),
+        'stdout_sample': stdout_str[:200] if stdout_str else '',
+        'stderr_sample': stderr_str[:200] if stderr_str else ''
+    }
+    
     # First check for HTTP 200 status code in the output
     status_match = re.search(r'HTTP/\d\.\d\s+(\d{3})', stdout_str + stderr_str)
-    if status_match and status_match.group(1) == '200':
-        return True, ""
+    if status_match: 
+        response_details['http_status'] = status_match.group(1)
+        if status_match.group(1) == '200':
+            log_with_details('INFO', "Generator returned HTTP 200 status", details=response_details)
+            return True, ""
     
+    # Check for successful download message in stderr
+    if stderr_str and ('100' in stderr_str or 'Downloaded' in stderr_str):
+        log_with_details('INFO', "Generator download appears successful", details=response_details)
+        return True, ""
+        
     # Also consider it a success if stderr is empty or only contains progress info
     if not stderr_str.strip() or all(
         line.startswith(('* ', '  % Total', '100', 'Warning: ')) 
         for line in stderr_str.strip().split('\n')
     ):
+        log_with_details('INFO', "Generator completed with minimal output", details=response_details)
         return True, ""
         
     error_patterns = [
@@ -125,14 +145,21 @@ def check_generator_response(stdout_str, stderr_str):
         r'Connection refused',
         r'Could not resolve host',
         r'Operation timed out',
-        r'Failed to connect'
+        r'Failed to connect',
+        r'404 Not Found',
+        r'403 Forbidden',
+        r'500 Internal Server Error'
     ]
     
     for pattern in error_patterns:
-        if re.search(pattern, stderr_str, re.IGNORECASE):
+        if re.search(pattern, stderr_str + stdout_str, re.IGNORECASE):
+            log_with_details('ERROR', f"Generator failed with error pattern: {pattern}", 
+                            details=response_details)
             return False, stderr_str
     
     # If we don't detect specific errors, assume success
+    log_with_details('INFO', "Generator considered successful (no error patterns detected)", 
+                    details=response_details)
     return True, ""
 
 def check_utility_response(stdout_str, stderr_str):
@@ -196,6 +223,7 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
     }
     
     if clean_before:
+        log_with_details('INFO', "Cleaning up existing MP4 files before execution", details={'mode': mode})
         cleanup_existing_mp4s()
     
     for attempt in range(retries):
@@ -218,14 +246,31 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
             if mode == 'utility':
                 path_matches = re.findall(r'\{input\}', curl_command)
                 if path_matches:
+                    # First try to find MP4 files in the current directory
+                    mp4_files = [f for f in os.listdir('.') if f.lower().endswith('.mp4')]
+                    log_with_details('INFO', f"Available MP4 files for utility", 
+                        details={'mp4_files': mp4_files})
+                    
                     # Find the input file if it's in the command
                     file_path_matches = re.findall(r'((?:\.\/)?[\w\-\.\/\s]+\.mp4)', curl_command)
+                    
                     if file_path_matches:
                         input_file = file_path_matches[0]
+                        
+                        # Verify file exists
+                        if not os.path.exists(input_file):
+                            log_with_details('WARNING', f"Input file not found at {input_file}, looking for alternatives",
+                                details={'available_files': mp4_files})
+                                
+                            # Try to find a suitable alternative
+                            if mp4_files:
+                                input_file = mp4_files[0]  # Use the first available MP4
+                                log_with_details('INFO', f"Using alternative input file: {input_file}")
+                        
                         abs_input_file = os.path.abspath(input_file)
                         # Replace {input} with the quoted absolute path
                         modified_command = curl_command.replace('{input}', f'"{abs_input_file}"')
-                        log_with_details('DEBUG', f"Replaced {input} in utility command",
+                        log_with_details('INFO', f"Replaced input in utility command",
                             details={'original_command': curl_command, 'modified_command': modified_command})
             
             # Log command details before execution
@@ -453,28 +498,83 @@ def cleanup_existing_mp4s():
     }
     
     try:
+        # Get current working directory for better logging
+        cwd = os.getcwd()
+        cleanup_details['current_dir'] = cwd
+        log_with_details('INFO', f"Cleaning up temporary MP4 files in {cwd}")
+        
+        # First try with glob pattern
+        mp4_files = glob.glob("*.mp4")
+        
+        # Also try direct directory listing which might be more reliable
+        try:
+            for file in os.listdir(cwd):
+                if file.lower().endswith('.mp4') and file not in mp4_files:
+                    mp4_files.append(file)
+        except Exception as dir_error:
+            cleanup_details['dir_listing_error'] = str(dir_error)
+            log_with_details('WARNING', f"Error in directory listing: {str(dir_error)}",
+                details={'dir': cwd, 'error': str(dir_error)})
+        
+        # Log what we found
+        cleanup_details['files_found'] = mp4_files
+        log_with_details('INFO', f"Found {len(mp4_files)} MP4 files to clean up",
+            details={'files': mp4_files})
+        
         # Clean up temporary MP4 files (not in processed_videos)
-        for file in glob.glob("*.mp4*"):
-            cleanup_details['files_found'].append(file)
+        for file in mp4_files:
+            # Skip files in processed_videos directory
+            if 'processed_videos' in file:
+                log_with_details('INFO', f"Skipping processed video file: {file}")
+                continue
+                
+            # Get absolute path for better handling
+            abs_path = os.path.abspath(os.path.join(cwd, file))
+            
             try:
-                if os.path.exists(file):
-                    os.remove(file)
-                    cleanup_details['files_removed'].append(file)
-                    log_with_details('INFO', f"Cleaned up existing file: {file}",
-                        details={'file': file, 'success': True})
+                if os.path.exists(abs_path):
+                    # Get file size for logging
+                    try:
+                        file_size = os.path.getsize(abs_path)
+                    except:
+                        file_size = -1
+                        
+                    # Use multiple attempts if needed
+                    removed = False
+                    for attempt in range(3):
+                        try:
+                            os.remove(abs_path)
+                            removed = True
+                            break
+                        except Exception as retry_error:
+                            # Sleep briefly before retry
+                            time.sleep(0.5)
+                    
+                    if removed:
+                        cleanup_details['files_removed'].append(file)
+                        log_with_details('INFO', f"Cleaned up existing file: {file}",
+                            details={'file': abs_path, 'size': file_size})
+                    else:
+                        error_detail = {'file': abs_path, 'error': 'Failed after multiple attempts'}
+                        cleanup_details['errors'].append(error_detail)
+                        log_with_details('WARNING', f"Could not remove file after multiple attempts: {file}",
+                            details=error_detail)
             except Exception as e:
-                error_detail = {'file': file, 'error': str(e)}
+                error_detail = {'file': abs_path, 'error': str(e)}
                 cleanup_details['errors'].append(error_detail)
                 log_with_details('WARNING', f"Could not remove file {file}",
                     details=error_detail)
                 
         if cleanup_details['files_removed']:
-            log_with_details('INFO', f"Cleanup completed successfully",
+            log_with_details('INFO', f"Cleanup completed successfully: removed {len(cleanup_details['files_removed'])} files",
+                details=cleanup_details)
+        else:
+            log_with_details('INFO', "No files needed to be removed",
                 details=cleanup_details)
                 
     except Exception as e:
         cleanup_details['error'] = str(e)
-        log_with_details('ERROR', f"Error during cleanup",
+        log_with_details('ERROR', f"Error during cleanup: {str(e)}",
             details=cleanup_details)
 
 def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
@@ -487,35 +587,90 @@ def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
         'start_time': start_time.isoformat()
     }
     
+    log_with_details('INFO', f"Starting search for video files with {max_retries} attempts",
+                    details=search_details)
+    
+    # Track all files we've seen through all attempts for better debugging
+    all_seen_files = []
+    
     for attempt in range(max_retries):
         # Search in multiple locations for better compatibility with Docker
         video_files = []
         
         # Look for all MP4 files in the root directory (simpler approach)
-        for file in os.listdir('.'):
-            if file.lower().endswith('.mp4'):
-                video_files.append(os.path.abspath(file))
-                
+        try:
+            current_dir = os.getcwd()
+            for file in os.listdir(current_dir):
+                if file.lower().endswith('.mp4'):
+                    abs_path = os.path.abspath(os.path.join(current_dir, file))
+                    video_files.append(abs_path)
+                    if abs_path not in all_seen_files:
+                        all_seen_files.append(abs_path)
+        except Exception as e:
+            log_with_details('WARNING', f"Error listing current directory: {str(e)}",
+                            details={'error': str(e), 'current_dir': current_dir})
+        
+        # Also search in processed_videos directory
+        try:
+            proc_dir = os.path.join(current_dir, 'processed_videos')
+            if os.path.exists(proc_dir) and os.path.isdir(proc_dir):
+                for file in os.listdir(proc_dir):
+                    if file.lower().endswith('.mp4'):
+                        abs_path = os.path.abspath(os.path.join(proc_dir, file))
+                        video_files.append(abs_path)
+                        if abs_path not in all_seen_files:
+                            all_seen_files.append(abs_path)
+        except Exception as e:
+            log_with_details('WARNING', f"Error listing processed_videos directory: {str(e)}",
+                            details={'error': str(e), 'proc_dir': proc_dir})
+        
         # Log what we found
         log_with_details('INFO', f"Searching for video files (attempt {attempt + 1}/{max_retries})",
             details={'found_files': len(video_files), 'files': video_files})
         
-        # Filter files by size
+        # Filter files by size and make sure they're readable
         valid_videos = []
         for video in video_files:
-            if os.path.exists(video) and os.path.getsize(video) >= min_size_bytes:
-                valid_videos.append(video)
+            try:
+                if os.path.exists(video) and os.path.isfile(video):
+                    size = os.path.getsize(video)
+                    if size >= min_size_bytes:
+                        # Quick check that the file is readable
+                        with open(video, 'rb') as f:
+                            header = f.read(8)  # Read first 8 bytes
+                        valid_videos.append(video)
+                        log_with_details('INFO', f"Validated video file: {video}",
+                                        details={'file_size': size})
+                    else:
+                        log_with_details('WARNING', f"File too small: {video}",
+                                        details={'file_size': size, 'min_size': min_size_bytes})
+                else:
+                    log_with_details('WARNING', f"File doesn't exist or is not a file: {video}")
+            except Exception as e:
+                log_with_details('WARNING', f"Error validating file {video}: {str(e)}",
+                                details={'error': str(e)})
                 
         if valid_videos:
-            # Just use the most recent file
-            latest_video = max(valid_videos, key=os.path.getctime)
-            log_with_details('INFO', f"Found valid video file: {latest_video}")
-            return latest_video
+            try:
+                # Just use the most recent file
+                latest_video = max(valid_videos, key=os.path.getctime)
+                creation_time = datetime.fromtimestamp(os.path.getctime(latest_video))
+                log_with_details('INFO', f"Found valid video file: {latest_video}",
+                                details={'creation_time': creation_time.isoformat()})
+                return latest_video
+            except Exception as e:
+                log_with_details('ERROR', f"Error getting most recent file: {str(e)}",
+                                details={'error': str(e), 'valid_videos': valid_videos})
             
         # No valid videos found, sleep and try again
         if attempt < max_retries - 1:
-            time.sleep(delay)
+            sleep_time = delay * (attempt + 1)  # Increasing backoff
+            log_with_details('INFO', f"No valid videos found, retrying in {sleep_time} seconds (attempt {attempt + 1}/{max_retries})")
+            time.sleep(sleep_time)
     
+    # Final attempt failed
+    log_with_details('WARNING', f"Failed to find any valid video files after {max_retries} attempts",
+                    details={'all_seen_files': all_seen_files})
     return None
 
 def cleanup_video(video_file):

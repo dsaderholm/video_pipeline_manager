@@ -9,6 +9,12 @@ from datetime import datetime, timedelta
 import logging
 import sqlite3
 logger = logging.getLogger('app')
+# Add after the existing logger line
+from webapp.core_app.core.log_manager import db_log_handler
+
+# Add this to ensure the handler is attached
+if db_log_handler not in logger.handlers:
+    logger.addHandler(db_log_handler)
 from webapp.core_app.core.utils import execute_curl, get_latest_video, cleanup_video, format_upload_command, log_with_details
 from webapp.core_app.core.email_utils import send_task_completion_notification
 from webapp.core_app.core.database import db
@@ -39,6 +45,11 @@ def create_logger_with_task_id(task_id):
             return True
     
     logger_instance.addFilter(TaskFilter())
+    
+    # Add this line to ensure the db_log_handler is attached
+    if db_log_handler not in logger_instance.handlers:
+        logger_instance.addHandler(db_log_handler)
+        
     return logger_instance
 
 def should_process_at_night():
@@ -465,11 +476,26 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                     details=generation_details)
                 return None
 
-            # Generate video
+            # Generate video - First cleanup any existing files
+            cleanup_existing_mp4s()
+            
             try:
-                # Add short delay to ensure any file system operations are complete
-                time.sleep(1)
-                success, stdout, original_filename = execute_curl(task_data[-1], retries=3, retry_delay=5, validate_output=True, mode='generator')
+                # Log the generator command that will be executed
+                log_with_task_details('INFO', f"Executing generator command",
+                    task_id=task_id,
+                    details={'generator_curl': task_data[-1]})
+                    
+                # Execute the generator command with increased retries and delay
+                success, stdout, original_filename = execute_curl(
+                    task_data[-1], 
+                    retries=3, 
+                    retry_delay=5, 
+                    clean_before=True,  # Ensure clean state
+                    validate_output=True, 
+                    timeout=600,  # 10 minute timeout
+                    mode='generator'
+                )
+                
                 if not success:
                     error_msg = f"Generator failed: {original_filename}"  # original_filename contains error in case of failure
                     log_with_task_details('ERROR', error_msg,
@@ -478,12 +504,23 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                     update_task_status(task_id, 'failed', 'failed', None, conn)
                     return None
                 
-                # Add short delay to ensure file is available
-                time.sleep(1)
+                # Add delay to ensure file system operations are complete
+                time.sleep(3)
+                
+                # Log success
+                log_with_task_details('INFO', f"Generator command executed successfully",
+                    task_id=task_id,
+                    details={'original_filename': original_filename})
             except Exception as e:
+                # Log the exception
+                log_with_task_details('ERROR', f"Generator execution failed with exception: {str(e)}",
+                    task_id=task_id,
+                    details={'error': str(e), **generation_details})
+                    
                 # Make sure to clean up any temporary files
                 if current_video_file and os.path.exists(current_video_file):
                     cleanup_video(current_video_file)
+                    
                 # Check if transaction is active before rolling back
                 try:
                     c.execute("SELECT 1")  # Quick test if transaction is active
@@ -491,13 +528,35 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                 except sqlite3.OperationalError:
                     # Transaction wasn't active, that's okay
                     pass
+                    
+                update_task_status(task_id, 'failed', 'failed', None, conn)
                 return None
 
-            current_video_file = get_latest_video()
+            # Find the generated video file with additional logging
+            log_with_task_details('INFO', f"Searching for generated video file",
+                task_id=task_id,
+                details={'current_dir': os.getcwd()})
+                
+            # List files in current directory to help with debugging
+            try:
+                files = os.listdir('.')
+                mp4_files = [f for f in files if f.lower().endswith('.mp4')]
+                log_with_task_details('INFO', f"Files in directory after generator execution", 
+                    task_id=task_id,
+                    details={'all_files': files, 'mp4_files': mp4_files})
+            except Exception as list_e:
+                log_with_task_details('WARNING', f"Error listing directory contents: {str(list_e)}", 
+                    task_id=task_id,
+                    details={'error': str(list_e)})
+            
+            # Try to get the latest video multiple times with increased retries
+            current_video_file = get_latest_video(max_retries=5, delay=3)
             if not current_video_file:
-                # Retry after a short delay
-                time.sleep(3)
-                current_video_file = get_latest_video()
+                # One more attempt with longer delay
+                log_with_task_details('WARNING', "First attempt to find video file failed, retrying...",
+                    task_id=task_id)
+                time.sleep(5)
+                current_video_file = get_latest_video(max_retries=5, delay=3)
                 
             if not current_video_file:
                 error_msg = "No video file was generated"
@@ -507,66 +566,182 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                 update_task_status(task_id, 'failed', 'failed', None, conn)
                 raise Exception(error_msg)
 
-            # Get the full actual filename including extension
-            original_name = original_filename if original_filename else os.path.basename(current_video_file)
+            # Get the full actual filename including extension with better error handling
+            if original_filename:
+                original_name = original_filename 
+            else:
+                original_name = os.path.basename(current_video_file)
+                log_with_task_details('WARNING', "Using fallback filename from path",
+                    task_id=task_id,
+                    details={'fallback_name': original_name})
+                    
             # Get just the name part for logging
             display_name = os.path.splitext(original_name)[0]
             log_with_task_details('INFO', f"Using generated video filename",
                 task_id=task_id,
-                details={'video_name': display_name})
+                details={'video_name': display_name, 'full_path': current_video_file})
 
             files_to_cleanup.add(current_video_file)
 
-            # Apply utilities
+            # Apply utilities with improved error handling
             if task_data[3]:  # utilities JSON string
-                utilities = json.loads(task_data[3])
-                for util_id in utilities:
-                    c.execute("SELECT utility_curl FROM utilities WHERE id=?", (util_id,))
-                    util = c.fetchone()
-                    if not util:
-                        continue
+                try:
+                    utilities = json.loads(task_data[3])
+                    log_with_task_details('INFO', f"Processing {len(utilities)} utilities",
+                        task_id=task_id,
+                        details={'utility_count': len(utilities)})
+                        
+                    for index, util_id in enumerate(utilities):
+                        c.execute("SELECT id, utility_curl, name FROM utilities WHERE id=?", (util_id,))
+                        util = c.fetchone()
+                        if not util:
+                            log_with_task_details('WARNING', f"Utility ID {util_id} not found, skipping",
+                                task_id=task_id)
+                            continue
+                            
+                        utility_id, utility_curl, utility_name = util
+                        log_with_task_details('INFO', f"Processing utility {index+1}/{len(utilities)}: {utility_name}",
+                            task_id=task_id,
+                            details={
+                                'utility_id': utility_id,
+                                'utility_name': utility_name,
+                                'utility_curl': utility_curl
+                            })
 
-                    try:
-                        # Ensure the video file exists and is accessible
-                        if not os.path.exists(current_video_file):
-                            log_with_task_details('ERROR', f"Video file not found for utility: {current_video_file}",
-                                task_id=task_id,
-                                details=generation_details)
-                            # Try to get the latest video again
-                            time.sleep(2)
-                            latest = get_latest_video()
-                            if latest:
-                                current_video_file = latest
-                                log_with_task_details('INFO', f"Retrieved alternative video file: {current_video_file}",
+                        try:
+                            # Verify the current video file exists and has proper size
+                            if not os.path.exists(current_video_file):
+                                log_with_task_details('ERROR', f"Video file not found for utility: {current_video_file}",
                                     task_id=task_id,
                                     details=generation_details)
-                            else:
-                                raise Exception("Could not find video file for utility processing")
+                                    
+                                # List all files to help debug
+                                try:
+                                    files = os.listdir('.')
+                                    mp4_files = [f for f in files if f.lower().endswith('.mp4')]
+                                    log_with_task_details('INFO', f"Looking for alternative files", 
+                                        task_id=task_id,
+                                        details={'all_files': files, 'mp4_files': mp4_files})
+                                except Exception as list_e:
+                                    log_with_task_details('WARNING', f"Error listing directory contents: {str(list_e)}", 
+                                        task_id=task_id,
+                                        details={'error': str(list_e)})
                                 
-                        util_cmd = util[0].format(input=current_video_file)
-                        # Allow time for file availability
-                        time.sleep(1)
-                        success, stdout, stderr = execute_curl(util_cmd, retries=3, retry_delay=5, validate_output=True, mode='utility')
-                        if not success:
-                            error_msg = f"Utility failed: {stderr}"
-                            log_with_task_details('ERROR', error_msg,
+                                # Try to get the latest video again with more retries
+                                time.sleep(3)
+                                latest = get_latest_video(max_retries=5, delay=2)
+                                if latest:
+                                    current_video_file = latest
+                                    log_with_task_details('INFO', f"Retrieved alternative video file: {current_video_file}",
+                                        task_id=task_id,
+                                        details={'alternative_file': current_video_file})
+                                else:
+                                    log_with_task_details('ERROR', "Could not find video file for utility processing",
+                                        task_id=task_id)
+                                    raise Exception("Could not find video file for utility processing")
+                            
+                            # Additional validation on the file
+                            file_size = os.path.getsize(current_video_file)
+                            if file_size < 1024:  # Minimum 1KB
+                                log_with_task_details('ERROR', f"Video file too small ({file_size} bytes)",
+                                    task_id=task_id,
+                                    details={'file_size': file_size, 'file_path': current_video_file})
+                                raise Exception(f"Video file too small: {file_size} bytes")
+                                
+                            # Format the utility command with proper quoting
+                            abs_video_file = os.path.abspath(current_video_file)
+                            util_cmd = utility_curl.replace('{input}', f'"{abs_video_file}"')
+                            
+                            log_with_task_details('INFO', f"Executing utility command",
                                 task_id=task_id,
-                                details={'stdout': stdout, 'stderr': stderr, **generation_details})
-                            update_task_status(task_id, 'failed', 'failed', None, conn)
-                            raise Exception(error_msg)
-                        
-                        # Allow time for file operations to complete
-                        time.sleep(1)
-                        
-                    except Exception as e:
-                        # Clean up on utility failure
-                        log_with_task_details('ERROR', f"Utility failed with error: {str(e)}",
-                            task_id=task_id,
-                            details=generation_details)
-                        if current_video_file and os.path.exists(current_video_file):
-                            cleanup_video(current_video_file)
-                        safe_rollback(conn, c)
-                        raise
+                                details={
+                                    'utility_cmd': util_cmd,
+                                    'video_file': current_video_file,
+                                    'abs_path': abs_video_file
+                                })
+                                
+                            # Allow time for file availability
+                            time.sleep(2)
+                            
+                            # Execute the utility with more generous retry settings
+                            success, stdout, stderr = execute_curl(
+                                util_cmd, 
+                                retries=3, 
+                                retry_delay=5, 
+                                validate_output=True, 
+                                timeout=300,  # 5 minute timeout
+                                mode='utility'
+                            )
+                            
+                            if not success:
+                                error_msg = f"Utility failed: {stderr}"
+                                log_with_task_details('ERROR', error_msg,
+                                    task_id=task_id,
+                                    details={
+                                        'stdout': stdout, 
+                                        'stderr': stderr, 
+                                        'utility_name': utility_name,
+                                        **generation_details
+                                    })
+                                update_task_status(task_id, 'failed', 'failed', None, conn)
+                                raise Exception(error_msg)
+                            
+                            # Allow more time for file operations to complete
+                            time.sleep(3)
+                            
+                            # Check if the utility produced a new video file
+                            latest_video = get_latest_video()
+                            if latest_video and latest_video != current_video_file:
+                                log_with_task_details('INFO', f"Utility produced new video file",
+                                    task_id=task_id,
+                                    details={
+                                        'old_file': current_video_file,
+                                        'new_file': latest_video
+                                    })
+                                    
+                                files_to_cleanup.add(current_video_file)  # Add old file to cleanup
+                                current_video_file = latest_video  # Update current file to new one
+                                
+                            log_with_task_details('INFO', f"Utility {utility_name} completed successfully",
+                                task_id=task_id,
+                                details={
+                                    'utility_id': utility_id,
+                                    'utility_name': utility_name
+                                })
+                            
+                        except Exception as e:
+                            # Log detailed error and continue with next utility if possible
+                            log_with_task_details('ERROR', f"Utility {utility_name} failed: {str(e)}",
+                                task_id=task_id,
+                                details={
+                                    'utility_id': utility_id,
+                                    'utility_name': utility_name,
+                                    'error': str(e)
+                                })
+                                
+                            # If this is a critical error that should stop processing,
+                            # clean up and exit with error
+                            if "Could not find video file" in str(e) or "Video file too small" in str(e):
+                                if current_video_file and os.path.exists(current_video_file):
+                                    cleanup_video(current_video_file)
+                                safe_rollback(conn, c)
+                                update_task_status(task_id, 'failed', 'failed', None, conn)
+                                raise
+                                
+                except json.JSONDecodeError as e:
+                    log_with_task_details('ERROR', f"Failed to parse utilities JSON: {str(e)}",
+                        task_id=task_id,
+                        details={'utilities_json': task_data[3], 'error': str(e)})
+                except Exception as e:
+                    # Clean up on general utility processing failure
+                    log_with_task_details('ERROR', f"Utility processing failed with error: {str(e)}",
+                        task_id=task_id,
+                        details={'error': str(e), **generation_details})
+                    if current_video_file and os.path.exists(current_video_file):
+                        cleanup_video(current_video_file)
+                    safe_rollback(conn, c)
+                    update_task_status(task_id, 'failed', 'failed', None, conn)
+                    raise
 
             # Handle preview mode
             if preview_mode:
@@ -1236,15 +1411,19 @@ def process_night_queue():
     # First check if we need to recover from missed processing
     check_for_missed_processing()
     
-    if not should_process_at_night():
+    # Check if we should process at night
+    in_night_window = should_process_at_night()
+    if not in_night_window:
         logger.debug("Outside night processing window, skipping night queue")
         return
+    
+    logger.info("Starting night processing for scheduled tasks")
 
     lock_acquired = False
     try:
         # Try to acquire lock before processing
         if not check_and_set_lock():
-            logger.debug("Could not acquire lock for night processing, will retry next cycle")
+            logger.info("Could not acquire lock for night processing, will retry next cycle")
             return
 
         lock_acquired = True
@@ -1256,7 +1435,7 @@ def process_night_queue():
             tomorrow_day = tomorrow.strftime('%A')[:3].lower()
             
             c.execute("""
-                SELECT id, schedule 
+                SELECT id, schedule, name
                 FROM tasks 
                 WHERE status != 'failed'
                 AND processing_status != 'failed'
@@ -1264,21 +1443,38 @@ def process_night_queue():
             """, (f'%{tomorrow_day}|%',))
             
             tasks = c.fetchall()
+            logger.info(f"Found {len(tasks)} tasks scheduled for {tomorrow_day}")
 
-            for task_id, schedule in tasks:
+            for task_id, schedule, task_name in tasks:
                 schedule_times = get_next_day_schedules(schedule)
                 if not schedule_times:
+                    logger.info(f"No schedule times found for task {task_id} ({task_name}) on {tomorrow_day}")
                     continue
+                
+                logger.info(f"Processing task {task_id} ({task_name}) with {len(schedule_times)} schedule time(s)")
                     
                 try:
                     # Generate a video for each scheduled time
                     for schedule_time in schedule_times:
-                        process_video_generation(task_id, schedule_time, conn=conn)
+                        logger.info(f"Generating video for task {task_id} at {schedule_time}")
+                        
+                        # First clean up any existing temporary files to avoid confusion
+                        cleanup_existing_mp4s()
+                        
+                        # Process the video generation
+                        result = process_video_generation(task_id, schedule_time, conn=conn)
+                        
+                        if result:
+                            logger.info(f"Successfully generated video for task {task_id} scheduled at {schedule_time}")
+                        else:
+                            logger.warning(f"Failed to generate video for task {task_id} scheduled at {schedule_time}")
                 except Exception as e:
                     log_with_task_details('ERROR', 
                         f"Night processing failed for task {task_id}: {str(e)}",
                         task_id=task_id,
-                        details={'error': str(e), 'schedule_time': schedule_time})
+                        details={'error': str(e), 'schedule_time': str(schedule_time)})
+            
+            logger.info("Night processing queue completed")
 
     except Exception as e:
         logger.error(f"Error in night processing queue: {str(e)}")
@@ -1287,10 +1483,12 @@ def process_night_queue():
         if lock_acquired:
             try:
                 release_lock()
+                logger.info("Released lock after night processing")
             except Exception as e:
                 logger.error(f"Failed to release lock after night processing: {str(e)}")
                 try:
                     force_release_lock()
+                    logger.info("Force-released lock after night processing")
                 except Exception as force_e:
                     logger.error(f"Force release also failed after night processing: {str(force_e)}")
 
