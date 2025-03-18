@@ -15,7 +15,7 @@ from webapp.core_app.core.log_manager import db_log_handler
 # Add this to ensure the handler is attached
 if db_log_handler not in logger.handlers:
     logger.addHandler(db_log_handler)
-from webapp.core_app.core.utils import execute_curl, get_latest_video, cleanup_video, format_upload_command, log_with_details
+from webapp.core_app.core.utils import execute_curl, get_latest_video, cleanup_video, format_upload_command, log_with_details, cleanup_existing_mp4s
 from webapp.core_app.core.email_utils import send_task_completion_notification
 from webapp.core_app.core.database import db
 from flask import current_app
