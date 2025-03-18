@@ -44,18 +44,32 @@ def log_with_details(level, message, task_id=None, details=None, source=None):
         details = {}
     details['task_id'] = task_id
     
-    # Only log to database to avoid duplication
-    # Logger is already configured to log to console and file
+    # Only log once through the standard logger
+    # This way it goes to console/file AND database via db_log_handler
     try:
-        # Use the imported add_log_entry from the top of the file
-        add_log_entry(level, message, task_id=task_id, details=details, source=source)
-        
-        # Also log to standard logger to ensure it's in the console and file logs
-        # This doesn't create duplication because we removed the second db log in add_log_entry
         logger_level = getattr(logging, level.upper())
-        logger.log(logger_level, f"{message} {' (Task ' + str(task_id) + ')' if task_id else ''}")
+        log_msg = f"{message} {' (Task ' + str(task_id) + ')' if task_id else ''}"
+        
+        # Create a log record with all necessary details
+        record = logging.LogRecord(
+            name='app',
+            level=logger_level,
+            pathname='',
+            lineno=0,
+            msg=log_msg,
+            args=(),
+            exc_info=None
+        )
+        
+        # Add custom attributes for the database handler
+        record.task_id = task_id
+        record.details = details
+        record.source = source
+        
+        # Use logger.handle which will route through all handlers including db_log_handler
+        logger.handle(record)
     except Exception as e:
-        print(f"ERROR: Failed to log to database: {str(e)}", file=sys.stderr)
+        print(f"ERROR: Failed to log: {str(e)}", file=sys.stderr)
         print(f"{level}: {message} (Task {task_id})", file=sys.stderr)
         if details:
             print(f"Details: {json.dumps(details, default=str)}", file=sys.stderr)

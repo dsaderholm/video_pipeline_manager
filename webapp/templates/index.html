@@ -448,13 +448,21 @@
 
     async function runTask(id) {
         try {
+            console.log(`Running task ${id}`);
+            showToast(`Attempting to run task ${id}...`, 'info');
+            
             const response = await fetch(`/api/tasks/${id}/run`, {
                 method: 'POST'
             });
+            
+            console.log(`Got response:`, response);
             const result = await response.json();
-            showToast(result.message, 'success');
+            console.log(`Response data:`, result);
+            
+            showToast(result.message, result.success ? 'success' : 'error');
             await loadData();
         } catch (error) {
+            console.error(`Error running task ${id}:`, error);
             showToast('Error running task: ' + error.message, 'error');
         }
     }

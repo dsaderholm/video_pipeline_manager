@@ -528,6 +528,7 @@ def run_task(id):
             conn.commit()
 
         from webapp.core_app.core.pipeline import process_video_pipeline
+        logger.info(f"Starting video pipeline for task {id}")
         process_video_pipeline(id)
         
         # Reset manual run flag
