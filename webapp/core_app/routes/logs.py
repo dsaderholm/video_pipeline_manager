@@ -3,7 +3,12 @@ from datetime import datetime, timedelta
 from webapp.core_app.core.log_manager import get_logs, clear_old_logs
 from webapp.core_app.timezone import localize_timestamp, get_timezone
 from webapp.core_app.core.database import db
+import logging
+import os
 import pytz
+
+# Get the app logger
+logger = logging.getLogger('app')
 
 # Create blueprint
 logs_bp = Blueprint('logs', __name__, url_prefix='')

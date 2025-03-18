@@ -67,7 +67,7 @@ class DatabaseLogHandler(logging.Handler):
                 time.sleep(0.5)
     
     def _save_records_to_db(self, records):
-        """Save a batch of records to the database"""
+        """Save a batch of records to the database with deduplication"""
         if not records:
             return
             
@@ -81,24 +81,39 @@ class DatabaseLogHandler(logging.Handler):
                 conn = db._create_connection()
                 c = conn.cursor()
                 
-                # Don't use transactions for logging to avoid locks
+                # Process each record with deduplication
                 for record in records:
                     current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
                     task_id = getattr(record, 'task_id', None)
+                    message = record.getMessage()
+                    level = record.levelname
+                    details = json.dumps(getattr(record, 'details', None)) if hasattr(record, 'details') else None
+                    source = record.module
                     
+                    # Check for duplicates in the last second
                     c.execute('''
-                        INSERT INTO logs (timestamp, level, message, task_id, details, source)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    ''', (
-                        current_time,
-                        record.levelname,
-                        record.getMessage(),
-                        task_id,
-                        json.dumps(getattr(record, 'details', None)) if hasattr(record, 'details') else None,
-                        record.module
-                    ))
-                    # Commit each record individually to avoid holding locks
-                    conn.commit()
+                        SELECT COUNT(*) FROM logs 
+                        WHERE message = ? AND level = ? AND task_id = ? 
+                        AND timestamp > datetime(?, '-1 seconds')
+                    ''', (message, level, task_id, current_time))
+                    
+                    duplicate_count = c.fetchone()[0]
+                    
+                    # Only insert if no duplicate found
+                    if duplicate_count == 0:
+                        c.execute('''
+                            INSERT INTO logs (timestamp, level, message, task_id, details, source)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        ''', (
+                            current_time,
+                            level,
+                            message,
+                            task_id,
+                            details,
+                            source
+                        ))
+                        # Commit each record individually to avoid holding locks
+                        conn.commit()
                 
                 # Success, exit the retry loop
                 break
@@ -142,18 +157,30 @@ def add_log_entry(level, message, task_id=None, details=None, source=None):
         conn = db._create_connection()
         c = conn.cursor()
         
+        # Before inserting, check if a duplicate entry already exists within the last second
+        # This helps prevent duplicate logs
         c.execute('''
-            INSERT INTO logs (timestamp, level, message, task_id, details, source)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (
-            current_time,
-            level,
-            message,
-            task_id,
-            json.dumps(details) if details else None,
-            source or "direct"
-        ))
-        conn.commit()
+            SELECT COUNT(*) FROM logs 
+            WHERE message = ? AND level = ? AND task_id = ? 
+            AND timestamp > datetime(?, '-1 seconds')
+        ''', (message, level, task_id, current_time))
+        
+        duplicate_count = c.fetchone()[0]
+        
+        # Only insert if no duplicate found
+        if duplicate_count == 0:
+            c.execute('''
+                INSERT INTO logs (timestamp, level, message, task_id, details, source)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (
+                current_time,
+                level,
+                message,
+                task_id,
+                json.dumps(details) if details else None,
+                source or "direct"
+            ))
+            conn.commit()
         
     except Exception as e:
         print(f"Direct log entry failed: {e}")
@@ -164,9 +191,6 @@ def add_log_entry(level, message, task_id=None, details=None, source=None):
                 conn.close()
             except:
                 pass
-    
-    # REMOVED: No longer create duplicate log records for the handler queue
-    # This was causing the double logging
 
 def get_logs(limit=100, level=None, task_id=None, since=None, processing_status=None):
     """Retrieve logs with optional filtering"""
