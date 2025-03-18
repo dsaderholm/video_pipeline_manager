@@ -5,6 +5,7 @@ import sys
 import logging
 import shutil
 import threading
+import subprocess
 from datetime import datetime, timedelta
 import logging
 import sqlite3
@@ -475,9 +476,27 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                     task_id=task_id,
                     details=generation_details)
                 return None
+                
+            # Log task data to debug
+            log_with_task_details('INFO', "Retrieved task data",
+                task_id=task_id,
+                details={
+                    'task_id': task_data[0],
+                    'name': task_data[1], 
+                    'generator_id': task_data[2],
+                    'utilities': task_data[3],
+                    'schedule': task_data[4],
+                    'generator_curl': task_data[-1]
+                })
 
             # Generate video - First cleanup any existing files
-            cleanup_existing_mp4s()
+            try:
+                log_with_task_details('INFO', "Calling cleanup_existing_mp4s", task_id=task_id)
+                cleanup_existing_mp4s()
+                log_with_task_details('INFO', "Completed cleanup_existing_mp4s", task_id=task_id)
+            except Exception as cleanup_error:
+                log_with_task_details('ERROR', f"Error in cleanup_existing_mp4s: {str(cleanup_error)}", task_id=task_id)
+                raise
             
             try:
                 # Log the generator command that will be executed

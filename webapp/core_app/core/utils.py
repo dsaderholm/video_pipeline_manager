@@ -44,13 +44,16 @@ def log_with_details(level, message, task_id=None, details=None, source=None):
         details = {}
     details['task_id'] = task_id
     
-    # First log to standard logger
-    logger_level = getattr(logging, level.upper())
-    logger.log(logger_level, f"{message} {' (Task ' + str(task_id) + ')' if task_id else ''}")
-    
+    # Only log to database to avoid duplication
+    # Logger is already configured to log to console and file
     try:
         # Use the imported add_log_entry from the top of the file
         add_log_entry(level, message, task_id=task_id, details=details, source=source)
+        
+        # Also log to standard logger to ensure it's in the console and file logs
+        # This doesn't create duplication because we removed the second db log in add_log_entry
+        logger_level = getattr(logging, level.upper())
+        logger.log(logger_level, f"{message} {' (Task ' + str(task_id) + ')' if task_id else ''}")
     except Exception as e:
         print(f"ERROR: Failed to log to database: {str(e)}", file=sys.stderr)
         print(f"{level}: {message} (Task {task_id})", file=sys.stderr)
@@ -222,6 +225,10 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
         'mode': mode
     }
     
+    # Always log when execute_curl is called
+    log_with_details('INFO', f"execute_curl called with mode: {mode}", 
+                     details={'command': curl_command, 'mode': mode})
+    
     if clean_before:
         log_with_details('INFO', "Cleaning up existing MP4 files before execution", details={'mode': mode})
         cleanup_existing_mp4s()
@@ -273,20 +280,55 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
                         log_with_details('INFO', f"Replaced input in utility command",
                             details={'original_command': curl_command, 'modified_command': modified_command})
             
+
+            
             # Log command details before execution
-            log_with_details('DEBUG', f"Executing command (attempt {attempt+1}/{retries})",
+            log_with_details('INFO', f"Executing command (attempt {attempt+1}/{retries})",
                 details={'original_command': curl_command, 'modified_command': modified_command})
             
-            process = subprocess.Popen(
-                modified_command,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
-            )
+            try:
+                log_with_details('INFO', "Starting Popen subprocess")
+                process = subprocess.Popen(
+                    modified_command,
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+                log_with_details('INFO', f"Subprocess started with PID: {process.pid}")
+            except Exception as subprocess_error:
+                log_with_details('ERROR', f"Failed to start subprocess: {str(subprocess_error)}",
+                    details={'error': str(subprocess_error), 'command': modified_command})
+                raise
             
-            stdout, stderr = process.communicate(timeout=timeout)
-            stdout_str = stdout.decode(errors='replace')
-            stderr_str = stderr.decode(errors='replace')
+            try:
+                log_with_details('INFO', f"Waiting for subprocess to complete with timeout: {timeout}s")
+                stdout, stderr = process.communicate(timeout=timeout)
+                stdout_str = stdout.decode(errors='replace')
+                stderr_str = stderr.decode(errors='replace')
+                
+                log_with_details('INFO', f"Subprocess completed with return code: {process.returncode}",
+                    details={
+                        'return_code': process.returncode,
+                        'stdout_length': len(stdout_str),
+                        'stderr_length': len(stderr_str),
+                        'stdout_preview': stdout_str[:200] if stdout_str else '',
+                        'stderr_preview': stderr_str[:200] if stderr_str else '',
+                        'execution_time': f"{(datetime.now() - datetime.fromisoformat(execution_details['start_time'])).total_seconds():.2f}s"
+                    })
+            except subprocess.TimeoutExpired as timeout_error:
+                log_with_details('ERROR', f"Subprocess timed out after {timeout}s",
+                    details={
+                        'timeout': timeout,
+                        'pid': process.pid,
+                        'command': modified_command
+                    })
+                # Try to kill the process
+                try:
+                    process.kill()
+                    log_with_details('INFO', f"Killed timed out process (PID: {process.pid})")
+                except Exception as kill_error:
+                    log_with_details('WARNING', f"Failed to kill timed out process: {str(kill_error)}")
+                raise
             
             attempt_details.update({
                 'return_code': process.returncode,

@@ -164,28 +164,9 @@ def add_log_entry(level, message, task_id=None, details=None, source=None):
                 conn.close()
             except:
                 pass
-                
-    # Also create a log record for the handler queue as backup
-    try:
-        record = logging.LogRecord(
-            name="app",
-            level=getattr(logging, level.upper()),
-            pathname="",
-            lineno=0,
-            msg=message,
-            args=(),
-            exc_info=None
-        )
-        
-        # Add custom attributes
-        record.task_id = task_id
-        record.details = details
-        record.source = source
-        
-        # Add to handler queue for processing
-        db_log_handler.emit(record)
-    except Exception as e:
-        print(f"Log record creation failed: {e}")
+    
+    # REMOVED: No longer create duplicate log records for the handler queue
+    # This was causing the double logging
 
 def get_logs(limit=100, level=None, task_id=None, since=None, processing_status=None):
     """Retrieve logs with optional filtering"""
