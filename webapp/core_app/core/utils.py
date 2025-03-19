@@ -265,34 +265,27 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
             
             # Only modify commands for utility mode by directly replacing {input} with the absolute path in quotes
             if mode == 'utility':
-                path_matches = re.findall(r'\{input\}', curl_command)
-                if path_matches:
-                    # First try to find MP4 files in the current directory
-                    mp4_files = [f for f in os.listdir('.') if f.lower().endswith('.mp4')]
-                    log_with_details('INFO', f"Available MP4 files for utility", 
-                        details={'mp4_files': mp4_files})
-                    
-                    # Find the input file if it's in the command
-                    file_path_matches = re.findall(r'((?:\.\/)?[\w\-\.\/\s]+\.mp4)', curl_command)
-                    
-                    if file_path_matches:
-                        input_file = file_path_matches[0]
-                        
-                        # Verify file exists
-                        if not os.path.exists(input_file):
-                            log_with_details('WARNING', f"Input file not found at {input_file}, looking for alternatives",
-                                details={'available_files': mp4_files})
-                                
-                            # Try to find a suitable alternative
-                            if mp4_files:
-                                input_file = mp4_files[0]  # Use the first available MP4
-                                log_with_details('INFO', f"Using alternative input file: {input_file}")
-                        
-                        abs_input_file = os.path.abspath(input_file)
-                        # Replace {input} with the quoted absolute path
-                        modified_command = curl_command.replace('{input}', f'"{abs_input_file}"')
-                        log_with_details('INFO', f"Replaced input in utility command",
-                            details={'original_command': curl_command, 'modified_command': modified_command})
+                log_with_details('INFO', f"Processing utility command", 
+                    details={'original_command': curl_command})
+                
+                # First try to find MP4 files in the current directory
+                mp4_files = [f for f in os.listdir('.') if f.lower().endswith('.mp4')]
+                log_with_details('INFO', f"Available MP4 files for utility", 
+                    details={'mp4_files': mp4_files})
+                
+                input_file = None
+                if mp4_files:
+                    input_file = mp4_files[0]  # Use the first available MP4
+                    abs_input_file = os.path.abspath(input_file)
+                    # Replace {input} with the quoted absolute path
+                    modified_command = curl_command.replace('{input}', f'"{abs_input_file}"')
+                    log_with_details('INFO', f"Replaced input in utility command",
+                        details={'original_command': curl_command, 'modified_command': modified_command})
+                else:
+                    log_with_details('ERROR', "No MP4 files found for utility command", 
+                        details={'current_dir': os.getcwd()})
+                    # Return failure immediately if no MP4 files found
+                    return False, "", "No MP4 files found for processing"
             
 
             

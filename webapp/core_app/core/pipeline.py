@@ -667,9 +667,16 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                                     details={'file_size': file_size, 'file_path': current_video_file})
                                 raise Exception(f"Video file too small: {file_size} bytes")
                                 
-                            # Format the utility command with proper quoting
-                            abs_video_file = os.path.abspath(current_video_file)
-                            util_cmd = utility_curl.replace('{input}', f'"{abs_video_file}"')
+                            # Format the utility command - don't replace {input} yet
+                            # Let execute_curl handle this with the proper path
+                            util_cmd = utility_curl
+                            
+                            # Make sure the video file exists
+                            if not os.path.exists(current_video_file):
+                                log_with_task_details('ERROR', f"Video file not found for utility: {current_video_file}",
+                                    task_id=task_id,
+                                    details={'util_cmd': util_cmd})
+                                raise Exception(f"Video file not found: {current_video_file}")
                             
                             log_with_task_details('INFO', f"Executing utility command",
                                 task_id=task_id,
