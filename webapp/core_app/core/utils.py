@@ -277,7 +277,11 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
                 if mp4_files:
                     input_file = mp4_files[0]  # Use the first available MP4
                     abs_input_file = os.path.abspath(input_file)
-                    # Replace {input} with the quoted absolute path
+                    
+                    # Convert Windows backslashes to forward slashes for curl
+                    abs_input_file = abs_input_file.replace('\\', '/')
+                    
+                    # Replace {input} with the quoted absolute path - add double quotes to handle spaces
                     modified_command = curl_command.replace('{input}', f'"{abs_input_file}"')
                     log_with_details('INFO', f"Replaced input in utility command",
                         details={'original_command': curl_command, 'modified_command': modified_command})
@@ -889,15 +893,34 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
             hashtags = ' '.join(tags)
 
         # Format the command with all required parameters
-        formatted_cmd = cmd_template.format(
-            video=f'{safe_video_path}',  # Use quotes to handle spaces in path
-            description=video_title,
-            account=platform_data['account_name'],
-            sound=task_data['sound_name'],
-            volume=task_data['sound_volume'],
-            hashtags=hashtags,
-            input=f'"{safe_video_path}"'  # Also handle the input parameter for utilities
-        )
+        try:
+            # Handle single-quoted parameters carefully
+            safe_path_quoted = f'"{safe_video_path}"'
+            # Convert Windows backslashes to forward slashes for curl
+            safe_path_quoted = safe_path_quoted.replace('\\', '/')
+            
+            formatted_cmd = cmd_template.format(
+                video=safe_path_quoted,
+                description=video_title,
+                account=platform_data['account_name'],
+                sound=task_data['sound_name'],
+                volume=task_data['sound_volume'],
+                hashtags=hashtags,
+                input=safe_path_quoted  # Also handle the input parameter for utilities
+            )
+        except KeyError as e:
+            # Log missing template parameters
+            log_with_details('ERROR', f"Missing template parameter: {str(e)}", 
+                details={'cmd_template': cmd_template, 'available_params': {
+                    'video': safe_video_path,
+                    'description': video_title,
+                    'account': platform_data['account_name'],
+                    'sound': task_data['sound_name'],
+                    'volume': task_data['sound_volume'],
+                    'hashtags': hashtags,
+                    'input': safe_video_path
+                }})
+            raise
         
         upload_details.update({
             'safe_video_path': safe_video_path,

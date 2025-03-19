@@ -101,6 +101,14 @@ class DatabaseLogHandler(logging.Handler):
                     
                     # Only insert if no duplicate found
                     if duplicate_count == 0:
+                        # Generate a hash for the message for deduplication
+                        try:
+                            import hashlib
+                            hash_input = f"{message}-{task_id}-{source}"
+                            message_hash = hashlib.md5(hash_input.encode('utf-8')).hexdigest()[:8]
+                        except Exception:
+                            message_hash = None
+                            
                         c.execute('''
                             INSERT INTO logs (timestamp, level, message, task_id, details, source, message_hash)
                             VALUES (?, ?, ?, ?, ?, ?, ?)
