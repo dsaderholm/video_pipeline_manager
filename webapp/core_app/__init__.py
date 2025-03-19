@@ -434,6 +434,10 @@ def create_app():
             from webapp.core_app.models import init_db  # Updated import path
             init_db()
             app_logger.info("Main database initialized successfully")
+            
+            # Fix logs table structure if needed
+            from webapp.core_app.core.database import db
+            db.fix_logs_table()
         except Exception as e:
             logger.error(f"Failed to initialize main database: {str(e)}")
             raise

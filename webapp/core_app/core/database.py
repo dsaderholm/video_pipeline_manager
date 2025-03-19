@@ -65,7 +65,8 @@ class DatabaseManager:
                         message TEXT NOT NULL,
                         task_id INTEGER,
                         details TEXT,
-                        source TEXT
+                        source TEXT,
+                        message_hash TEXT
                     );
                     
                     CREATE TABLE IF NOT EXISTS task_lock (
@@ -86,6 +87,17 @@ class DatabaseManager:
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     );
                 ''')
+                
+                # Add message_hash column to logs table if it doesn't exist
+                try:
+                    conn.execute("ALTER TABLE logs ADD COLUMN message_hash TEXT")
+                    logger.info("Added message_hash column to logs table")
+                except sqlite3.OperationalError as e:
+                    # Column already exists, which is fine
+                    if "duplicate column name" in str(e):
+                        logger.debug("message_hash column already exists in logs table")
+                    else:
+                        logger.warning(f"Error checking logs table structure: {e}")
                 
                 logger.info("Database initialized with optimized settings")
         except sqlite3.Error as e:
@@ -109,6 +121,36 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to reset database locks: {e}")
 
+    def fix_logs_table(self):
+        """Special function to fix the logs table structure if it's missing the message_hash column"""
+        try:
+            # Create a fresh connection for this operation
+            conn = self._create_connection()
+            c = conn.cursor()
+            
+            # Check if logs table exists
+            c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='logs'")
+            if c.fetchone():
+                # Check if message_hash column exists
+                try:
+                    c.execute("SELECT message_hash FROM logs LIMIT 1")
+                    logger.info("message_hash column exists in logs table")
+                except sqlite3.OperationalError:
+                    # Column doesn't exist, add it
+                    logger.warning("message_hash column missing from logs table, adding it now")
+                    try:
+                        c.execute("ALTER TABLE logs ADD COLUMN message_hash TEXT")
+                        conn.commit()
+                        logger.info("Successfully added message_hash column to logs table")
+                    except Exception as alter_error:
+                        logger.error(f"Failed to add message_hash column: {alter_error}")
+            else:
+                logger.info("logs table does not exist yet, it will be created with the correct schema")
+                
+            conn.close()
+        except Exception as e:
+            logger.error(f"Failed to fix logs table: {e}")
+            
     def vacuum_db(self):
         """Optimize database and reclaim space"""
         try:
