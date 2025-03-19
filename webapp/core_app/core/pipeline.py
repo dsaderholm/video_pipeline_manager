@@ -678,6 +678,9 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                                     details={'util_cmd': util_cmd})
                                 raise Exception(f"Video file not found: {current_video_file}")
                             
+                            # Get absolute path for the current video file
+                            abs_video_file = os.path.abspath(current_video_file)
+                            
                             log_with_task_details('INFO', f"Executing utility command",
                                 task_id=task_id,
                                 details={

@@ -52,6 +52,21 @@ def get_log_entries():
             processing_status=processing_status
         )
         
+        # Deduplicate logs with identical content and timestamps
+        deduped_logs = []
+        seen = set()
+        for log in logs:
+            # Create a key based on message, level, task_id and near timestamp
+            # Round timestamp to nearest second to catch near-duplicates
+            ts = log['timestamp'][:19] if isinstance(log['timestamp'], str) and len(log['timestamp']) >= 19 else str(log['timestamp'])
+            key = f"{ts}-{log['level']}-{log['message']}-{log['task_id']}"
+            if key not in seen:
+                seen.add(key)
+                deduped_logs.append(log)
+            
+        # Replace logs with deduplicated version
+        logs = deduped_logs
+        
         # Explicitly ensure logs is a list
         if logs is None:
             logs = []

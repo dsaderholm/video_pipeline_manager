@@ -102,15 +102,16 @@ class DatabaseLogHandler(logging.Handler):
                     # Only insert if no duplicate found
                     if duplicate_count == 0:
                         c.execute('''
-                            INSERT INTO logs (timestamp, level, message, task_id, details, source)
-                            VALUES (?, ?, ?, ?, ?, ?)
+                            INSERT INTO logs (timestamp, level, message, task_id, details, source, message_hash)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
                         ''', (
                             current_time,
                             level,
                             message,
                             task_id,
                             details,
-                            source
+                            source,
+                            message_hash
                         ))
                         # Commit each record individually to avoid holding locks
                         conn.commit()
@@ -147,8 +148,17 @@ class DatabaseLogHandler(logging.Handler):
 # Create handler instance
 db_log_handler = DatabaseLogHandler()
 
-def add_log_entry(level, message, task_id=None, details=None, source=None):
+def add_log_entry(level, message, task_id=None, details=None, source=None, message_hash=None):
     """Add a new log entry to the database with improved error handling"""
+    # Generate a hash if not provided
+    if message_hash is None:
+        try:
+            import hashlib
+            hash_input = f"{message}-{task_id}-{source}"
+            message_hash = hashlib.md5(hash_input.encode('utf-8')).hexdigest()[:8]
+        except Exception:
+            pass
+    
     # Direct database insert for reliability
     current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
     conn = None
@@ -157,28 +167,36 @@ def add_log_entry(level, message, task_id=None, details=None, source=None):
         conn = db._create_connection()
         c = conn.cursor()
         
-        # Before inserting, check if a duplicate entry already exists within the last second
+        # Before inserting, check if a duplicate entry already exists within the last 3 seconds
         # This helps prevent duplicate logs
-        c.execute('''
-            SELECT COUNT(*) FROM logs 
-            WHERE message = ? AND level = ? AND task_id = ? 
-            AND timestamp > datetime(?, '-1 seconds')
-        ''', (message, level, task_id, current_time))
+        if message_hash:
+            c.execute('''
+                SELECT COUNT(*) FROM logs 
+                WHERE (message_hash = ? OR message = ?) AND level = ? AND task_id = ? 
+                AND timestamp > datetime(?, '-3 seconds')
+            ''', (message_hash, message, level, task_id, current_time))
+        else:
+            c.execute('''
+                SELECT COUNT(*) FROM logs 
+                WHERE message = ? AND level = ? AND task_id = ? 
+                AND timestamp > datetime(?, '-3 seconds')
+            ''', (message, level, task_id, current_time))
         
         duplicate_count = c.fetchone()[0]
         
         # Only insert if no duplicate found
         if duplicate_count == 0:
             c.execute('''
-                INSERT INTO logs (timestamp, level, message, task_id, details, source)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO logs (timestamp, level, message, task_id, details, source, message_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (
                 current_time,
                 level,
                 message,
                 task_id,
                 json.dumps(details) if details else None,
-                source or "direct"
+                source or "direct",
+                message_hash
             ))
             conn.commit()
         
