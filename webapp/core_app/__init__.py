@@ -16,7 +16,7 @@ scheduler = APScheduler()
 _scheduler_initialized = False
 
 def setup_logging():
-    """Configure basic console logging for docker/portainer visibility"""
+    """Configure basic console logging for docker visibility"""
     # Configure root logger
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
@@ -28,7 +28,7 @@ def setup_logging():
     # Disable werkzeug access logs
     logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
-    # Console handler for docker/portainer visibility
+    # Console handler for docker visibility
     console_formatter = logging.Formatter(
         '%(asctime)s - %(levelname)s - %(message)s'
     )
@@ -422,10 +422,10 @@ def create_app():
             logger.error(f"Failed to initialize main database: {str(e)}")
             raise
 
-        # No database logging initialization needed - only using console logging for Portainer
+        # Ensure we're only using console logging for Docker
         # Prevent Flask logger propagation
         app.logger.propagate = False
-        app_logger.info("Using console logging only (viewable in Portainer)")
+        app_logger.info("Using console logging only (viewable in Docker logs)")
 
         # Initialize scheduler THIRD
         app.scheduler = init_scheduler(app)

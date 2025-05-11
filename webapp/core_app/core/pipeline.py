@@ -10,12 +10,11 @@ from datetime import datetime, timedelta
 import logging
 import sqlite3
 logger = logging.getLogger('app')
-# Import directly from log_manager
+# Import log_manager for compatibility, but don't use its handlers
 from webapp.core_app.core.log_manager import db_log_handler
 
-# Add this to ensure the handler is attached
-if db_log_handler not in logger.handlers:
-    logger.addHandler(db_log_handler)
+# No need to add the handler - we're using Docker logs
+# Keep this for compatibility with existing code
 from webapp.core_app.core.utils import execute_curl, get_latest_video, cleanup_video, format_upload_command, log_with_details, cleanup_existing_mp4s, validate_video_file
 from webapp.core_app.core.email_utils import send_task_completion_notification
 from webapp.core_app.core.database import db
@@ -47,9 +46,8 @@ def create_logger_with_task_id(task_id):
     
     logger_instance.addFilter(TaskFilter())
     
-    # Add this line to ensure the db_log_handler is attached
-    if db_log_handler not in logger_instance.handlers:
-        logger_instance.addHandler(db_log_handler)
+    # No need to add db_log_handler - using Docker logs
+    # Keep this section for compatibility, but don't add the handler
         
     return logger_instance
 
