@@ -604,6 +604,16 @@
             day: 'numeric' 
         });
         
+        // To ensure we're always showing tomorrow's date and not today's
+        const today = new Date();
+        const tomorrow = new Date(today);
+        tomorrow.setDate(tomorrow.getDate() + 1);
+        const displayDate = tomorrow.toLocaleDateString(undefined, {
+            weekday: 'long',
+            month: 'long',
+            day: 'numeric'
+        });
+        
         // Determine status indicator class
         let statusClass = 'bg-yellow-500';
         let statusText = 'Standby';
@@ -638,7 +648,7 @@
                 
                 <div class="glass rounded-lg p-4 border border-gray-700">
                     <h3 class="text-sm font-medium text-gray-400 mb-1">Tomorrow</h3>
-                    <p class="text-lg font-semibold">${formattedTomorrowDate}</p>
+                    <p class="text-lg font-semibold">${displayDate}</p>
                 </div>
                 
                 <div class="glass rounded-lg p-4 border border-gray-700">
