@@ -281,8 +281,9 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
                     # Convert Windows backslashes to forward slashes for curl
                     abs_input_file = abs_input_file.replace('\\', '/')
                     
-                    # Replace {input} with the quoted absolute path - add double quotes to handle spaces
-                    modified_command = curl_command.replace('{input}', f'"{abs_input_file}"')
+                    # FIXED: Replace {input} with the absolute path WITHOUT quotes,
+                    # as curl in the Docker environment handles this differently
+                    modified_command = curl_command.replace('{input}', abs_input_file)
                     log_with_details('INFO', f"Replaced input in utility command",
                         details={'original_command': curl_command, 'modified_command': modified_command})
                 else:
@@ -299,11 +300,13 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
             
             try:
                 log_with_details('INFO', "Starting Popen subprocess")
+                # FIXED: Use a consistent environment for subprocess, avoiding shell expansion issues
                 process = subprocess.Popen(
                     modified_command,
                     shell=True,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE
+                    stderr=subprocess.PIPE,
+                    env=os.environ.copy()  # Use the current environment
                 )
                 log_with_details('INFO', f"Subprocess started with PID: {process.pid}")
             except Exception as subprocess_error:
@@ -894,19 +897,18 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
 
         # Format the command with all required parameters
         try:
-            # Handle single-quoted parameters carefully
-            safe_path_quoted = f'"{safe_video_path}"'
+            # FIXED: Don't add quotes around the path, as curl in Docker handles this differently
             # Convert Windows backslashes to forward slashes for curl
-            safe_path_quoted = safe_path_quoted.replace('\\', '/')
+            safe_path_unquoted = safe_video_path.replace('\\', '/')
             
             formatted_cmd = cmd_template.format(
-                video=safe_path_quoted,
+                video=safe_path_unquoted,
                 description=video_title,
                 account=platform_data['account_name'],
                 sound=task_data['sound_name'],
                 volume=task_data['sound_volume'],
                 hashtags=hashtags,
-                input=safe_path_quoted  # Also handle the input parameter for utilities
+                input=safe_path_unquoted  # Also handle the input parameter for utilities
             )
         except KeyError as e:
             # Log missing template parameters

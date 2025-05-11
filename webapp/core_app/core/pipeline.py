@@ -681,6 +681,18 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                             # Get absolute path for the current video file
                             abs_video_file = os.path.abspath(current_video_file)
                             
+                            # FIXED: Ensure the file is readable by the container user
+                            try:
+                                # Ensure file permissions are correct
+                                os.chmod(current_video_file, 0o644)  # Make readable by all users
+                                log_with_task_details('INFO', f"Set permissions on video file",
+                                    task_id=task_id,
+                                    details={'file_path': current_video_file})
+                            except Exception as perm_e:
+                                log_with_task_details('WARNING', f"Unable to set permissions: {str(perm_e)}",
+                                    task_id=task_id,
+                                    details={'error': str(perm_e)})
+                            
                             log_with_task_details('INFO', f"Executing utility command",
                                 task_id=task_id,
                                 details={
