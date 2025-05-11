@@ -102,19 +102,7 @@ def init_db():
                 )
             ''')
             
-            # Create logs table for application logging
-            c.execute('''
-                CREATE TABLE IF NOT EXISTS logs (
-                    id INTEGER PRIMARY KEY,
-                    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    level TEXT NOT NULL,
-                    message TEXT NOT NULL,
-                    task_id INTEGER,
-                    details TEXT,
-                    source TEXT,
-                    message_hash TEXT
-                )
-            ''')
+            # NOTE: Logs table removed - using Portainer for log viewing
             
             # Initialize task_lock with default record if it doesn't exist
             c.execute("INSERT OR IGNORE INTO task_lock (id, locked) VALUES (1, 0)")

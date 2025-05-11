@@ -26,13 +26,6 @@ def manage():
         logger.error(f"Error rendering manage: {str(e)}")
         return str(e), 500
 
-@main_bp.route('/logs')
-def logs():
-    logger.debug("Logs route called")
-    try:
-        return render_template('logs.html')
-    except Exception as e:
-        logger.error(f"Error rendering logs: {str(e)}")
-        return str(e), 500
+# Logs route removed - now using Portainer for logging
 
 logger.debug("Main routes module loaded successfully")

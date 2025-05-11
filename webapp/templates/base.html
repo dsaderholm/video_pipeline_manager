@@ -321,80 +321,7 @@
             @apply bg-red-500;
             box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.2);
         }
-		/* Log Viewer Styles */
-		.log-row {
-			@apply transition-colors hover:bg-gray-800;
-		}
 
-		.log-level {
-			@apply px-2 py-1 rounded-full text-xs font-medium;
-		}
-
-		.log-level-DEBUG {
-			@apply bg-blue-900/30 text-blue-400;
-		}
-
-		.log-level-INFO {
-			@apply bg-green-900/30 text-green-400;
-		}
-
-		.log-level-WARNING {
-			@apply bg-yellow-900/30 text-yellow-400;
-		}
-
-		.log-level-ERROR {
-			@apply bg-red-900/30 text-red-400;
-		}
-
-		.log-level-CRITICAL {
-			@apply bg-red-900/50 text-red-400;
-		}
-
-		.log-details {
-			@apply mt-2 p-4 bg-gray-900/50 rounded-lg overflow-x-auto;
-			max-height: 300px;
-		}
-
-		.log-timestamp {
-			@apply text-gray-400 text-sm;
-		}
-
-		.log-source {
-			@apply text-gray-500 text-sm;
-		}
-
-		/* Improved Table Styles */
-		.log-table {
-			@apply min-w-full divide-y divide-gray-700;
-		}
-
-		.log-table thead {
-			@apply bg-gray-900;
-		}
-
-		.log-table th {
-			@apply px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider;
-		}
-
-		.log-table td {
-			@apply px-6 py-4 whitespace-nowrap text-sm text-gray-300;
-		}
-		/* Filter Controls */
-		.filter-controls {
-			@apply flex flex-wrap gap-4 mb-6;
-		}
-
-		.filter-select {
-			@apply bg-gray-800 text-white px-3 py-2 rounded-lg border border-gray-700 min-w-[120px];
-		}
-
-		.filter-input {
-			@apply bg-gray-800 text-white px-3 py-2 rounded-lg border border-gray-700;
-		}
-
-		.filter-checkbox {
-			@apply form-checkbox h-4 w-4 text-primary-500 rounded border-gray-700 bg-gray-800;
-		}
 		.selected-utility {
 			cursor: move;
 			transition: all 0.2s ease;
@@ -444,9 +371,6 @@
 					</a>
 					<a href="/manage" class="hover:text-primary-500 transition-colors">
 						<i class="fas fa-cog mr-1"></i> Manage
-					</a>
-					<a href="/logs" class="hover:text-primary-500 transition-colors">
-						<i class="fas fa-clipboard-list mr-1"></i> Logs
 					</a>
 				</div>
             </div>

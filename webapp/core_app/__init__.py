@@ -16,15 +16,10 @@ scheduler = APScheduler()
 _scheduler_initialized = False
 
 def setup_logging():
-    """Configure the logging system with file and console handlers"""
-    # Create logs directory if it doesn't exist
-    logs_dir = os.path.join(APP_ROOT, 'logs')
-    if not os.path.exists(logs_dir):
-        os.makedirs(logs_dir)
-
+    """Configure basic console logging for docker/portainer visibility"""
     # Configure root logger
     root_logger = logging.getLogger()
-    root_logger.setLevel(logging.DEBUG)
+    root_logger.setLevel(logging.INFO)
     
     # Remove existing handlers
     for handler in root_logger.handlers[:]:
@@ -33,29 +28,14 @@ def setup_logging():
     # Disable werkzeug access logs
     logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
-    # Create formatters
-    detailed_formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-    )
+    # Console handler for docker/portainer visibility
     console_formatter = logging.Formatter(
-        '%(levelname)s - %(message)s'
+        '%(asctime)s - %(levelname)s - %(message)s'
     )
-
-    # Console handler (less verbose)
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(console_formatter)
     root_logger.addHandler(console_handler)
-
-    # File handler (detailed)
-    file_handler = logging.handlers.RotatingFileHandler(
-        os.path.join(logs_dir, 'app.log'),
-        maxBytes=1024 * 1024,  # 1MB
-        backupCount=5
-    )
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(detailed_formatter)
-    root_logger.addHandler(file_handler)
 
     return logging.getLogger('app')
 
@@ -418,9 +398,8 @@ def create_app():
     
     # Create required directories
     required_dirs = {
-        'previews': os.path.join(APP_ROOT, 'previews'),
-        'processed': os.path.join(APP_ROOT, 'processed_videos'),
-        'logs': os.path.join(APP_ROOT, 'logs')
+    'previews': os.path.join(APP_ROOT, 'previews'),
+    'processed': os.path.join(APP_ROOT, 'processed_videos')
     }
     
     for dir_name, dir_path in required_dirs.items():
@@ -435,28 +414,17 @@ def create_app():
             init_db()
             app_logger.info("Main database initialized successfully")
             
-            # Fix logs table structure if needed
+            # Database configuration
             from webapp.core_app.core.database import db
-            db.fix_logs_table()
+            # No need to fix logs table anymore
         except Exception as e:
             logger.error(f"Failed to initialize main database: {str(e)}")
             raise
 
-        # Initialize logging system SECOND
-        try:
-            from webapp.core_app.core.log_manager import db_log_handler  # Updated import path
-            
-            # Add database handler to root logger
-            logging.getLogger().addHandler(db_log_handler)
-            
-            # Prevent Flask logger propagation
-            app.logger.propagate = False
-            
-            app_logger.info("Database logging system initialized successfully")
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize logging system: {str(e)}")
-            raise
+        # No database logging initialization needed - only using console logging for Portainer
+        # Prevent Flask logger propagation
+        app.logger.propagate = False
+        app_logger.info("Using console logging only (viewable in Portainer)")
 
         # Initialize scheduler THIRD
         app.scheduler = init_scheduler(app)
@@ -468,8 +436,7 @@ def create_app():
                 ('webapp.core_app.routes.generators', 'generators_bp'),
                 ('webapp.core_app.routes.utilities', 'utilities_bp'),
                 ('webapp.core_app.routes.platforms', 'platforms_bp'),
-                ('webapp.core_app.routes.tasks', 'tasks_bp'),
-                ('webapp.core_app.routes.logs', 'logs_bp')
+                ('webapp.core_app.routes.tasks', 'tasks_bp')
             ]
             
             for module_path, blueprint_name in blueprints:

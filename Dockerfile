@@ -17,7 +17,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Create necessary directories
-RUN mkdir -p /app/webapp/previews /app/webapp/processed_videos /app/webapp/database /app/webapp/logs
+RUN mkdir -p /app/webapp/previews /app/webapp/processed_videos /app/webapp/database
 
 # Set proper ownership and permissions
 RUN chown -R appuser:appuser /app && \
