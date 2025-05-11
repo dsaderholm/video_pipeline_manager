@@ -231,12 +231,15 @@ def check_uploader_response(stdout_str, stderr_str):
 
 # Fix for the utility command formatting section in execute_curl
 def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, validate_output=False, timeout=3600, mode='uploader'):
-    """Enhanced curl execution with better error handling"""
+    """Enhanced curl execution with better error handling and Docker compatibility"""
     execution_details = {
         'command': curl_command,
         'attempts': [],
         'start_time': datetime.now().isoformat(),
-        'mode': mode
+        'mode': mode,
+        'clean_before': clean_before,
+        'validate_output': validate_output,
+        'timeout': timeout
     }
     
     # Always log when execute_curl is called
@@ -254,41 +257,80 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
         }
         
         try:
-            # Fix: Ensure working directory is set to app root for consistent file paths
+            # Ensure working directory is set to app root for consistent file paths
             cwd = os.getcwd()
             log_with_details('DEBUG', f"Current working directory: {cwd}",
                 details={'command': curl_command})
             
-            # For improved file path handling, just pass the command as-is
-            # We'll handle all path modifications in format_upload_command
+            # Default to using command as-is
             modified_command = curl_command
             
-            # Only modify commands for utility mode by directly replacing {input} with the absolute path in quotes
+            # Handle {input} placeholder for utility commands
             if mode == 'utility':
                 log_with_details('INFO', f"Processing utility command", 
                     details={'original_command': curl_command})
                 
-                # First try to find MP4 files in the current directory
-                mp4_files = [f for f in os.listdir('.') if f.lower().endswith('.mp4')]
-                log_with_details('INFO', f"Available MP4 files for utility", 
+                # First try to find MP4 files in common locations
+                mp4_files = []
+                search_paths = ['.', '/tmp', '/var/tmp']
+                processed_dir = os.path.join(cwd, 'processed_videos')
+                if os.path.exists(processed_dir):
+                    search_paths.append(processed_dir)
+                    
+                # Log all search paths
+                log_with_details('INFO', f"Searching for MP4 files in multiple paths", 
+                    details={'search_paths': search_paths})
+                                
+                # Search for MP4 files in all paths
+                for search_path in search_paths:
+                    if os.path.exists(search_path):
+                        try:
+                            for file in os.listdir(search_path):
+                                if file.lower().endswith('.mp4'):
+                                    if os.path.isabs(search_path):
+                                        file_path = os.path.join(search_path, file)
+                                    else:
+                                        file_path = os.path.abspath(os.path.join(cwd, search_path, file))
+                                    
+                                    # Check file size to ensure it's a valid file
+                                    try:
+                                        size = os.path.getsize(file_path)
+                                        if size >= 1024:  # At least 1KB
+                                            mp4_files.append(file_path)
+                                    except Exception as size_error:
+                                        log_with_details('WARNING', f"Error checking file size: {str(size_error)}",
+                                            details={'error': str(size_error), 'file': file_path})
+                        except Exception as list_error:
+                            log_with_details('WARNING', f"Error listing directory {search_path}: {str(list_error)}",
+                                details={'error': str(list_error), 'path': search_path})                
+                
+                log_with_details('INFO', f"Found MP4 files for utility", 
                     details={'mp4_files': mp4_files})
                 
-                input_file = None
                 if mp4_files:
-                    input_file = mp4_files[0]  # Use the first available MP4
-                    abs_input_file = os.path.abspath(input_file)
+                    # Sort by creation time to get the most recent file
+                    try:
+                        mp4_files.sort(key=os.path.getctime, reverse=True)
+                    except Exception as sort_error:
+                        log_with_details('WARNING', f"Error sorting files by creation time: {str(sort_error)}",
+                            details={'error': str(sort_error)})
+                    
+                    input_file = mp4_files[0]  # Use the most recent MP4 file
                     
                     # Convert Windows backslashes to forward slashes for curl
-                    abs_input_file = abs_input_file.replace('\\', '/')
+                    input_file = input_file.replace('\\', '/')
                     
-                    # FIXED: Replace {input} with the absolute path WITHOUT quotes,
-                    # as curl in the Docker environment handles this differently
-                    modified_command = curl_command.replace('{input}', abs_input_file)
+                    # Replace {input} with the path
+                    modified_command = curl_command.replace('{input}', input_file)
                     log_with_details('INFO', f"Replaced input in utility command",
-                        details={'original_command': curl_command, 'modified_command': modified_command})
+                        details={
+                            'original_command': curl_command, 
+                            'modified_command': modified_command,
+                            'input_file': input_file
+                        })
                 else:
                     log_with_details('ERROR', "No MP4 files found for utility command", 
-                        details={'current_dir': os.getcwd()})
+                        details={'search_paths': search_paths, 'current_dir': os.getcwd()})
                     # Return failure immediately if no MP4 files found
                     return False, "", "No MP4 files found for processing"
             
@@ -300,13 +342,31 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
             
             try:
                 log_with_details('INFO', "Starting Popen subprocess")
-                # FIXED: Use a consistent environment for subprocess, avoiding shell expansion issues
+                
+                # Fix environment path issues on Windows by making sure all paths use forward slashes
+                fixed_command = modified_command
+                
+                # Setup environment with correct paths
+                env = os.environ.copy()
+                # If we're in Docker, make sure PATH includes needed directories
+                if os.path.exists('/usr/local/bin/curl'):
+                    env['PATH'] = f"/usr/local/bin:/usr/bin:/bin:{env.get('PATH', '')}"                
+                
+                # Ensure working directory exists (Docker compatibility)
+                working_dir = os.getcwd()
+                os.makedirs(working_dir, exist_ok=True)
+                
+                log_with_details('INFO', f"Starting process with env",
+                    details={'PATH': env.get('PATH', ''), 'working_dir': working_dir})
+                
+                # Run the command
                 process = subprocess.Popen(
-                    modified_command,
+                    fixed_command,
                     shell=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    env=os.environ.copy()  # Use the current environment
+                    env=env,
+                    cwd=working_dir  # Set working directory explicitly
                 )
                 log_with_details('INFO', f"Subprocess started with PID: {process.pid}")
             except Exception as subprocess_error:
@@ -329,6 +389,25 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
                         'stderr_preview': stderr_str[:200] if stderr_str else '',
                         'execution_time': f"{(datetime.now() - datetime.fromisoformat(execution_details['start_time'])).total_seconds():.2f}s"
                     })
+                
+                # Save logs to a backup log file for debugging in case of Docker restart
+                if mode == 'generator' or mode == 'utility':
+                    try:
+                        logs_dir = os.path.join(os.getcwd(), 'backup_logs')
+                        os.makedirs(logs_dir, exist_ok=True)
+                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                        log_file = os.path.join(logs_dir, f"{mode}_{timestamp}.log")
+                        with open(log_file, 'w', encoding='utf-8') as f:
+                            f.write(f"Command: {fixed_command}\n")
+                            f.write(f"Return code: {process.returncode}\n")
+                            f.write(f"\nSTDOUT:\n{stdout_str}\n")
+                            f.write(f"\nSTDERR:\n{stderr_str}\n")
+                        log_with_details('INFO', f"Saved {mode} logs to {log_file}",
+                            details={'log_file': log_file})
+                    except Exception as log_error:
+                        log_with_details('WARNING', f"Failed to save backup logs: {str(log_error)}",
+                            details={'error': str(log_error)})
+                
             except subprocess.TimeoutExpired as timeout_error:
                 log_with_details('ERROR', f"Subprocess timed out after {timeout}s",
                     details={
@@ -572,6 +651,21 @@ def cleanup_existing_mp4s():
             log_with_details('WARNING', f"Error in directory listing: {str(dir_error)}",
                 details={'dir': cwd, 'error': str(dir_error)})
         
+        # Check additional directories that might be used by the Docker container
+        additional_dirs = ['/tmp', '/var/tmp']
+        for add_dir in additional_dirs:
+            if os.path.exists(add_dir):
+                try:
+                    for file in os.listdir(add_dir):
+                        if file.lower().endswith('.mp4'):
+                            abs_path = os.path.join(add_dir, file)
+                            if abs_path not in mp4_files:
+                                mp4_files.append(abs_path)
+                except Exception as dir_error:
+                    cleanup_details[f'dir_listing_error_{add_dir}'] = str(dir_error)
+                    log_with_details('WARNING', f"Error listing directory {add_dir}: {str(dir_error)}",
+                        details={'dir': add_dir, 'error': str(dir_error)})
+        
         # Log what we found
         cleanup_details['files_found'] = mp4_files
         log_with_details('INFO', f"Found {len(mp4_files)} MP4 files to clean up",
@@ -585,7 +679,10 @@ def cleanup_existing_mp4s():
                 continue
                 
             # Get absolute path for better handling
-            abs_path = os.path.abspath(os.path.join(cwd, file))
+            if os.path.isabs(file):
+                abs_path = file
+            else:
+                abs_path = os.path.abspath(os.path.join(cwd, file))
             
             try:
                 if os.path.exists(abs_path):
@@ -599,6 +696,17 @@ def cleanup_existing_mp4s():
                     removed = False
                     for attempt in range(3):
                         try:
+                            # Make sure the file is not in use
+                            try:
+                                with open(abs_path, 'rb') as test_open:
+                                    pass  # Just testing if we can open it
+                            except Exception as file_open_error:
+                                log_with_details('WARNING', f"File is in use, cannot open: {file}",
+                                    details={'file': abs_path, 'error': str(file_open_error)})
+                                time.sleep(1)  # Wait a bit before trying again
+                                continue
+                                
+                            # Try to remove the file
                             os.remove(abs_path)
                             removed = True
                             break
@@ -634,7 +742,7 @@ def cleanup_existing_mp4s():
             details=cleanup_details)
 
 def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
-    """Get most recently created valid MP4 file"""
+    """Get most recently created valid MP4 file with Docker compatibility"""
     start_time = datetime.now()
     search_details = {
         'max_retries': max_retries,
@@ -652,10 +760,12 @@ def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
     for attempt in range(max_retries):
         # Search in multiple locations for better compatibility with Docker
         video_files = []
+        search_paths = []
         
         # Look for all MP4 files in the root directory (simpler approach)
         try:
             current_dir = os.getcwd()
+            search_paths.append(current_dir)
             for file in os.listdir(current_dir):
                 if file.lower().endswith('.mp4'):
                     abs_path = os.path.abspath(os.path.join(current_dir, file))
@@ -666,10 +776,27 @@ def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
             log_with_details('WARNING', f"Error listing current directory: {str(e)}",
                             details={'error': str(e), 'current_dir': current_dir})
         
+        # Check additional Docker-compatible paths
+        docker_paths = ['/tmp', '/var/tmp']  # Common temp directories in Docker containers
+        for docker_path in docker_paths:
+            if os.path.exists(docker_path):
+                search_paths.append(docker_path)
+                try:
+                    for file in os.listdir(docker_path):
+                        if file.lower().endswith('.mp4'):
+                            abs_path = os.path.join(docker_path, file)
+                            video_files.append(abs_path)
+                            if abs_path not in all_seen_files:
+                                all_seen_files.append(abs_path)
+                except Exception as e:
+                    log_with_details('WARNING', f"Error listing directory {docker_path}: {str(e)}",
+                                    details={'error': str(e), 'dir': docker_path})
+        
         # Also search in processed_videos directory
         try:
             proc_dir = os.path.join(current_dir, 'processed_videos')
             if os.path.exists(proc_dir) and os.path.isdir(proc_dir):
+                search_paths.append(proc_dir)
                 for file in os.listdir(proc_dir):
                     if file.lower().endswith('.mp4'):
                         abs_path = os.path.abspath(os.path.join(proc_dir, file))
@@ -682,7 +809,11 @@ def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
         
         # Log what we found
         log_with_details('INFO', f"Searching for video files (attempt {attempt + 1}/{max_retries})",
-            details={'found_files': len(video_files), 'files': video_files})
+            details={
+                'found_files': len(video_files), 
+                'files': video_files,
+                'search_paths': search_paths
+            })
         
         # Filter files by size and make sure they're readable
         valid_videos = []
@@ -691,12 +822,22 @@ def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
                 if os.path.exists(video) and os.path.isfile(video):
                     size = os.path.getsize(video)
                     if size >= min_size_bytes:
-                        # Quick check that the file is readable
-                        with open(video, 'rb') as f:
-                            header = f.read(8)  # Read first 8 bytes
-                        valid_videos.append(video)
-                        log_with_details('INFO', f"Validated video file: {video}",
-                                        details={'file_size': size})
+                        try:
+                            # Quick check that the file is readable
+                            with open(video, 'rb') as f:
+                                header = f.read(8)  # Read first 8 bytes
+                                # Check for valid MP4 file signature (ftyp, mdat, free, etc.)
+                                has_valid_signature = any(sig in header for sig in [b'ftyp', b'mdat', b'moov', b'free', b'wide', b'skip'])
+                                if not has_valid_signature:
+                                    log_with_details('WARNING', f"File has invalid MP4 header: {video}",
+                                                    details={'header': str(header)})
+                                    continue
+                            valid_videos.append(video)
+                            log_with_details('INFO', f"Validated video file: {video}",
+                                            details={'file_size': size, 'path': video})
+                        except Exception as file_error:
+                            log_with_details('WARNING', f"File cannot be read: {video}",
+                                        details={'error': str(file_error)})
                     else:
                         log_with_details('WARNING', f"File too small: {video}",
                                         details={'file_size': size, 'min_size': min_size_bytes})
@@ -707,16 +848,44 @@ def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
                                 details={'error': str(e)})
                 
         if valid_videos:
+            # Sort by creation time first, and if that's not reliable, by file size
             try:
-                # Just use the most recent file
-                latest_video = max(valid_videos, key=os.path.getctime)
-                creation_time = datetime.fromtimestamp(os.path.getctime(latest_video))
-                log_with_details('INFO', f"Found valid video file: {latest_video}",
-                                details={'creation_time': creation_time.isoformat()})
-                return latest_video
-            except Exception as e:
-                log_with_details('ERROR', f"Error getting most recent file: {str(e)}",
-                                details={'error': str(e), 'valid_videos': valid_videos})
+                # Try to get most recent file by creation time first
+                video_timestamps = [(video, os.path.getctime(video)) for video in valid_videos]
+                video_timestamps.sort(key=lambda x: x[1], reverse=True)  # Sort by creation time, newest first
+                
+                if video_timestamps:
+                    latest_video = video_timestamps[0][0]
+                    creation_time = datetime.fromtimestamp(video_timestamps[0][1])
+                    log_with_details('INFO', f"Found valid video file (most recent): {latest_video}",
+                                    details={
+                                        'creation_time': creation_time.isoformat(),
+                                        'file_size': os.path.getsize(latest_video),
+                                        'sorted_files': [(v, datetime.fromtimestamp(t).isoformat()) for v, t in video_timestamps[:3]]
+                                    })
+                    return latest_video
+            except Exception as time_error:
+                log_with_details('WARNING', f"Error sorting by creation time: {str(time_error)}, trying by size",
+                                details={'error': str(time_error)})
+                
+                # Fall back to sorting by size if timestamp fails
+                try:
+                    video_sizes = [(video, os.path.getsize(video)) for video in valid_videos]
+                    video_sizes.sort(key=lambda x: x[1], reverse=True)  # Sort by size, largest first
+                    
+                    if video_sizes:
+                        largest_video = video_sizes[0][0]
+                        size = video_sizes[0][1]
+                        log_with_details('INFO', f"Found valid video file (largest): {largest_video}",
+                                        details={
+                                            'file_size': size,
+                                            'sorted_by_size': True,
+                                            'sorted_files': [(v, s) for v, s in video_sizes[:3]]
+                                        })
+                        return largest_video
+                except Exception as size_error:
+                    log_with_details('ERROR', f"Error sorting by size: {str(size_error)}",
+                                    details={'error': str(size_error), 'valid_videos': valid_videos})
             
         # No valid videos found, sleep and try again
         if attempt < max_retries - 1:
@@ -726,7 +895,7 @@ def get_latest_video(max_retries=10, delay=2, min_size_bytes=1024):
     
     # Final attempt failed
     log_with_details('WARNING', f"Failed to find any valid video files after {max_retries} attempts",
-                    details={'all_seen_files': all_seen_files})
+                    details={'all_seen_files': all_seen_files, 'search_paths': search_paths if 'search_paths' in locals() else []})
     return None
 
 def cleanup_video(video_file):

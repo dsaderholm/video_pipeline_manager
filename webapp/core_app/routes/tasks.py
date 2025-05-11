@@ -877,6 +877,7 @@ def recover_missed_processing():
             'message': str(e)
         }), 500
 
+
 @tasks_bp.route('/api/tasks/<int:id>/upload', methods=['POST'])
 def upload_task(id):
     """Manual upload of all pending videos for a task"""
@@ -943,6 +944,66 @@ def upload_task(id):
             
     except Exception as e:
         logger.error(f"Error uploading videos for task {id}: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        }), 500
+@tasks_bp.route('/api/tasks/night-status', methods=['GET'])
+def get_night_processing_status():
+    """Get the status of night processing window and upcoming tasks"""
+    try:
+        from webapp.core_app.core.pipeline import should_process_at_night
+        in_night_window = should_process_at_night()
+        
+        # Get configured times
+        night_start = os.getenv('NIGHT_PROCESSING_START', '22:00')
+        night_end = os.getenv('NIGHT_PROCESSING_END', '06:00')
+        
+        # Get upcoming tasks
+        with db.get_connection() as conn:
+            c = conn.cursor()
+            
+            tomorrow = datetime.now() + timedelta(days=1)
+            tomorrow_day = tomorrow.strftime('%A')[:3].lower()
+            
+            c.execute("""
+                SELECT id, name, schedule 
+                FROM tasks 
+                WHERE status != 'failed'
+                AND processing_status != 'failed'
+                AND schedule LIKE ?
+            """, (f'%{tomorrow_day}|%',))
+            
+            tasks = c.fetchall()
+            
+            scheduled_tasks = []
+            for task_id, task_name, schedule in tasks:
+                # Parse schedule for this day
+                day_schedules = schedule.split(';')
+                for day_schedule in day_schedules:
+                    if day_schedule.startswith(f"{tomorrow_day}|"):
+                        day, times = day_schedule.split('|')
+                        time_slots = [time.strip() for time in times.split(',')]
+                        
+                        scheduled_tasks.append({
+                            'id': task_id,
+                            'name': task_name,
+                            'day': tomorrow_day,
+                            'time_slots': time_slots
+                        })
+            
+        return jsonify({
+            'in_night_window': in_night_window,
+            'night_start_time': night_start,
+            'night_end_time': night_end,
+            'current_time': datetime.now().strftime('%H:%M'),
+            'scheduled_tasks': scheduled_tasks,
+            'tomorrow_day': tomorrow.strftime('%A'),
+            'tomorrow_date': tomorrow.strftime('%Y-%m-%d')
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting night processing status: {str(e)}")
         return jsonify({
             'success': False,
             'message': str(e)

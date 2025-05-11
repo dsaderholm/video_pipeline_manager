@@ -84,6 +84,10 @@ The application includes an intelligent fallback system for handling situations 
 
 3. **Manual Recovery**: If needed, you can trigger a manual recovery using the API endpoint: `POST /api/tasks/recover-missed`
 
+4. **Improved Docker Compatibility**: The system now works reliably in Docker environments, handling file paths and permissions correctly, and searching for generated videos in multiple locations to ensure nothing is missed.
+
+5. **Backup Logs**: All generator and utility operations are logged to backup files in the `backup_logs` directory for better debugging, which survives container restarts.
+
 This ensures that even if the server is redeployed during the day, your scheduled content will still be generated and uploaded appropriately.
 
 ## API Documentation

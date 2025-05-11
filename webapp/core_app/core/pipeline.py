@@ -10,13 +10,13 @@ from datetime import datetime, timedelta
 import logging
 import sqlite3
 logger = logging.getLogger('app')
-# Add after the existing logger line
+# Import directly from log_manager
 from webapp.core_app.core.log_manager import db_log_handler
 
 # Add this to ensure the handler is attached
 if db_log_handler not in logger.handlers:
     logger.addHandler(db_log_handler)
-from webapp.core_app.core.utils import execute_curl, get_latest_video, cleanup_video, format_upload_command, log_with_details, cleanup_existing_mp4s
+from webapp.core_app.core.utils import execute_curl, get_latest_video, cleanup_video, format_upload_command, log_with_details, cleanup_existing_mp4s, validate_video_file
 from webapp.core_app.core.email_utils import send_task_completion_notification
 from webapp.core_app.core.database import db
 from flask import current_app
@@ -1505,8 +1505,21 @@ def process_night_queue():
                         # Process the video generation
                         result = process_video_generation(task_id, schedule_time, conn=conn)
                         
-                        if result:
+                        # Verify that the result is valid
+                        if result and isinstance(result, tuple) and len(result) == 2:
+                            video_path, video_id = result
                             logger.info(f"Successfully generated video for task {task_id} scheduled at {schedule_time}")
+                            logger.info(f"Video path: {video_path}, Video ID: {video_id}")
+                            
+                            # Validate the generated video file
+                            if video_path and os.path.exists(video_path):
+                                is_valid, validation_msg = validate_video_file(video_path)
+                                if is_valid:
+                                    logger.info(f"Video file validated successfully: {video_path}")
+                                else:
+                                    logger.warning(f"Video file validation failed: {validation_msg} for {video_path}")
+                            else:
+                                logger.warning(f"Generated video file does not exist: {video_path}")
                         else:
                             logger.warning(f"Failed to generate video for task {task_id} scheduled at {schedule_time}")
                 except Exception as e:

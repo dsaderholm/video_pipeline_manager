@@ -399,7 +399,8 @@ def create_app():
     # Create required directories
     required_dirs = {
     'previews': os.path.join(APP_ROOT, 'previews'),
-    'processed': os.path.join(APP_ROOT, 'processed_videos')
+    'processed': os.path.join(APP_ROOT, 'processed_videos'),
+    'backup_logs': os.path.join(APP_ROOT, 'backup_logs')
     }
     
     for dir_name, dir_path in required_dirs.items():
