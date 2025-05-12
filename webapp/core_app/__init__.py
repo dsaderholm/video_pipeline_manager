@@ -295,36 +295,24 @@ def init_scheduler(app):
                         
                         # Replace the job if it exists
                         try:
-                        # First try to remove any existing job
-                        try:
-                        scheduler.remove_job(night_job_id)
-                            logger.info(f"Removed existing night processing job {night_job_id}")
-                        except JobLookupError:
-                            pass  # Job doesn't exist yet
-                        except Exception as e:
-                        logger.warning(f"Error removing night job {night_job_id}: {e}")
-                        
-                        try:
-                        # Check if a job with this ID exists in a different way
-                        jobs = scheduler.get_jobs()
-                        job_exists = any(job.id == night_job_id for job in jobs)
-                        
-                        if job_exists:
-                            logger.warning(f"Job {night_job_id} still exists despite remove attempt, forcing replacement")
-                            
-                        scheduler.add_job(
-                                        func='webapp.core_app.core.pipeline:process_night_queue',
-                                        trigger='cron',
-                                        hour=int(night_hour),
-                                        minute=int(night_minute),
-                                        id=night_job_id,
-                                        misfire_grace_time=3600,  # 1 hour grace time
-                                        replace_existing=True,
-                                        coalesce=True
-                                    )
-                                    logger.info(f"Scheduled night processing for task {task_id} at {night_hour}:{night_minute}")
-                                except Exception as e:
-                                    logger.error(f"Failed to schedule night processing for task {task_id}: {e}")
+                            # First try to remove any existing job
+                            try:
+                                scheduler.remove_job(night_job_id)
+                            except JobLookupError:
+                                pass  # Job doesn't exist yet
+                            try:
+                                scheduler.add_job(
+                                    func='webapp.core_app.core.pipeline:process_night_queue',
+                                    trigger='cron',
+                                    hour=int(night_hour),
+                                    minute=int(night_minute),
+                                    id=night_job_id,
+                                    misfire_grace_time=3600,  # 1 hour grace time
+                                    replace_existing=True
+                                )
+                                logger.info(f"Scheduled night processing for task {task_id} at {night_hour}:{night_minute}")
+                            except Exception as e:
+                                logger.error(f"Failed to schedule night processing for task {task_id}: {e}")
                         except Exception as e:
                             logger.error(f"Error scheduling night processing for task {task_id}: {e}")
                         
@@ -365,7 +353,8 @@ def init_scheduler(app):
                                             args=[task_id],
                                             id=upload_job_id,
                                             misfire_grace_time=300,  # 5 minutes grace time
-                                            replace_existing=True
+                                            replace_existing=True,  # Ensure it replaces any existing job with same ID
+                                            coalesce=True
                                         )
                                         logger.info(f"Scheduled upload for task {task_id} on {day} at {hour:02d}:{minute:02d}")
                                     except Exception as e:
