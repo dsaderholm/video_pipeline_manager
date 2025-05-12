@@ -131,7 +131,6 @@ def get_task_details(task_id, conn):
         'id': task[0],
         'name': task[1],
         'generator_id': task[2],
-        'generator_name': task[12],
         'utilities': utilities,
         'schedule': task[4],
         'hashtags': task[5],
@@ -143,6 +142,7 @@ def get_task_details(task_id, conn):
         'processing_status': task[11],
         'processed_video_path': task[12],
         'created_at': localize_timestamp(task[13]),
+        'generator_name': task[14] if len(task) > 14 else '[Generator]',  # Fixed column index for generator_name
         'videos': videos,
         'platforms': [{
             'id': p[0],
