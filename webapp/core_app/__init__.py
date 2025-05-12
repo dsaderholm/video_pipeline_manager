@@ -91,19 +91,53 @@ def cleanup_all_processed_videos():
     app_logger.info("Starting processed videos cleanup")
     deleted_count = 0
     error_count = 0
+    platform_suffixes = ['_YouTube', '_Instagram', '_TikTok', '_Twitter', '_Facebook']
     
+    # Get list of all video files to delete
+    video_files = []
     for file in os.listdir(processed_dir):
         if not file.endswith('.mp4'):
             continue
             
         file_path = os.path.join(processed_dir, file)
+        video_files.append(file_path)
+        
+    # Add any platform-specific videos that might have been missed
+    for file_path in list(video_files):  # Use list() to create a copy so we can modify video_files
+        file_name = os.path.basename(file_path)
+        name_base, ext = os.path.splitext(file_name)
+        
+        # Check if this is already a platform-specific file
+        is_platform_file = any(name_base.endswith(suffix) for suffix in platform_suffixes)
+        
+        # If not a platform file, look for corresponding platform files
+        if not is_platform_file:
+            for suffix in platform_suffixes:
+                platform_file = os.path.join(processed_dir, f"{name_base}{suffix}{ext}")
+                if os.path.exists(platform_file) and platform_file not in video_files:
+                    video_files.append(platform_file)
+    
+    # Delete all identified video files
+    for file_path in video_files:
         try:
             os.remove(file_path)
             deleted_count += 1
-            logger.debug(f"Deleted processed video: {file}")
+            logger.debug(f"Deleted processed video: {os.path.basename(file_path)}")
         except Exception as e:
             error_count += 1
             logger.error(f"Error cleaning up processed video {file_path}: {e}")
+    
+    # Look for any "safe" temporary files that might have been missed
+    temp_files = [f for f in os.listdir(processed_dir) if f.startswith('upload_') and f.endswith('.mp4')]
+    for temp_file in temp_files:
+        temp_path = os.path.join(processed_dir, temp_file)
+        try:
+            os.remove(temp_path)
+            deleted_count += 1
+            logger.debug(f"Deleted temporary video: {temp_file}")
+        except Exception as e:
+            error_count += 1
+            logger.error(f"Error cleaning up temporary video {temp_path}: {e}")
     
     if deleted_count > 0 or error_count > 0:
         app_logger.info(f"Processed video cleanup complete. Deleted: {deleted_count}, Errors: {error_count}")

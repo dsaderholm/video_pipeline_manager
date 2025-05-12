@@ -1150,6 +1150,38 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
                 log_with_task_details('WARNING', f"Failed to remove processed video: {str(e)}",
                     task_id=task_id,
                     details={'error': str(e), 'video_id': video_id, 'file_path': processed_path})
+        
+        # Also clean up any platform-specific copies that might be left behind
+        platform_suffixes = ['_YouTube', '_Instagram', '_TikTok', '_Twitter', '_Facebook']
+        dir_name = os.path.dirname(processed_path)
+        base_name, ext = os.path.splitext(os.path.basename(processed_path))
+        
+        for suffix in platform_suffixes:
+            platform_file = os.path.join(dir_name, f"{base_name}{suffix}{ext}")
+            if os.path.exists(platform_file):
+                try:
+                    os.remove(platform_file)
+                    log_with_task_details('INFO', f"Cleaned up platform-specific video file",
+                        task_id=task_id,
+                        details={'file_path': platform_file})
+                except Exception as e:
+                    log_with_task_details('WARNING', f"Failed to remove platform-specific video: {str(e)}",
+                        task_id=task_id,
+                        details={'error': str(e), 'file_path': platform_file})
+                
+        # Clean up any temporary 'safe' files
+        safe_files = [f for f in os.listdir(dir_name) if f.startswith('upload_') and f.endswith('.mp4')]
+        for safe_file in safe_files:
+            safe_path = os.path.join(dir_name, safe_file)
+            try:
+                os.remove(safe_path)
+                log_with_task_details('INFO', f"Cleaned up temporary safe video file",
+                    task_id=task_id,
+                    details={'file_path': safe_path})
+            except Exception as e:
+                log_with_task_details('WARNING', f"Failed to remove temporary safe video: {str(e)}",
+                    task_id=task_id,
+                    details={'error': str(e), 'file_path': safe_path})
 
         # Check if this is the last pending video for the task
         c.execute("""
@@ -1726,6 +1758,22 @@ def cleanup_files(video_files):
             except Exception as e:
                 log_with_details('ERROR', f"Failed to cleanup file {file}: {str(e)}",
                     details={'file': file, 'error': str(e)})
+    
+    # Safety check - look for any temporary files that have been created in the current directory
+    current_dir = os.getcwd()
+    try:
+        # Find any mp4 files in the current directory
+        for file in os.listdir(current_dir):
+            if file.endswith('.mp4'):
+                file_path = os.path.join(current_dir, file)
+                try:
+                    cleanup_video(file_path)
+                    log_with_details('INFO', f"Cleaned up additional mp4 file in current directory: {file}")
+                except Exception as e:
+                    log_with_details('WARNING', f"Failed to clean up additional mp4 file: {str(e)}",
+                        details={'file': file, 'error': str(e)})
+    except Exception as e:
+        log_with_details('ERROR', f"Error searching for additional files to clean up: {str(e)}")
                     
 def force_release_lock():
     """Force release any existing lock regardless of state"""
