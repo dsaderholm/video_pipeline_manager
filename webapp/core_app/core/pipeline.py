@@ -1352,6 +1352,11 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False):
                         details={'error': str(force_e), **pipeline_details})
 
 def check_for_missed_processing(force_process=False):
+    """Check if any night processing was missed, typically after a restart. Now with improved scheduler job handling.
+    
+    Args:
+        force_process: If True, will process regardless of time window
+    """
     """Check if any night processing was missed, typically after a restart
     
     Args:

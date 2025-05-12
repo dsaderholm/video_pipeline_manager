@@ -336,6 +336,8 @@ def should_cleanup():
 
 @tasks_bp.route('/api/tasks', methods=['POST'])
 def create_task():
+    """Create a new video processing task with improved scheduler job handling"""
+    
     data = request.json
     scheduler = current_app.scheduler
     
@@ -372,15 +374,30 @@ def create_task():
             # Add night processing schedule - runs at configured start time every night
             night_job_id = f'task_{task_id}_night_processing'
             night_hour, night_minute = os.getenv('NIGHT_PROCESSING_START', '22:00').split(':')
-            scheduler.add_job(
-                func='webapp.core_app.core.pipeline:process_night_queue',
-                trigger='cron',
-                hour=int(night_hour),
-                minute=int(night_minute),
-                id=night_job_id,
-                misfire_grace_time=3600  # 1 hour grace time for night processing
-            )
-            logger.info(f"Scheduled night processing for task {task_id} at {night_hour}:{night_minute}")
+            
+            # First check if the job already exists and remove it
+            try:
+                scheduler.remove_job(night_job_id)
+                logger.info(f"Removed existing night processing job {night_job_id}")
+            except:
+                # Job doesn't exist yet, that's okay
+                pass
+                
+            # Now create the job
+            try:
+                scheduler.add_job(
+                    func='webapp.core_app.core.pipeline:process_night_queue',
+                    trigger='cron',
+                    hour=int(night_hour),
+                    minute=int(night_minute),
+                    id=night_job_id,
+                    misfire_grace_time=3600,  # 1 hour grace time for night processing
+                    replace_existing=True  # Ensure it replaces any existing job with same ID
+                )
+                logger.info(f"Scheduled night processing for task {task_id} at {night_hour}:{night_minute}")
+            except Exception as e:
+                logger.error(f"Failed to schedule night processing for task {task_id}: {str(e)}")
+                # Continue with task creation even if scheduling fails
             
             # Schedule the upload jobs
             from webapp.core_app.core.pipeline import process_video_upload
@@ -403,17 +420,30 @@ def create_task():
                     
                     # Schedule the upload job
                     upload_job_id = f'task_{task_id}_{day}_{hour}_{minute}'
-                    scheduler.add_job(
-                        func=process_video_upload,
-                        trigger='cron',
-                        day_of_week=day_number,
-                        hour=hour,
-                        minute=minute,
-                        args=[task_id],  # process_video_upload will find the correct video for this time
-                        id=upload_job_id,
-                        misfire_grace_time=300  # 5 minutes grace time for uploads
-                    )
-                    logger.info(f"Scheduled upload for task {task_id} on {day} at {hour:02d}:{minute:02d}")
+                    
+                    # Try to remove any existing job first to avoid conflicts
+                    try:
+                        scheduler.remove_job(upload_job_id)
+                        logger.info(f"Removed existing upload job {upload_job_id}")
+                    except:
+                        # Job doesn't exist yet, that's okay
+                        pass
+                    
+                    try:
+                        scheduler.add_job(
+                            func=process_video_upload,
+                            trigger='cron',
+                            day_of_week=day_number,
+                            hour=hour,
+                            minute=minute,
+                            args=[task_id],  # process_video_upload will find the correct video for this time
+                            id=upload_job_id,
+                            misfire_grace_time=300,  # 5 minutes grace time for uploads
+                            replace_existing=True  # Ensure it replaces any existing job with same ID
+                        )
+                        logger.info(f"Scheduled upload for task {task_id} on {day} at {hour:02d}:{minute:02d}")
+                    except Exception as e:
+                        logger.error(f"Error scheduling upload for task {task_id} on {day} at {hour:02d}:{minute:02d}: {str(e)}")
 
             conn.commit()
             return jsonify({'id': task_id, 'status': 'scheduled'})
@@ -448,6 +478,14 @@ def delete_task(id):
                             scheduler.remove_job(f'task_{id}_{day}_{hour}_{minute}')
                         except:
                             pass
+
+                # Remove night processing job
+                try:
+                    night_job_id = f'task_{id}_night_processing'
+                    scheduler.remove_job(night_job_id)
+                    logger.info(f"Removed night processing job {night_job_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to remove night processing job for task {id}: {str(e)}")
 
                 # Remove retry jobs
                 for job in scheduler.get_jobs():
