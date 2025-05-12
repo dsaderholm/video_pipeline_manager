@@ -88,6 +88,7 @@ def init_db():
                     error_message TEXT,
                     retry_count INTEGER DEFAULT 0,
                     generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    uploaded_at TIMESTAMP,
                     FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
                 )
             ''')
@@ -196,6 +197,18 @@ def init_db():
                 # Add processed_video_path column
                 c.execute("ALTER TABLE tasks ADD COLUMN processed_video_path TEXT")
                 logger.info("Added processed_video_path column to tasks table")
+            
+            # Check if uploaded_at column exists in generated_videos table
+            try:
+                # Check if uploaded_at column exists
+                c.execute("SELECT uploaded_at FROM generated_videos LIMIT 1")
+            except sqlite3.OperationalError:
+                # Add uploaded_at column
+                try:
+                    c.execute("ALTER TABLE generated_videos ADD COLUMN uploaded_at TIMESTAMP")
+                    logger.info("Added uploaded_at column to generated_videos table")
+                except Exception as e:
+                    logger.error(f"Failed to add uploaded_at column: {str(e)}")
             
             conn.commit()
             logger.info("Database tables verified/initialized successfully")

@@ -16,7 +16,8 @@ from webapp.core_app.core.log_manager import db_log_handler
 # No need to add the handler - we're using Docker logs
 # Keep this for compatibility with existing code
 from webapp.core_app.core.utils import execute_curl, get_latest_video, cleanup_video, format_upload_command, log_with_details, cleanup_existing_mp4s, validate_video_file
-from webapp.core_app.core.email_utils import send_task_completion_notification
+# Remove the direct import to avoid circular dependencies - import at function level instead
+# from webapp.core_app.core.email_utils import send_task_completion_notification
 from webapp.core_app.core.database import db
 from flask import current_app
 
@@ -1129,11 +1130,12 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
             update_task_status(task_id, 'failed', None, None, conn)
             raise Exception("Failed to upload to any platform")
 
-        # Update video and task status
+        # Update video and task status with upload time
         c.execute("""
             UPDATE generated_videos 
             SET status = 'completed',
-                upload_status = 'completed'
+                upload_status = 'completed',
+                uploaded_at = datetime('now')
             WHERE id = ?
         """, (video_id,))
 
@@ -1191,14 +1193,25 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
                 # Check if this is part of night processing (scheduled in advance)
                 is_scheduled = scheduled_time and datetime.fromisoformat(scheduled_time) > datetime.now() - timedelta(minutes=10)
                 
-                send_task_completion_notification(
-                    task_id, 
-                    task_data[0],  # task name
-                    task_data[4],  # email address
-                    success=True,
-                    platforms=uploaded_platforms,
-                    night_processing=is_scheduled  # Mark as night processing if scheduled
-                )
+                # Allow a small delay for database operations to complete
+                time.sleep(1)
+                
+                try:
+                    # Import at function level to avoid circular imports
+                    from webapp.core_app.core.email_utils import send_task_completion_notification
+                    
+                    send_task_completion_notification(
+                        task_id, 
+                        task_data[0],  # task name
+                        task_data[4],  # email address
+                        success=True,
+                        platforms=uploaded_platforms,
+                        night_processing=is_scheduled  # Mark as night processing if scheduled
+                    )
+                    log_with_task_details('INFO', f"Successfully sent upload completion notification", task_id=task_id)
+                except ImportError as ie:
+                    log_with_task_details('ERROR', f"Email module import error: {str(ie)}", task_id=task_id)
+                    raise
             except Exception as e:
                 log_with_task_details('ERROR', f"Failed to send completion notification",
                     task_id=task_id,

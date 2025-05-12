@@ -112,18 +112,24 @@ def get_task_details(task_id):
             # Get generated videos information
             c.execute("""
                 SELECT id, original_name, processed_path, scheduled_time, status, upload_status, 
-                       created_at, uploaded_at, error_message
+                       generated_at, uploaded_at, error_message
                 FROM generated_videos
                 WHERE task_id = ?
-                ORDER BY created_at DESC
+                ORDER BY generated_at DESC
             """, (task_id,))
             
             videos = c.fetchall()
             if videos:
                 # Use video timestamps for execution timeline
                 latest_video = videos[0]
-                execution_details['start_time'] = latest_video[6]  # created_at
-                execution_details['end_time'] = latest_video[7] if latest_video[7] else latest_video[6]  # uploaded_at or created_at
+                execution_details['start_time'] = latest_video[6]  # generated_at
+                
+                # Check if uploaded_at exists, use generated_at as fallback
+                try:
+                    execution_details['end_time'] = latest_video[7] if latest_video[7] else latest_video[6]  # uploaded_at or generated_at
+                except IndexError:
+                    # If uploaded_at column doesn't exist, use generated_at
+                    execution_details['end_time'] = latest_video[6]  # Use generated_at as fallback
                 
                 # Get file details
                 if latest_video[2]:  # processed_path
@@ -137,12 +143,19 @@ def get_task_details(task_id):
                 for video in videos:
                     if video[5] == 'completed':  # upload_status
                         execution_details['upload_attempts']['Platforms'] = 1
-                    elif video[8]:  # error_message
-                        execution_details['warnings'].append({
-                            'message': video[8],
-                            'timestamp': video[6],
-                            'details': {}
-                        })
+                    # Find the error_message index (schema-aware)
+                    error_message_index = 8  # Default index based on original schema
+                    try:
+                        # Only try to access if we have enough elements
+                        if len(video) > error_message_index and video[error_message_index]:
+                            execution_details['warnings'].append({
+                                'message': video[error_message_index],
+                                'timestamp': video[6],  # generated_at
+                                'details': {}
+                            })
+                    except IndexError:
+                        # Handle case where error_message isn't at expected index
+                        logger.warning(f"Error accessing error_message for video {video[0]}")
 
             # Get utilities information
             utilities = []
