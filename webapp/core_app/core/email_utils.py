@@ -4,7 +4,7 @@ import json
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import smtplib
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 logger = logging.getLogger('app')
 
@@ -285,18 +285,30 @@ def format_task_info_html(task_info, success, base_url=None, night_processing=Fa
     # Create a highlighted banner for night processing if applicable
     night_processing_banner = ""
     if night_processing:
-        # Calculate the scheduled publishing date
-        tomorrow = datetime.now() + timedelta(days=1)
-        publish_date = tomorrow.strftime('%A, %B %d, %Y')
-        
-        night_processing_banner = f"""
-        <div class="section night-processing">
-            <h2>Night Processing Completed</h2>
-            <div class="details-line">Your scheduled night processing has completed successfully.</div>
-            <div class="details-line"><span class="highlight">Videos are ready for publishing on {publish_date}</span> according to your schedule.</div>
-            <div class="details-line" style="margin-top: 10px; font-style: italic;">You'll receive additional notifications when videos are uploaded to their platforms.</div>
-        </div>
-        """
+        try:
+            # Calculate the scheduled publishing date
+            tomorrow = datetime.now() + timedelta(days=1)
+            publish_date = tomorrow.strftime('%A, %B %d, %Y')
+            
+            night_processing_banner = f"""
+            <div class="section night-processing">
+                <h2>Night Processing Completed</h2>
+                <div class="details-line">Your scheduled night processing has completed successfully.</div>
+                <div class="details-line"><span class="highlight">Videos are ready for publishing on {publish_date}</span> according to your schedule.</div>
+                <div class="details-line" style="margin-top: 10px; font-style: italic;">You'll receive additional notifications when videos are uploaded to their platforms.</div>
+            </div>
+            """
+        except Exception as e:
+            logger.error(f"Error formatting night processing banner: {str(e)}")
+            # Fallback to a simpler banner without the date
+            night_processing_banner = """
+            <div class="section night-processing">
+                <h2>Night Processing Completed</h2>
+                <div class="details-line">Your scheduled night processing has completed successfully.</div>
+                <div class="details-line"><span class="highlight">Videos are ready for publishing according to your schedule.</span></div>
+                <div class="details-line" style="margin-top: 10px; font-style: italic;">You'll receive additional notifications when videos are uploaded to their platforms.</div>
+            </div>
+            """
     
     return f"""
     <html>
@@ -510,6 +522,7 @@ def send_notification(to_emails, subject, message_html):
         logger.info(f"Connecting to SMTP server {smtp_server}:{smtp_port}...")
         logger.info(f"Environment has these settings: SERVER={smtp_server}, PORT={smtp_port}, USER={smtp_user}")
         
+        server = None
         try:
             server = smtplib.SMTP(smtp_server, smtp_port, timeout=30)  # Add timeout
         except Exception as conn_e:
@@ -525,6 +538,11 @@ def send_notification(to_emails, subject, message_html):
             logger.error(f"Failed to establish TLS connection: {str(e)}")
             if 'gmail' in smtp_server.lower():
                 logger.error("For Gmail, make sure 'Less secure app access' is enabled or use App Passwords")
+            if server:
+                try: 
+                    server.quit()
+                except:
+                    pass
             return False
         
         # Authenticate with credentials
@@ -537,9 +555,19 @@ def send_notification(to_emails, subject, message_html):
                 logger.error("For Gmail, you need to use an App Password. Check .env.example for instructions.")
             elif '535' in str(auth_e):  # Common auth error code
                 logger.error("Check your username/password or server security settings")
+            if server:
+                try: 
+                    server.quit()
+                except:
+                    pass
             return False
         except Exception as e:
             logger.error(f"Unknown login error: {str(e)}")
+            if server:
+                try: 
+                    server.quit()
+                except:
+                    pass
             return False
             
         # Send to all recipients individually
@@ -557,11 +585,12 @@ def send_notification(to_emails, subject, message_html):
                 logger.error(f"Failed to send email to {email}: {str(e)}")
         
         # Close connection
-        try:
-            server.quit()
-            logger.info("SMTP connection closed properly")
-        except Exception as e:
-            logger.warning(f"Error during SMTP connection closure: {str(e)}")
+        if server:
+            try:
+                server.quit()
+                logger.info("SMTP connection closed properly")
+            except Exception as e:
+                logger.warning(f"Error during SMTP connection closure: {str(e)}")
         
         # Report overall status
         if success_count > 0:

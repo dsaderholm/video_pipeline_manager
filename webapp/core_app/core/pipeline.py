@@ -1223,7 +1223,15 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
                     })
                     
                 # Check if this is part of night processing (scheduled in advance)
-                is_scheduled = scheduled_time and datetime.fromisoformat(scheduled_time) > datetime.now() - timedelta(minutes=10)
+                is_scheduled = False
+                try:
+                    if scheduled_time:
+                        scheduled_dt = datetime.fromisoformat(scheduled_time)
+                        is_scheduled = scheduled_dt > datetime.now() - timedelta(minutes=10)
+                except Exception as sched_err:
+                    log_with_task_details('WARNING', f"Error parsing scheduled time: {str(sched_err)}",
+                        task_id=task_id,
+                        details={'scheduled_time': scheduled_time, 'error': str(sched_err)})
                 
                 # Allow a small delay for database operations to complete
                 time.sleep(1)
@@ -1243,9 +1251,12 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
                     log_with_task_details('INFO', f"Successfully sent upload completion notification", task_id=task_id)
                 except ImportError as ie:
                     log_with_task_details('ERROR', f"Email module import error: {str(ie)}", task_id=task_id)
-                    raise
+                except Exception as email_e:
+                    log_with_task_details('ERROR', f"Error sending completion notification: {str(email_e)}",
+                        task_id=task_id,
+                        details={'error': str(email_e)})
             except Exception as e:
-                log_with_task_details('ERROR', f"Failed to send completion notification",
+                log_with_task_details('ERROR', f"Failed to prepare email notification",
                     task_id=task_id,
                     details={'error': str(e), **upload_details})
 
