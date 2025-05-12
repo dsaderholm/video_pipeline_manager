@@ -78,7 +78,7 @@ def safely_parse_json(json_str, default=None):
         return default
 
 def get_task_details(task_id):
-    """Get detailed task information including execution data for email"""
+    """Get detailed task information without relying on logs table"""
     try:
         with sqlite3.connect(get_db_path()) as conn:
             c = conn.cursor()
@@ -96,16 +96,7 @@ def get_task_details(task_id):
                 logger.warning(f"No task found with ID {task_id}")
                 return None
             
-            # Get task logs for execution details
-            c.execute("""
-                SELECT timestamp, level, message, details, source
-                FROM logs
-                WHERE task_id = ?
-                ORDER BY timestamp ASC
-            """, (task_id,))
-            logs = c.fetchall()
-            
-            # Process logs to extract key information (keeping existing execution_details code)
+            # Get basic execution details from the task itself
             execution_details = {
                 'start_time': None,
                 'end_time': None,
@@ -118,51 +109,40 @@ def get_task_details(task_id):
                 'processing_steps': []
             }
             
-            for log in logs:
-                timestamp, level, message, details_json, source = log
-                details = safely_parse_json(details_json, {})
+            # Get generated videos information
+            c.execute("""
+                SELECT id, original_name, processed_path, scheduled_time, status, upload_status, 
+                       created_at, uploaded_at, error_message
+                FROM generated_videos
+                WHERE task_id = ?
+                ORDER BY created_at DESC
+            """, (task_id,))
+            
+            videos = c.fetchall()
+            if videos:
+                # Use video timestamps for execution timeline
+                latest_video = videos[0]
+                execution_details['start_time'] = latest_video[6]  # created_at
+                execution_details['end_time'] = latest_video[7] if latest_video[7] else latest_video[6]  # uploaded_at or created_at
                 
-                # Track execution timeline
-                if "Starting video pipeline" in message:
-                    execution_details['start_time'] = timestamp
-                elif "Task completed successfully" in message:
-                    execution_details['end_time'] = timestamp
+                # Get file details
+                if latest_video[2]:  # processed_path
+                    execution_details['file_details'] = {
+                        'filename': latest_video[1],  # original_name
+                        'path': latest_video[2],      # processed_path
+                        'size': 'Generated'           # Placeholder
+                    }
                 
-                # Track generation time
-                if "Generator completed successfully" in message:
-                    if details:
-                        execution_details['generation_time'] = details.get('duration_seconds')
-                
-                # Track upload attempts and fallbacks
-                if "Processing upload for platform" in message:
-                    platform = details.get('platform', {}).get('name', 'unknown')
-                    execution_details['upload_attempts'][platform] = execution_details['upload_attempts'].get(platform, 0) + 1
-                elif "Primary upload failed, attempting fallback" in message:
-                    execution_details['fallback_usage'].append({
-                        'platform': details.get('platform', {}).get('name'),
-                        'reason': details.get('stderr', 'Primary upload failed'),
-                        'fallback_level': 1,
-                        'timestamp': timestamp
-                    })
-                elif "Fallback upload failed, attempting secondary fallback" in message:
-                    execution_details['fallback_usage'].append({
-                        'platform': details.get('platform', {}).get('name'),
-                        'reason': details.get('stderr', 'Fallback upload failed'),
-                        'fallback_level': 2,
-                        'timestamp': timestamp
-                    })
-                
-                # Track warnings
-                if level == 'WARNING':
-                    execution_details['warnings'].append({
-                        'message': message,
-                        'timestamp': timestamp,
-                        'details': details
-                    })
-                
-                # Track file details from validation
-                if "Video file validation successful" in message:
-                    execution_details['file_details'].update(details)
+                # Track uploads
+                for video in videos:
+                    if video[5] == 'completed':  # upload_status
+                        execution_details['upload_attempts']['Platforms'] = 1
+                    elif video[8]:  # error_message
+                        execution_details['warnings'].append({
+                            'message': video[8],
+                            'timestamp': video[6],
+                            'details': {}
+                        })
 
             # Get utilities information
             utilities = []
@@ -476,13 +456,23 @@ def send_notification(to_emails, subject, message_html):
         return False
     
     # For debugging
-    masked_emails = [email[:3] + '***' + email.split('@')[0][-2:] + '@' + email.split('@')[1] for email in to_emails]
+    masked_emails = []
+    for email in to_emails:
+        try:
+            if '@' in email:
+                masked_emails.append(f"{email[:3]}***{email.split('@')[0][-2:]}@{email.split('@')[1]}")
+            else:
+                masked_emails.append(f"{email[:3]}***")
+        except Exception:
+            masked_emails.append("[invalid email format]")
+    
     logger.info(f"Preparing to send notification '{subject}' to: {', '.join(masked_emails)}")
         
     try:
         config = load_smtp_config()
         if not config:
             logger.error("Failed to send notification: SMTP configuration not available")
+            logger.error("Check your .env or stack.env file to ensure SMTP_SERVER, SMTP_PORT, etc. are set")
             return False
             
         # Create the base message
@@ -505,8 +495,14 @@ def send_notification(to_emails, subject, message_html):
         smtp_user = config['SMTP_USERNAME']
         
         logger.info(f"Connecting to SMTP server {smtp_server}:{smtp_port}...")
+        logger.info(f"Environment has these settings: SERVER={smtp_server}, PORT={smtp_port}, USER={smtp_user}")
         
-        server = smtplib.SMTP(smtp_server, smtp_port, timeout=30)  # Add timeout
+        try:
+            server = smtplib.SMTP(smtp_server, smtp_port, timeout=30)  # Add timeout
+        except Exception as conn_e:
+            logger.error(f"Failed to establish connection to SMTP server: {str(conn_e)}")
+            logger.error(f"Check if the server '{smtp_server}' is valid and reachable")
+            return False
         
         # Use TLS for security
         try:
@@ -571,6 +567,7 @@ def send_notification(to_emails, subject, message_html):
         return False
     except Exception as e:
         logger.error(f"Failed to send email notifications: {str(e)}")
+        logger.error(f"Exception type: {type(e).__name__}")
         return False
 
 def send_task_completion_notification(task_id, task_name, to_email, success=True, platforms=None, night_processing=False):
