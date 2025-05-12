@@ -12,28 +12,58 @@ def get_db_path():
     return os.path.join('webapp', 'database', 'pipeline.db')
 
 def load_smtp_config():
-    """Load SMTP configuration from environment variables"""
+    """Load SMTP configuration from environment variables with improved validation"""
     required_vars = [
         'SMTP_SERVER',
         'SMTP_PORT',
         'SMTP_USERNAME',
         'SMTP_PASSWORD',
-        'SMTP_FROM_EMAIL',
-        'APP_URL'  # Add this for UI links
+        'SMTP_FROM_EMAIL'
+    ]
+    
+    # APP_URL is optional for emails
+    optional_vars = [
+        'APP_URL'
     ]
     
     config = {}
     missing_vars = []
     
+    # Check required variables
     for var in required_vars:
         value = os.getenv(var)
-        if value is None:
+        if not value or value.strip() == '':
             missing_vars.append(var)
         config[var] = value
     
+    # Add optional variables with defaults
+    for var in optional_vars:
+        value = os.getenv(var)
+        if not value or value.strip() == '':
+            if var == 'APP_URL':
+                value = 'http://localhost:5898'  # Default value
+                logger.info(f"Using default value for {var}: {value}")
+        config[var] = value
+    
+    # Log detailed information about the configuration
     if missing_vars:
-        logger.warning(f"Missing SMTP environment variables: {', '.join(missing_vars)}")
+        missing_list = ', '.join(missing_vars)
+        logger.error(f"Email notifications disabled due to missing SMTP configuration: {missing_list}")
+        logger.error("Please check your .env or stack.env file and ensure all required SMTP variables are set.")
         return None
+    
+    # Validate SMTP port
+    try:
+        config['SMTP_PORT'] = int(config['SMTP_PORT'])
+    except (ValueError, TypeError):
+        logger.error(f"Invalid SMTP_PORT value: {config['SMTP_PORT']}. Must be a number.")
+        return None
+    
+    # Securely log partial information for debugging
+    username = config['SMTP_USERNAME']
+    server = config['SMTP_SERVER']
+    masked_password = '●' * 8
+    logger.info(f"SMTP configuration loaded - Server: {server}, User: {username}, Password: {masked_password}")
     
     return config
 
@@ -262,11 +292,16 @@ def format_task_info_html(task_info, success, base_url=None, night_processing=Fa
     # Create a highlighted banner for night processing if applicable
     night_processing_banner = ""
     if night_processing:
+        # Calculate the scheduled publishing date
+        tomorrow = datetime.now() + timedelta(days=1)
+        publish_date = tomorrow.strftime('%A, %B %d, %Y')
+        
         night_processing_banner = f"""
         <div class="section night-processing">
             <h2>Night Processing Completed</h2>
             <div class="details-line">Your scheduled night processing has completed successfully.</div>
-            <div class="details-line">Videos are ready for publishing according to your schedule.</div>
+            <div class="details-line"><span class="highlight">Videos are ready for publishing on {publish_date}</span> according to your schedule.</div>
+            <div class="details-line" style="margin-top: 10px; font-style: italic;">You'll receive additional notifications when videos are uploaded to their platforms.</div>
         </div>
         """
     
@@ -415,7 +450,16 @@ def format_task_info_html(task_info, success, base_url=None, night_processing=Fa
     """
 
 def send_notification(to_emails, subject, message_html):
-    """Send an HTML email notification to one or multiple recipients"""
+    """Send an HTML email notification to one or multiple recipients
+    
+    Args:
+        to_emails: String or list of email recipients
+        subject: Email subject line
+        message_html: HTML content of the email
+        
+    Returns:
+        bool: True if notification was sent successfully, False otherwise
+    """
     if not to_emails:
         logger.warning("No recipient emails provided, skipping notification")
         return False
@@ -430,11 +474,15 @@ def send_notification(to_emails, subject, message_html):
     if not to_emails:
         logger.warning("No valid recipient emails after cleaning, skipping notification")
         return False
+    
+    # For debugging
+    masked_emails = [email[:3] + '***' + email.split('@')[0][-2:] + '@' + email.split('@')[1] for email in to_emails]
+    logger.info(f"Preparing to send notification '{subject}' to: {', '.join(masked_emails)}")
         
     try:
         config = load_smtp_config()
         if not config:
-            logger.warning("SMTP configuration not available, skipping notification")
+            logger.error("Failed to send notification: SMTP configuration not available")
             return False
             
         # Create the base message
@@ -446,22 +494,81 @@ def send_notification(to_emails, subject, message_html):
         html_part = MIMEText(message_html, 'html')
         msg.attach(html_part)
         
-        # Send to all recipients (BCC)
-        with smtplib.SMTP(config['SMTP_SERVER'], int(config['SMTP_PORT'])) as server:
-            server.starttls()
-            server.login(config['SMTP_USERNAME'], config['SMTP_PASSWORD'])
-            
-            # Send individual emails to prevent recipients from seeing each other's addresses
-            for email in to_emails:
-                msg['To'] = email
-                try:
-                    server.send_message(msg)
-                    logger.info(f"Successfully sent email notification to {email}")
-                except Exception as e:
-                    logger.error(f"Failed to send email to {email}: {str(e)}")
-            
-        return True
+        # Add plain text alternative for better compatibility
+        plain_text = f"Subject: {subject}\n\nThis is an automated notification from your Video Pipeline Manager.\nPlease view this email in an HTML-capable email client for full information.\n\nSent: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        text_part = MIMEText(plain_text, 'plain')
+        msg.attach(text_part)
         
+        # Connect to SMTP server with detailed logging
+        smtp_server = config['SMTP_SERVER']
+        smtp_port = config['SMTP_PORT']
+        smtp_user = config['SMTP_USERNAME']
+        
+        logger.info(f"Connecting to SMTP server {smtp_server}:{smtp_port}...")
+        
+        server = smtplib.SMTP(smtp_server, smtp_port, timeout=30)  # Add timeout
+        
+        # Use TLS for security
+        try:
+            server.starttls()
+            logger.info("TLS connection established successfully")
+        except Exception as e:
+            logger.error(f"Failed to establish TLS connection: {str(e)}")
+            if 'gmail' in smtp_server.lower():
+                logger.error("For Gmail, make sure 'Less secure app access' is enabled or use App Passwords")
+            return False
+        
+        # Authenticate with credentials
+        try:
+            server.login(smtp_user, config['SMTP_PASSWORD'])
+            logger.info(f"Successfully authenticated as {smtp_user}")
+        except smtplib.SMTPAuthenticationError as auth_e:
+            logger.error(f"SMTP Authentication failed: {str(auth_e)}")
+            if 'gmail' in smtp_server.lower():
+                logger.error("For Gmail, you need to use an App Password. Check .env.example for instructions.")
+            elif '535' in str(auth_e):  # Common auth error code
+                logger.error("Check your username/password or server security settings")
+            return False
+        except Exception as e:
+            logger.error(f"Unknown login error: {str(e)}")
+            return False
+            
+        # Send to all recipients individually
+        success_count = 0
+        error_count = 0
+        
+        for email in to_emails:
+            msg['To'] = email
+            try:
+                server.send_message(msg)
+                logger.info(f"Successfully sent email notification to {email}")
+                success_count += 1
+            except Exception as e:
+                error_count += 1
+                logger.error(f"Failed to send email to {email}: {str(e)}")
+        
+        # Close connection
+        try:
+            server.quit()
+            logger.info("SMTP connection closed properly")
+        except Exception as e:
+            logger.warning(f"Error during SMTP connection closure: {str(e)}")
+        
+        # Report overall status
+        if success_count > 0:
+            logger.info(f"Email notification summary: {success_count} sent successfully, {error_count} failed")
+            return True
+        else:
+            logger.error("All email notifications failed to send")
+            return False
+            
+    except smtplib.SMTPConnectError as connect_e:
+        logger.error(f"SMTP connection error: {str(connect_e)}")
+        logger.error(f"Check if the SMTP server {config.get('SMTP_SERVER', 'unknown')} is reachable")
+        return False
+    except smtplib.SMTPServerDisconnected as disc_e:
+        logger.error(f"SMTP server disconnected: {str(disc_e)}")
+        return False
     except Exception as e:
         logger.error(f"Failed to send email notifications: {str(e)}")
         return False
@@ -516,4 +623,206 @@ def send_task_completion_notification(task_id, task_name, to_email, success=True
         return send_notification(to_emails, subject, message_html)
     except Exception as e:
         logger.error(f"Error sending task completion notification: {str(e)}")
+        return False
+        
+def send_night_processing_notification(task_summaries, to_email):
+    """Send a comprehensive notification about night processing completion
+    
+    Args:
+        task_summaries: List of dicts with task details (id, name, status, video_count)
+        to_email: Email address(es) to send notification to
+    """
+    try:
+        # Prepare email data
+        now = datetime.now()
+        tomorrow = now + timedelta(days=1)
+        tomorrow_day = tomorrow.strftime('%A')
+        
+        # Only continue if we have email recipients
+        to_emails = [email.strip() for email in to_email.split(',') if email.strip()] if to_email else []
+        if not to_emails:
+            logger.warning("No valid email recipients for night processing notification")
+            return False
+            
+        # Calculate statistics for summary
+        successful_tasks = [t for t in task_summaries if t.get('status') == 'success']
+        failed_tasks = [t for t in task_summaries if t.get('status') == 'failed']
+        total_videos = sum(t.get('video_count', 0) for t in task_summaries)
+        total_tasks = len(task_summaries)
+        
+        # Create subject line
+        if failed_tasks:
+            subject = f"Night Processing Completed: {len(successful_tasks)}/{total_tasks} Tasks Successful - {total_videos} Videos Ready"
+        else:
+            subject = f"Night Processing Completed Successfully: {total_videos} Videos Ready for {tomorrow_day}"
+        
+        # Create HTML message
+        message_html = f"""
+        <html>
+        <head>
+            <style>
+                body {{
+                    font-family: Inter, sans-serif;
+                    background-color: #111827;
+                    color: #f3f4f6;
+                    padding: 2rem;
+                    margin: 0;
+                    line-height: 1.5;
+                }}
+                h1, h2, h3 {{
+                    color: #fc4828;
+                    margin-bottom: 1rem;
+                }}
+                h1 {{ font-size: 1.5rem; }}
+                h2 {{ font-size: 1.2rem; margin-top: 1.5rem; }}
+                h3 {{ font-size: 1.1rem; color: #f3f4f6; }}
+                .section {{
+                    background: rgba(31, 41, 55, 0.5);
+                    border: 1px solid #374151;
+                    border-radius: 0.5rem;
+                    padding: 1.5rem;
+                    margin-bottom: 1.5rem;
+                }}
+                .night-processing {{
+                    background: rgba(25, 47, 89, 0.5);
+                    border: 1px solid #3b82f6;
+                }}
+                .success {{
+                    background: rgba(6, 78, 59, 0.5);
+                    border: 1px solid #10b981;
+                }}
+                .failure {{
+                    background: rgba(127, 29, 29, 0.5);
+                    border: 1px solid #ef4444;
+                }}
+                .task-list {{
+                    display: grid;
+                    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+                    gap: 1rem;
+                    margin-top: 1rem;
+                }}
+                .task-item {{
+                    background: rgba(31, 41, 55, 0.3);
+                    padding: 0.75rem;
+                    border-radius: 0.375rem;
+                }}
+                .task-item-success {{
+                    border-left: 3px solid #10b981;
+                }}
+                .task-item-failure {{
+                    border-left: 3px solid #ef4444;
+                }}
+                .task-name {{
+                    font-weight: bold;
+                    margin-bottom: 0.25rem;
+                }}
+                .task-details {{
+                    font-size: 0.9rem;
+                    color: #d1d5db;
+                }}
+                .summary-stats {{
+                    display: flex;
+                    gap: 2rem;
+                    flex-wrap: wrap;
+                    margin: 1rem 0;
+                }}
+                .stat {{
+                    background: rgba(31, 41, 55, 0.3);
+                    padding: 1rem;
+                    border-radius: 0.375rem;
+                    min-width: 120px;
+                    text-align: center;
+                }}
+                .stat-label {{
+                    font-size: 0.9rem;
+                    color: #d1d5db;
+                }}
+                .stat-value {{
+                    font-size: 1.5rem;
+                    font-weight: bold;
+                    margin: 0.5rem 0;
+                }}
+                .highlight {{
+                    color: #10b981;
+                    font-weight: bold;
+                }}
+                .footer {{
+                    font-size: 0.9rem;
+                    color: #9ca3af;
+                }}
+            </style>
+        </head>
+        <body>
+            <h1>Video Pipeline Pro - Night Processing Report</h1>
+            
+            <div class="section night-processing">
+                <h2>Night Processing Summary</h2>
+                <div>Night processing for <span class="highlight">{tomorrow_day}</span> has completed.</div>
+                
+                <div class="summary-stats">
+                    <div class="stat">
+                        <div class="stat-label">Tasks Processed</div>
+                        <div class="stat-value">{len(successful_tasks)}/{total_tasks}</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">Videos Generated</div>
+                        <div class="stat-value">{total_videos}</div>
+                    </div>
+                    <div class="stat">
+                        <div class="stat-label">Schedule Date</div>
+                        <div class="stat-value">{tomorrow_day}</div>
+                    </div>
+                </div>
+            </div>
+            
+            {f'''<div class="section success">''' if successful_tasks else '''<div class="section">'''}
+                <h2>Successful Tasks</h2>
+                {f'''<div>All {len(successful_tasks)} tasks processed successfully.</div>''' if len(successful_tasks) == total_tasks else f'''<div>{len(successful_tasks)} out of {total_tasks} tasks processed successfully.</div>'''}
+                
+                <div class="task-list">
+                    {chr(10).join(f'''
+                    <div class="task-item task-item-success">
+                        <div class="task-name">{task['name']}</div>
+                        <div class="task-details">ID: {task['id']} | Videos: {task['video_count']}</div>
+                        <div class="task-details">Scheduled for {tomorrow_day}</div>
+                    </div>''' for task in successful_tasks) if successful_tasks else '<div>No successful tasks.</div>'}
+                </div>
+            </div>
+            
+            {f'''<div class="section failure">''' if failed_tasks else '''<div class="section" style="display: none;">'''}
+                <h2>Failed Tasks</h2>
+                <div>{len(failed_tasks)} tasks encountered errors during processing.</div>
+                
+                <div class="task-list">
+                    {chr(10).join(f'''
+                    <div class="task-item task-item-failure">
+                        <div class="task-name">{task['name']}</div>
+                        <div class="task-details">ID: {task['id']}</div>
+                        <div class="task-details">Error: {task.get('error', 'Unknown error')}</div>
+                    </div>''' for task in failed_tasks) if failed_tasks else '<div>No failed tasks.</div>'}
+                </div>
+            </div>
+            
+            <div class="section">
+                <h2>Next Steps</h2>
+                <p>The videos generated during night processing are now ready to be uploaded according to their scheduled times.</p>
+                <p>You can review these videos in the Video Pipeline Manager dashboard and make any necessary adjustments before they are automatically uploaded.</p>
+            </div>
+
+            <div class="footer section">
+                <div>This is an automated notification from your Video Pipeline Manager.</div>
+                <div>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        # Send the notification
+        config = load_smtp_config()
+        if not config:
+            return False
+            
+        return send_notification(to_emails, subject, message_html)
+    except Exception as e:
+        logger.error(f"Error sending night processing notification: {str(e)}")
         return False

@@ -1178,12 +1178,26 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
         # Send email notification if enabled
         if task_data[4]:  # email_notify
             try:
+                # Include more details in the notification
+                platform_names = ', '.join(uploaded_platforms) if uploaded_platforms else 'None'
+                log_with_task_details('INFO', f"Sending upload completion notification",
+                    task_id=task_id,
+                    details={
+                        'email': task_data[4],
+                        'platforms': platform_names,
+                        'video_id': video_id
+                    })
+                    
+                # Check if this is part of night processing (scheduled in advance)
+                is_scheduled = scheduled_time and datetime.fromisoformat(scheduled_time) > datetime.now() - timedelta(minutes=10)
+                
                 send_task_completion_notification(
                     task_id, 
                     task_data[0],  # task name
                     task_data[4],  # email address
                     success=True,
-                    platforms=uploaded_platforms
+                    platforms=uploaded_platforms,
+                    night_processing=is_scheduled  # Mark as night processing if scheduled
                 )
             except Exception as e:
                 log_with_task_details('ERROR', f"Failed to send completion notification",
@@ -1464,6 +1478,10 @@ def process_night_queue():
     logger.info("Starting night processing for scheduled tasks")
 
     lock_acquired = False
+    task_summaries = []  # To store task results for notification
+    total_videos_generated = 0
+    notification_recipients = set()  # To collect all task email recipients
+    
     try:
         # Try to acquire lock before processing
         if not check_and_set_lock():
@@ -1479,7 +1497,7 @@ def process_night_queue():
             tomorrow_day = tomorrow.strftime('%A')[:3].lower()
             
             c.execute("""
-                SELECT id, schedule, name
+                SELECT id, schedule, name, email_notify
                 FROM tasks 
                 WHERE status != 'failed'
                 AND processing_status != 'failed'
@@ -1489,13 +1507,31 @@ def process_night_queue():
             tasks = c.fetchall()
             logger.info(f"Found {len(tasks)} tasks scheduled for {tomorrow_day}")
 
-            for task_id, schedule, task_name in tasks:
+            for task_id, schedule, task_name, email_notify in tasks:
                 schedule_times = get_next_day_schedules(schedule)
                 if not schedule_times:
                     logger.info(f"No schedule times found for task {task_id} ({task_name}) on {tomorrow_day}")
+                    task_summaries.append({
+                        'id': task_id,
+                        'name': task_name,
+                        'status': 'skipped',
+                        'video_count': 0,
+                        'error': 'No schedule times found'
+                    })
                     continue
                 
+                # Add email recipient if notification is enabled
+                if email_notify:
+                    notification_recipients.add(email_notify)
+                
                 logger.info(f"Processing task {task_id} ({task_name}) with {len(schedule_times)} schedule time(s)")
+                task_result = {
+                    'id': task_id,
+                    'name': task_name,
+                    'status': 'success',
+                    'video_count': 0,
+                    'videos': []
+                }
                     
                 try:
                     # Generate a video for each scheduled time
@@ -1514,6 +1550,15 @@ def process_night_queue():
                             logger.info(f"Successfully generated video for task {task_id} scheduled at {schedule_time}")
                             logger.info(f"Video path: {video_path}, Video ID: {video_id}")
                             
+                            # Track the video for notification
+                            task_result['video_count'] += 1
+                            total_videos_generated += 1
+                            task_result['videos'].append({
+                                'id': video_id,
+                                'path': video_path,
+                                'schedule_time': schedule_time.isoformat() if schedule_time else None
+                            })
+                            
                             # Validate the generated video file
                             if video_path and os.path.exists(video_path):
                                 is_valid, validation_msg = validate_video_file(video_path)
@@ -1525,13 +1570,51 @@ def process_night_queue():
                                 logger.warning(f"Generated video file does not exist: {video_path}")
                         else:
                             logger.warning(f"Failed to generate video for task {task_id} scheduled at {schedule_time}")
+                            if not task_result.get('error'):
+                                task_result['error'] = 'Failed to generate video for some schedule times'
                 except Exception as e:
+                    error_msg = str(e)
                     log_with_task_details('ERROR', 
-                        f"Night processing failed for task {task_id}: {str(e)}",
+                        f"Night processing failed for task {task_id}: {error_msg}",
                         task_id=task_id,
-                        details={'error': str(e), 'schedule_time': str(schedule_time)})
+                        details={'error': error_msg, 'schedule_time': str(schedule_time)})
+                    task_result['status'] = 'failed'
+                    task_result['error'] = error_msg
+                
+                # Send individual task notifications if requested and videos were generated
+                if email_notify and task_result['video_count'] > 0:
+                    try:
+                        from webapp.core_app.core.email_utils import send_task_completion_notification
+                        send_task_completion_notification(
+                            task_id,
+                            task_name,
+                            email_notify,
+                            success=(task_result['status'] == 'success'),
+                            night_processing=True
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to send task completion notification: {str(e)}")
+                
+                # Add task result to summaries
+                task_summaries.append(task_result)
             
-            logger.info("Night processing queue completed")
+            logger.info(f"Night processing queue completed: {total_videos_generated} videos generated")
+            
+            # Send comprehensive notification if we have recipients
+            if notification_recipients and task_summaries:
+                try:
+                    from webapp.core_app.core.email_utils import send_night_processing_notification
+                    # Convert set to comma-separated string
+                    all_recipients = ','.join(notification_recipients)
+                    
+                    send_night_processing_notification(
+                        task_summaries,
+                        all_recipients
+                    )
+                    logger.info(f"Sent night processing summary notification to {len(notification_recipients)} recipients")
+                except Exception as e:
+                    logger.error(f"Failed to send night processing notification: {str(e)}")
+
 
     except Exception as e:
         logger.error(f"Error in night processing queue: {str(e)}")
