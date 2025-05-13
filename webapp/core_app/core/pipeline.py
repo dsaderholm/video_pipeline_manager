@@ -1,4 +1,17 @@
-import json
+def check_connection_health(conn):
+    """Verify if a database connection is healthy and active"""
+    if conn is None:
+        return False
+        
+    try:
+        # Try a simple query to verify connection works
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1")
+        result = cursor.fetchone()
+        return result is not None and result[0] == 1
+    except Exception as e:
+        logger.warning(f"Database connection health check failed: {str(e)}")
+        return Falseimport json
 import time
 import os
 import sys
@@ -23,6 +36,21 @@ from flask import current_app
 
 # Global lock for thread safety (keep this as it's different from database locking)
 db_lock = threading.Lock()
+
+def check_connection_health(conn):
+    """Verify if a database connection is healthy and active"""
+    if conn is None:
+        return False
+        
+    try:
+        # Try a simple query to verify connection works
+        cursor = conn.cursor()
+        cursor.execute("SELECT 1")
+        result = cursor.fetchone()
+        return result is not None and result[0] == 1
+    except Exception as e:
+        logger.warning(f"Database connection health check failed: {str(e)}")
+        return False
 
 def log_with_task_details(level, message, task_id, details=None):
     """Helper function to log with task ID and structured details"""
@@ -127,6 +155,15 @@ def check_and_set_lock(task_id=None):
         try:
             # Create a new connection directly instead of using the contextmanager to avoid generator issues
             conn = db._create_connection()
+            
+            # Verify the connection is healthy
+            if not check_connection_health(conn):
+                log_with_task_details('ERROR', 
+                    "Failed to create a healthy database connection for lock check", 
+                    task_id=task_id,
+                    details=lock_details)
+                return False
+                
             c = conn.cursor()
             
             # Start transaction to prevent race conditions
@@ -226,6 +263,24 @@ def release_lock(task_id=None):
         try:
             # Create a new connection directly instead of using the contextmanager
             conn = db._create_connection()
+            
+            # Verify the connection is healthy
+            if not check_connection_health(conn):
+                log_with_task_details('ERROR', 
+                    "Failed to create a healthy database connection for lock release", 
+                    task_id=task_id,
+                    details=release_details)
+                # Try force release as fallback
+                try:
+                    return force_release_lock()
+                except Exception as force_e:
+                    release_details['force_error'] = str(force_e)
+                    log_with_task_details('ERROR', 
+                        f"Force release failed after connection health check: {str(force_e)}", 
+                        task_id=task_id,
+                        details=release_details)
+                return False
+                
             c = conn.cursor()
             
             # Start transaction to prevent race conditions
@@ -901,8 +956,19 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
         details=upload_details)
     
     files_to_cleanup = set()
+    should_close_conn = conn is None
     
     try:
+        # Create a new connection if one wasn't provided
+        if conn is None:
+            conn = db.get_connection()
+            
+        if conn is None:
+            log_with_task_details('ERROR', "Failed to obtain database connection",
+                task_id=task_id,
+                details=upload_details)
+            return False
+            
         c = conn.cursor()
         
         # Get video to upload
@@ -1281,6 +1347,16 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
 
     finally:
         cleanup_files(files_to_cleanup)
+        
+        # Only close the connection if we created it
+        if should_close_conn and conn:
+            try:
+                conn.close()
+            except Exception as e:
+                log_with_task_details('ERROR',
+                    f"Failed to close database connection: {str(e)}",
+                    task_id=task_id,
+                    details={'error': str(e)})
 
 def process_video_pipeline(task_id, schedule_time=None, preview_mode=False):
     """Main pipeline process that coordinates generation and upload"""
@@ -1427,11 +1503,6 @@ def check_for_missed_processing(force_process=False):
     Args:
         force_process: If True, will process regardless of time window
     """
-    """Check if any night processing was missed, typically after a restart
-    
-    Args:
-        force_process: If True, will process regardless of time window
-    """
     try:
         today = datetime.now().date()
         yesterday = today - timedelta(days=1)
@@ -1497,12 +1568,24 @@ def check_for_missed_processing(force_process=False):
                         if today_schedules:
                             # Process the task for today's schedules
                             try:
-                                for schedule_time in today_schedules:
-                                    # Use process_video_pipeline for complete handling
+                                # Import Flask app and create app context
+                                from flask import current_app
+                                if current_app._get_current_object() is None or not hasattr(current_app, 'manual_run'):
+                                    # Create an app context if needed
+                                    from webapp.core_app import app
+                                    with app.app_context():
+                                        app.manual_run = True  # Set manual flag to force processing
+                                        for schedule_time in today_schedules:
+                                            process_video_pipeline(task_id, schedule_time)
+                                            processed_count += 1
+                                        app.manual_run = False  # Reset flag
+                                else:
+                                    # Already in app context
                                     current_app.manual_run = True  # Set manual flag to force processing
-                                    process_video_pipeline(task_id, schedule_time)
+                                    for schedule_time in today_schedules:
+                                        process_video_pipeline(task_id, schedule_time)
+                                        processed_count += 1
                                     current_app.manual_run = False  # Reset flag
-                                    processed_count += 1
                             except Exception as e:
                                 log_with_task_details('ERROR', 
                                     f"Failed to process missed task {task_id}: {str(e)}",
@@ -1588,52 +1671,38 @@ def process_night_queue():
                     'video_count': 0,
                     'videos': []
                 }
-                    
+                
+                # Ensure we have a proper application context for processing
                 try:
-                    # Generate a video for each scheduled time
-                    for schedule_time in schedule_times:
-                        logger.info(f"Generating video for task {task_id} at {schedule_time}")
+                    # Check if we need to create an app context
+                    from flask import current_app
+                    in_app_context = False
+                    
+                    try:
+                        # Try to access current_app to see if we're in an app context
+                        current_app._get_current_object()
+                        in_app_context = True
+                    except Exception:
+                        # We're not in an app context
+                        in_app_context = False
+                    
+                    if in_app_context:
+                        # Already in app context, proceed normally
+                        process_task_with_times(task_id, schedule_times, conn, task_result, total_videos_generated)
+                    else:
+                        # Create an app context first
+                        from webapp.core_app import app
+                        with app.app_context():
+                            app.manual_run = True  # For night processing to work in a context
+                            process_task_with_times(task_id, schedule_times, conn, task_result, total_videos_generated) 
+                            app.manual_run = False
                         
-                        # First clean up any existing temporary files to avoid confusion
-                        cleanup_existing_mp4s()
-                        
-                        # Process the video generation
-                        result = process_video_generation(task_id, schedule_time, conn=conn)
-                        
-                        # Verify that the result is valid
-                        if result and isinstance(result, tuple) and len(result) == 2:
-                            video_path, video_id = result
-                            logger.info(f"Successfully generated video for task {task_id} scheduled at {schedule_time}")
-                            logger.info(f"Video path: {video_path}, Video ID: {video_id}")
-                            
-                            # Track the video for notification
-                            task_result['video_count'] += 1
-                            total_videos_generated += 1
-                            task_result['videos'].append({
-                                'id': video_id,
-                                'path': video_path,
-                                'schedule_time': schedule_time.isoformat() if schedule_time else None
-                            })
-                            
-                            # Validate the generated video file
-                            if video_path and os.path.exists(video_path):
-                                is_valid, validation_msg = validate_video_file(video_path)
-                                if is_valid:
-                                    logger.info(f"Video file validated successfully: {video_path}")
-                                else:
-                                    logger.warning(f"Video file validation failed: {validation_msg} for {video_path}")
-                            else:
-                                logger.warning(f"Generated video file does not exist: {video_path}")
-                        else:
-                            logger.warning(f"Failed to generate video for task {task_id} scheduled at {schedule_time}")
-                            if not task_result.get('error'):
-                                task_result['error'] = 'Failed to generate video for some schedule times'
                 except Exception as e:
                     error_msg = str(e)
                     log_with_task_details('ERROR', 
                         f"Night processing failed for task {task_id}: {error_msg}",
                         task_id=task_id,
-                        details={'error': error_msg, 'schedule_time': str(schedule_time)})
+                        details={'error': error_msg})
                     task_result['status'] = 'failed'
                     task_result['error'] = error_msg
                 
@@ -1687,6 +1756,49 @@ def process_night_queue():
                     logger.info("Force-released lock after night processing")
                 except Exception as force_e:
                     logger.error(f"Force release also failed after night processing: {str(force_e)}")
+                    
+def process_task_with_times(task_id, schedule_times, conn, task_result, total_videos_generated):
+    """Helper function to process a task with its schedule times
+    
+    Created to be used with application context to avoid code duplication
+    """
+    for schedule_time in schedule_times:
+        logger.info(f"Generating video for task {task_id} at {schedule_time}")
+        
+        # First clean up any existing temporary files to avoid confusion
+        cleanup_existing_mp4s()
+        
+        # Process the video generation
+        result = process_video_generation(task_id, schedule_time, conn=conn)
+        
+        # Verify that the result is valid
+        if result and isinstance(result, tuple) and len(result) == 2:
+            video_path, video_id = result
+            logger.info(f"Successfully generated video for task {task_id} scheduled at {schedule_time}")
+            logger.info(f"Video path: {video_path}, Video ID: {video_id}")
+            
+            # Track the video for notification
+            task_result['video_count'] += 1
+            total_videos_generated += 1
+            task_result['videos'].append({
+                'id': video_id,
+                'path': video_path,
+                'schedule_time': schedule_time.isoformat() if schedule_time else None
+            })
+            
+            # Validate the generated video file
+            if video_path and os.path.exists(video_path):
+                is_valid, validation_msg = validate_video_file(video_path)
+                if is_valid:
+                    logger.info(f"Video file validated successfully: {video_path}")
+                else:
+                    logger.warning(f"Video file validation failed: {validation_msg} for {video_path}")
+            else:
+                logger.warning(f"Generated video file does not exist: {video_path}")
+        else:
+            logger.warning(f"Failed to generate video for task {task_id} scheduled at {schedule_time}")
+            if not task_result.get('error'):
+                task_result['error'] = 'Failed to generate video for some schedule times'
 
 def process_scheduled_uploads():
     """Process tasks that are ready for upload - Modified to process ALL pending videos"""
@@ -1700,56 +1812,33 @@ def process_scheduled_uploads():
             return
             
         lock_acquired = True
-        with db.get_connection() as conn:
-            c = conn.cursor()
-            # Modified query to get ALL pending uploads for the current time
-            # Removed LIMIT 1 to process all pending videos
-            c.execute('''
-                SELECT v.task_id, v.id, v.original_name, v.processed_path, v.scheduled_time
-                FROM generated_videos v
-                JOIN tasks t ON v.task_id = t.id
-                WHERE v.upload_status = 'pending'
-                AND v.scheduled_time <= datetime('now', 'localtime')
-                AND t.status != 'failed'
-                ORDER BY v.scheduled_time ASC
-            ''')
-            pending_uploads = c.fetchall()
-            
-            processed_count = 0
-            error_count = 0
-            
-            if pending_uploads:
-                logger.info(f"Found {len(pending_uploads)} pending videos to upload")
-                
-                for pending_upload in pending_uploads:
-                    task_id, video_id, original_name, processed_path, scheduled_time = pending_upload
-                    try:
-                        # Important: Don't let one failure prevent other uploads
-                        process_video_upload(
-                            task_id, 
-                            (video_id, original_name, processed_path, scheduled_time), 
-                            conn=conn
-                        )
-                        processed_count += 1
-                        logger.info(f"Successfully processed upload for video {video_id}, task {task_id}")
-                    except Exception as e:
-                        error_count += 1
-                        log_with_task_details('ERROR', 
-                            f"Failed to process upload for task {task_id}: {str(e)}",
-                            task_id=task_id,
-                            details={
-                                'error': str(e),
-                                'video_id': video_id,
-                                'scheduled_time': scheduled_time
-                            })
-    except Exception as e:
-        logger.error(f"Error in scheduled uploads processor: {str(e)}")
         
-    finally:
-        # Log the summary of processed videos
-        if 'processed_count' in locals() and processed_count > 0:
-            logger.info(f"Scheduled uploads complete: Processed {processed_count} videos with {error_count} errors")
+        # Check if we need to create an app context
+        try:
+            from flask import current_app
+            in_app_context = False
             
+            try:
+                # Try to access current_app to see if we're in an app context
+                current_app._get_current_object()
+                in_app_context = True
+            except Exception:
+                # We're not in an app context
+                in_app_context = False
+                
+            if in_app_context:
+                # Already in app context, proceed normally
+                process_uploads_with_context()
+            else:
+                # Create an app context first
+                from webapp.core_app import app
+                with app.app_context():
+                    process_uploads_with_context()
+        except Exception as e:
+            logger.error(f"Error in scheduled uploads processor: {str(e)}")
+            
+    finally:
+        # Release lock if acquired
         if lock_acquired:
             try:
                 release_lock()
@@ -1759,6 +1848,55 @@ def process_scheduled_uploads():
                     force_release_lock()
                 except Exception as force_e:
                     logger.error(f"Force release also failed after scheduled uploads: {str(force_e)}")
+                    
+def process_uploads_with_context():
+    """Helper function to process uploads with proper context"""
+    processed_count = 0
+    error_count = 0
+    
+    with db.get_connection() as conn:
+        c = conn.cursor()
+        # Modified query to get ALL pending uploads for the current time
+        # Removed LIMIT 1 to process all pending videos
+        c.execute('''
+            SELECT v.task_id, v.id, v.original_name, v.processed_path, v.scheduled_time
+            FROM generated_videos v
+            JOIN tasks t ON v.task_id = t.id
+            WHERE v.upload_status = 'pending'
+            AND v.scheduled_time <= datetime('now', 'localtime')
+            AND t.status != 'failed'
+            ORDER BY v.scheduled_time ASC
+        ''')
+        pending_uploads = c.fetchall()
+        
+        if pending_uploads:
+            logger.info(f"Found {len(pending_uploads)} pending videos to upload")
+            
+            for pending_upload in pending_uploads:
+                task_id, video_id, original_name, processed_path, scheduled_time = pending_upload
+                try:
+                    # Important: Don't let one failure prevent other uploads
+                    process_video_upload(
+                        task_id, 
+                        (video_id, original_name, processed_path, scheduled_time), 
+                        conn=conn
+                    )
+                    processed_count += 1
+                    logger.info(f"Successfully processed upload for video {video_id}, task {task_id}")
+                except Exception as e:
+                    error_count += 1
+                    log_with_task_details('ERROR', 
+                        f"Failed to process upload for task {task_id}: {str(e)}",
+                        task_id=task_id,
+                        details={
+                            'error': str(e),
+                            'video_id': video_id,
+                            'scheduled_time': scheduled_time
+                        })
+    
+    # Log the summary of processed videos
+    if processed_count > 0:
+        logger.info(f"Scheduled uploads complete: Processed {processed_count} videos with {error_count} errors")
 
 def cleanup_files(video_files):
     """Cleanup multiple video files with error handling"""
@@ -1797,6 +1935,14 @@ def force_release_lock():
     try:
         # Create a direct connection instead of using contextmanager
         conn = db._create_connection()
+        
+        # Verify the connection is healthy
+        if not check_connection_health(conn):
+            logger.error("Failed to create a healthy database connection for force lock release")
+            # If we can't get a good connection, we can't do much - consider the lock cleared anyway
+            # because the next attempt will try again with a fresh connection
+            return True
+            
         c = conn.cursor()
         
         # Start transaction to prevent race conditions

@@ -204,11 +204,11 @@ def init_scheduler(app):
             next_run_time=datetime.now() + timedelta(minutes=1)
         )
 
-        # Add night processing job - run every 15 minutes to ensure processing happens
+        # Add night processing job - run at staggered times (2, 17, 32, 47) to avoid lock contention
         scheduler.add_job(
             id='night_processing',
             func=process_night_queue,
-            trigger=CronTrigger(minute='0,15,30,45'),  # Run at specific minutes every hour
+            trigger=CronTrigger(minute='2,17,32,47'),  # Staggered to avoid lock collisions
             name='Night Video Processing',
             misfire_grace_time=900,  # 15 minute grace time
             max_instances=1,
@@ -229,8 +229,8 @@ def init_scheduler(app):
             coalesce=True
         )
         
-        # Add a job to run 15 minutes after the start time to ensure processing happens
-        next_minute = int(night_minute) + 15
+        # Add a job to run 17 minutes after the start time to ensure processing happens and avoid lock contention
+        next_minute = int(night_minute) + 17  # Changed from 15 to 17 to avoid lock collision
         next_hour = int(night_hour)
         
         # Handle minute overflow
@@ -249,11 +249,11 @@ def init_scheduler(app):
             coalesce=True
         )
 
-        # Add scheduled uploads job - run every 5 minutes to ensure timely uploads
+        # Add scheduled uploads job - run at 3, 8, 13, etc. minutes to avoid lock contention with night processing
         scheduler.add_job(
             id='scheduled_uploads',
             func=process_scheduled_uploads,
-            trigger=CronTrigger(minute='*/5'),  # Run every 5 minutes
+            trigger=CronTrigger(minute='3,8,13,18,23,28,33,38,43,48,53,58'),  # Offset by 3 minutes 
             name='Scheduled Video Uploads',
             misfire_grace_time=240,  # 4 minute grace time
             max_instances=1,
