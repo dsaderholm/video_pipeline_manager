@@ -11,7 +11,9 @@ def check_connection_health(conn):
         return result is not None and result[0] == 1
     except Exception as e:
         logger.warning(f"Database connection health check failed: {str(e)}")
-        return Falseimport json
+        return False
+
+import json
 import time
 import os
 import sys
