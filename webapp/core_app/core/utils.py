@@ -204,7 +204,25 @@ def check_utility_response(stdout_str, stderr_str):
     return True, ""
 
 def check_uploader_response(stdout_str, stderr_str):
-    """Check if upload was successful"""
+    """Check if upload was successful with improved TikTok error detection"""
+    # First check for TikTok specific error patterns
+    tiktok_error_patterns = [
+        r'NO COOKIES FILE FOUND',
+        r'COOKIES EXPIRED',
+        r'PLEASE LOG-IN',
+        r'LOGIN FAILURE',
+        r'authentication failed',
+        r'TikTok login error'
+    ]
+    
+    for pattern in tiktok_error_patterns:
+        if re.search(pattern, stderr_str + stdout_str, re.IGNORECASE):
+            error_msg = f"TikTok authentication error: {pattern}"
+            log_with_details('ERROR', error_msg, 
+                details={'stdout_sample': stdout_str[:300], 'stderr_sample': stderr_str[:300]})
+            return False, error_msg
+    
+    # Then check for JSON responses
     try:
         json_response = json.loads(stdout_str)
         if isinstance(json_response, dict):

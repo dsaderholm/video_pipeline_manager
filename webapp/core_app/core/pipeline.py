@@ -1115,7 +1115,7 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
             current_stderr = ""
 
             # Try primary upload
-            success, stdout, stderr = execute_curl(upload_cmd, retries=3, retry_delay=5, mode='uploader')
+            success, stdout, stderr = execute_curl(upload_cmd, retries=3, retry_delay=5, mode='uploader', timeout=600)  # 10 minute timeout
             current_stdout, current_stderr = stdout, stderr
             used_fallback = False
             fallback_level = 0  # 0 = no fallback, 1 = primary fallback, 2 = secondary fallback
@@ -1136,7 +1136,7 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
                 if fallback_safe_path:
                     files_to_cleanup.add(fallback_safe_path)
                     
-                success, stdout, stderr = execute_curl(fallback_cmd, retries=3, retry_delay=5, mode='uploader')
+                success, stdout, stderr = execute_curl(fallback_cmd, retries=3, retry_delay=5, mode='uploader', timeout=600)  # 10 minute timeout
                 if success:
                     used_fallback = True
                     fallback_level = 1
@@ -1158,7 +1158,7 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
                 if fallback_safe_path_2:
                     files_to_cleanup.add(fallback_safe_path_2)
                     
-                success, stdout, stderr = execute_curl(fallback_cmd_2, retries=3, retry_delay=5, mode='uploader')
+                success, stdout, stderr = execute_curl(fallback_cmd_2, retries=3, retry_delay=5, mode='uploader', timeout=600)  # 10 minute timeout
                 if success:
                     used_fallback = True
                     fallback_level = 2
