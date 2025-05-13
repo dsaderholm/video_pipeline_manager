@@ -130,7 +130,11 @@ def safe_rollback(conn, cursor=None):
         return False
 
 def check_and_set_lock(task_id=None):
-    """Check if any task is running and set lock if not"""
+    """Check if any task is running and set lock if not
+    
+    If this function is called with the same task_id that currently holds
+    the lock, it will return True (success) to prevent self-deadlock.
+    """
     lock_details = {
         'operation': 'check_and_set',
         'timestamp': datetime.now().isoformat(),
@@ -164,6 +168,16 @@ def check_and_set_lock(task_id=None):
                 'task_id': current_lock[1] if current_lock else None,
                 'locked_at': current_lock[2] if current_lock else None
             }
+            
+            # Check if this task already holds the lock
+            if current_lock and current_lock[0] == 1 and current_lock[1] == task_id and task_id is not None:
+                # This task already holds the lock, so return success
+                db.commit_transaction(conn)
+                log_with_task_details('INFO', 
+                    "Task already holds the lock, returning success",
+                    task_id=task_id,
+                    details=lock_details)
+                return True
             
             # Clear stale locks (older than 10 minutes or NULL timestamp)
             c.execute("""
@@ -1490,6 +1504,50 @@ def check_for_missed_processing(force_process=False):
     Args:
         force_process: If True, will process regardless of time window
     """
+    # Store original function to avoid recursive import issues
+    _original_check_function = _check_for_missed_processing
+    
+    # Try to determine if we're in an app context
+    try:
+        from flask import current_app
+        try:
+            # Try to access current_app to check if we're in app context
+            current_app._get_current_object()
+            # We're in app context, call the original function directly
+            return _original_check_function(force_process)
+        except Exception:
+            # Not in app context, create one
+            try:
+                # First try to get the app from our module
+                from webapp.core_app import flask_app
+                if flask_app:
+                    with flask_app.app_context():
+                        return _original_check_function(force_process)
+                else:
+                    # Fall back to direct import if app reference not available
+                    from webapp.core_app import app 
+                    with app.app_context():
+                        return _original_check_function(force_process)
+            except ImportError as e:
+                logger.error(f"Failed to import app module: {e}")
+                # Try a direct import as fallback
+                try:
+                    from webapp.core_app.core_app import app
+                    with app.app_context():
+                        return _original_check_function(force_process)
+                except ImportError:
+                    logger.error("Could not find Flask app, last resort attempt")
+                    from flask import Flask
+                    # Create a minimal temp app context
+                    app = Flask("temp_app")
+                    with app.app_context():
+                        return _original_check_function(force_process)
+    except Exception as e:
+        logger.error(f"Error checking for missed processing (app context error): {str(e)}")
+        return False
+
+def _check_for_missed_processing(force_process=False):
+    """Internal implementation for checking missed processing - always call through check_for_missed_processing"""
     try:
         today = datetime.now().date()
         yesterday = today - timedelta(days=1)
@@ -1555,24 +1613,13 @@ def check_for_missed_processing(force_process=False):
                         if today_schedules:
                             # Process the task for today's schedules
                             try:
-                                # Import Flask app and create app context
+                                # Already in app context from outer function
                                 from flask import current_app
-                                if current_app._get_current_object() is None or not hasattr(current_app, 'manual_run'):
-                                    # Create an app context if needed
-                                    from webapp.core_app import app
-                                    with app.app_context():
-                                        app.manual_run = True  # Set manual flag to force processing
-                                        for schedule_time in today_schedules:
-                                            process_video_pipeline(task_id, schedule_time)
-                                            processed_count += 1
-                                        app.manual_run = False  # Reset flag
-                                else:
-                                    # Already in app context
-                                    current_app.manual_run = True  # Set manual flag to force processing
-                                    for schedule_time in today_schedules:
-                                        process_video_pipeline(task_id, schedule_time)
-                                        processed_count += 1
-                                    current_app.manual_run = False  # Reset flag
+                                current_app.manual_run = True  # Set manual flag to force processing
+                                for schedule_time in today_schedules:
+                                    process_video_pipeline(task_id, schedule_time)
+                                    processed_count += 1
+                                current_app.manual_run = False  # Reset flag
                             except Exception as e:
                                 log_with_task_details('ERROR', 
                                     f"Failed to process missed task {task_id}: {str(e)}",
@@ -1610,7 +1657,7 @@ def process_night_queue():
     
     try:
         # Try to acquire lock before processing
-        if not check_and_set_lock():
+        if not check_and_set_lock("night_processing"):  # Using a consistent task_id for night processing
             logger.info("Could not acquire lock for night processing, will retry next cycle")
             return
 
@@ -1675,7 +1722,9 @@ def process_night_queue():
                     
                     if in_app_context:
                         # Already in app context, proceed normally
+                        current_app.manual_run = getattr(current_app, 'manual_run', False) or True
                         process_task_with_times(task_id, schedule_times, conn, task_result, total_videos_generated)
+                        current_app.manual_run = False
                     else:
                         # Create an app context first
                         from webapp.core_app import app
@@ -1734,7 +1783,7 @@ def process_night_queue():
     finally:
         if lock_acquired:
             try:
-                release_lock()
+                release_lock("night_processing")
                 logger.info("Released lock after night processing")
             except Exception as e:
                 logger.error(f"Failed to release lock after night processing: {str(e)}")
@@ -1743,7 +1792,6 @@ def process_night_queue():
                     logger.info("Force-released lock after night processing")
                 except Exception as force_e:
                     logger.error(f"Force release also failed after night processing: {str(force_e)}")
-                    
 def process_task_with_times(task_id, schedule_times, conn, task_result, total_videos_generated):
     """Helper function to process a task with its schedule times
     

@@ -15,6 +15,9 @@ APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 scheduler = APScheduler()
 _scheduler_initialized = False
 
+# Global reference to the Flask app instance
+flask_app = None
+
 def setup_logging():
     """Configure basic console logging for docker visibility"""
     # Configure root logger
@@ -410,12 +413,21 @@ def init_scheduler(app):
             logger.error("Scheduler not running, skipping missed processing check")
         else:
             # Add a job to check for missed processing on startup with a slight delay
+            # Use a wrapper function that ensures app context is available
+            def startup_check_with_context():
+                # Import inside function to avoid circular import
+                from webapp.core_app.core.pipeline import check_for_missed_processing
+                try:
+                    # The check_for_missed_processing function will handle app context creation
+                    check_for_missed_processing(True)  # Force process
+                except Exception as e:
+                    logger.error(f"Startup missed processing check failed: {str(e)}")
+            
             scheduler.add_job(
                 id='startup_missed_processing_check',
-                func='webapp.core_app.core.pipeline:check_for_missed_processing',
+                func=startup_check_with_context,
                 trigger='date',
-                run_date=datetime.now() + timedelta(seconds=60),  # Increased to 60 seconds delay
-                args=[True],  # Force process
+                run_date=datetime.now() + timedelta(seconds=60),  # 60 seconds delay
                 misfire_grace_time=3600  # 1 hour grace time
             )
             logger.info("Scheduled missed processing check for startup with 60 second delay")
@@ -430,6 +442,10 @@ def create_app():
     app = Flask(__name__,
                 template_folder=os.path.join(APP_ROOT, 'templates'),
                 static_folder=os.path.join(APP_ROOT, 'static'))
+    
+    # Store a reference to the app as a module-level variable for easier access
+    global flask_app
+    flask_app = app
     
     # Create required directories
     required_dirs = {
@@ -498,6 +514,38 @@ def create_app():
                 "debug": app.debug,
                 "registered_blueprints": list(app.blueprints.keys())
             }
+
+        # Add a convenience route for checking night status
+        @app.route('/api/tasks/night-status')
+        def check_night_status():
+            """Check if current time is within night processing window"""
+            from webapp.core_app.core.pipeline import should_process_at_night
+            is_night = should_process_at_night()
+            return {
+                "is_night_window": is_night,
+                "current_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "status": "ok"
+            }
+
+        # Add a route for manually triggering missed processing recovery
+        @app.route('/api/tasks/recover-missed')
+        def recover_missed():
+            """Manually trigger recovery of missed processing"""
+            try:
+                from webapp.core_app.core.pipeline import check_for_missed_processing
+                # Set manual_run flag to true during recovery
+                app.manual_run = True
+                check_for_missed_processing(force_process=True)
+                app.manual_run = False
+                return {
+                    "status": "success",
+                    "message": "Missed processing recovery triggered"
+                }
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "message": f"Recovery failed: {str(e)}"
+                }, 500
 
         app_logger.info("Application initialization completed successfully")
         return app
