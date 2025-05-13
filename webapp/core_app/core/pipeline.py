@@ -1359,13 +1359,14 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
                     task_id=task_id,
                     details={'error': str(e)})
 
-def process_video_pipeline(task_id, schedule_time=None, preview_mode=False):
+def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, parent_has_lock=False):
     """Main pipeline process that coordinates generation and upload"""
     pipeline_details = {
         'task_id': task_id,
         'mode': 'preview' if preview_mode else 'normal',
         'schedule_time': schedule_time.isoformat() if schedule_time else None,
-        'start_time': datetime.now().isoformat()
+        'start_time': datetime.now().isoformat(),
+        'parent_has_lock': parent_has_lock
     }
     
     log_with_task_details('INFO', f"Starting video pipeline",
@@ -1378,8 +1379,8 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False):
     
     lock_acquired = False
     try:
-        # Lock handling
-        if not preview_mode:
+        # Lock handling - only try to acquire if parent doesn't already have it
+        if not preview_mode and not parent_has_lock:
             lock_acquired = check_and_set_lock(task_id)
             if not lock_acquired:
                 log_with_task_details('INFO', 
@@ -1406,7 +1407,7 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False):
                     schedule_time, 
                     preview_mode, 
                     conn,
-                    parent_has_lock=lock_acquired
+                    parent_has_lock=parent_has_lock or lock_acquired  # Pass lock state to nested function
                 )
             except Exception as e:
                 log_with_task_details('ERROR', 
@@ -1480,8 +1481,8 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False):
         raise
         
     finally:
-        # Always release lock if we acquired it
-        if lock_acquired:
+        # Only release lock if we acquired it (not if parent had it)
+        if lock_acquired and not parent_has_lock:
             try:
                 release_lock(task_id)
             except Exception as e:
@@ -1560,7 +1561,7 @@ def _check_for_missed_processing(force_process=False):
         logger.info(f"Checking for missed night processing from {yesterday_night_time}")
         
         # Try to acquire lock
-        lock_acquired = check_and_set_lock()
+        lock_acquired = check_and_set_lock("missed_processing_check")
         if not lock_acquired and not force_process:
             logger.info("Could not acquire lock for missed processing check, will try later")
             return
@@ -1616,9 +1617,36 @@ def _check_for_missed_processing(force_process=False):
                                 # Already in app context from outer function
                                 from flask import current_app
                                 current_app.manual_run = True  # Set manual flag to force processing
+                                
                                 for schedule_time in today_schedules:
-                                    process_video_pipeline(task_id, schedule_time)
-                                    processed_count += 1
+                                    # IMPORTANT CHANGE: Pass the parent_lock to inform the pipeline that we already have the lock
+                                    try:
+                                        # Generate the video but don't try to acquire lock again
+                                        with db.get_connection() as task_conn:
+                                            video_result = process_video_generation(
+                                                task_id, 
+                                                schedule_time, 
+                                                conn=task_conn,
+                                                parent_has_lock=True  # Tell the function we already have the lock
+                                            )
+                                            
+                                            if video_result and isinstance(video_result, tuple):
+                                                video_path, video_id = video_result
+                                                log_with_task_details('INFO', 
+                                                    f"Successfully generated video for missed processing",
+                                                    task_id=task_id,
+                                                    details={
+                                                        'video_path': video_path,
+                                                        'video_id': video_id,
+                                                        'schedule_time': schedule_time.isoformat() if schedule_time else None
+                                                    })
+                                                processed_count += 1
+                                    except Exception as task_e:
+                                        log_with_task_details('ERROR', 
+                                            f"Failed to generate video for missed task: {str(task_e)}",
+                                            task_id=task_id,
+                                            details={'error': str(task_e)})
+                                
                                 current_app.manual_run = False  # Reset flag
                             except Exception as e:
                                 log_with_task_details('ERROR', 
@@ -1632,7 +1660,7 @@ def _check_for_missed_processing(force_process=False):
                     
         finally:
             if lock_acquired:
-                release_lock()
+                release_lock("missed_processing_check")
                 
     except Exception as e:
         logger.error(f"Error checking for missed processing: {str(e)}")
