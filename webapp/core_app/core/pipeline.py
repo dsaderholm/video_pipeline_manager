@@ -1,18 +1,3 @@
-def check_connection_health(conn):
-    """Verify if a database connection is healthy and active"""
-    if conn is None:
-        return False
-        
-    try:
-        # Try a simple query to verify connection works
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1")
-        result = cursor.fetchone()
-        return result is not None and result[0] == 1
-    except Exception as e:
-        logger.warning(f"Database connection health check failed: {str(e)}")
-        return False
-
 import json
 import time
 import os
