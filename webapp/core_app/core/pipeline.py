@@ -458,9 +458,9 @@ def store_generated_video(task_id, original_name, processed_path, scheduled_time
             conn.close()
 
 def get_next_day_schedules(schedule_str):
-    """Get tomorrow's schedule times from a schedule string"""
-    tomorrow = datetime.now() + timedelta(days=1)
-    tomorrow_day = tomorrow.strftime('%A')[:3].lower()
+    """Get today's schedule times from a schedule string"""
+    today = datetime.now()
+    today_day = today.strftime('%A')[:3].lower()
     
     scheduled_times = []
     day_schedules = schedule_str.split(';')
@@ -470,10 +470,10 @@ def get_next_day_schedules(schedule_str):
             continue
         
         day, times = day_schedule.split('|')
-        if day.lower() == tomorrow_day:
+        if day.lower() == today_day:
             for time_str in times.split(','):
                 hour, minute = map(int, time_str.strip().split(':'))
-                schedule_time = tomorrow.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                schedule_time = today.replace(hour=hour, minute=minute, second=0, microsecond=0)
                 scheduled_times.append(schedule_time)
     
     return scheduled_times
@@ -1693,9 +1693,9 @@ def process_night_queue():
         with db.get_connection() as conn:
             c = conn.cursor()
             
-            # Get all tasks that need processing for tomorrow
-            tomorrow = datetime.now() + timedelta(days=1)
-            tomorrow_day = tomorrow.strftime('%A')[:3].lower()
+            # Get all tasks that need processing for today
+            today = datetime.now()
+            today_day = today.strftime('%A')[:3].lower()
             
             c.execute("""
                 SELECT id, schedule, name, email_notify
@@ -1703,10 +1703,10 @@ def process_night_queue():
                 WHERE status != 'failed'
                 AND processing_status != 'failed'
                 AND schedule LIKE ?
-            """, (f'%{tomorrow_day}|%',))
+            """, (f'%{today_day}|%',))
             
             tasks = c.fetchall()
-            logger.info(f"Found {len(tasks)} tasks scheduled for {tomorrow_day}")
+            logger.info(f"Found {len(tasks)} tasks scheduled for {today_day}")
 
             for task_id, schedule, task_name, email_notify in tasks:
                 schedule_times = get_next_day_schedules(schedule)

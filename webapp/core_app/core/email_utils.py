@@ -287,8 +287,8 @@ def format_task_info_html(task_info, success, base_url=None, night_processing=Fa
     if night_processing:
         try:
             # Calculate the scheduled publishing date
-            tomorrow = datetime.now() + timedelta(days=1)
-            publish_date = tomorrow.strftime('%A, %B %d, %Y')
+            today = datetime.now()
+            publish_date = today.strftime('%A, %B %d, %Y')
             
             night_processing_banner = f"""
             <div class="section night-processing">
@@ -674,8 +674,8 @@ def send_night_processing_notification(task_summaries, to_email):
     try:
         # Prepare email data
         now = datetime.now()
-        tomorrow = now + timedelta(days=1)
-        tomorrow_day = tomorrow.strftime('%A')
+        today = now
+        today_day = today.strftime('%A')
         
         # Only continue if we have email recipients
         to_emails = [email.strip() for email in to_email.split(',') if email.strip()] if to_email else []
@@ -693,7 +693,7 @@ def send_night_processing_notification(task_summaries, to_email):
         if failed_tasks:
             subject = f"Night Processing Completed: {len(successful_tasks)}/{total_tasks} Tasks Successful - {total_videos} Videos Ready"
         else:
-            subject = f"Night Processing Completed Successfully: {total_videos} Videos Ready for {tomorrow_day}"
+            subject = f"Night Processing Completed Successfully: {total_videos} Videos Ready for {today_day}"
         
         # Create HTML message
         message_html = f"""
@@ -796,7 +796,7 @@ def send_night_processing_notification(task_summaries, to_email):
             
             <div class="section night-processing">
                 <h2>Night Processing Summary</h2>
-                <div>Night processing for <span class="highlight">{tomorrow_day}</span> has completed.</div>
+                <div>Night processing for <span class="highlight">{today_day}</span> has completed.</div>
                 
                 <div class="summary-stats">
                     <div class="stat">
@@ -809,7 +809,7 @@ def send_night_processing_notification(task_summaries, to_email):
                     </div>
                     <div class="stat">
                         <div class="stat-label">Schedule Date</div>
-                        <div class="stat-value">{tomorrow_day}</div>
+                        <div class="stat-value">{today_day}</div>
                     </div>
                 </div>
             </div>
@@ -823,7 +823,7 @@ def send_night_processing_notification(task_summaries, to_email):
                     <div class="task-item task-item-success">
                         <div class="task-name">{task['name']}</div>
                         <div class="task-details">ID: {task['id']} | Videos: {task['video_count']}</div>
-                        <div class="task-details">Scheduled for {tomorrow_day}</div>
+                        <div class="task-details">Scheduled for {today_day}</div>
                     </div>''' for task in successful_tasks) if successful_tasks else '<div>No successful tasks.</div>'}
                 </div>
             </div>
