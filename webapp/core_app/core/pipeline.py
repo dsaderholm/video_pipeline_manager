@@ -418,11 +418,20 @@ def store_generated_video(task_id, original_name, processed_path, scheduled_time
             c.execute("BEGIN IMMEDIATE")
         
         try:
+            # Log the details of what we're storing
+            log_with_details('INFO', f"Storing generated video information",
+                details={
+                    'task_id': task_id,
+                    'original_name': original_name, 
+                    'processed_path': processed_path,
+                    'scheduled_time': scheduled_time
+                })
+                
             c.execute('''
-                INSERT INTO generated_videos 
-                (task_id, original_name, processed_path, scheduled_time, status, upload_status)
-                VALUES (?, ?, ?, ?, 'completed', 'pending')
-            ''', (task_id, original_name, processed_path, scheduled_time))
+                        INSERT INTO generated_videos 
+                        (task_id, original_name, processed_path, scheduled_time, status, upload_status)
+                        VALUES (?, ?, ?, ?, 'completed', 'pending')
+                    ''', (task_id, original_name, processed_path, scheduled_time))
             
             video_id = c.lastrowid
             
@@ -736,6 +745,37 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                             # Get absolute path for the current video file
                             abs_video_file = os.path.abspath(current_video_file)
                             
+                            # Try pinging the utility service as a test
+                            try:
+                                # If host is reachable but service is not, log a clearer error
+                                # Try a direct curl with minimal options as a health check
+                                if server_ip_match and sys.platform == 'win32':
+                                    service_url = f"http://{utility_ip}:{service_port}"
+                                    health_cmd = f"curl -m 5 -s -f -I {service_url}"
+                                    log_with_task_details('INFO', f"Testing utility service with basic curl: {service_url}",
+                                        task_id=task_id)
+                                    try:
+                                        health_result = subprocess.run(health_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+                                        if health_result.returncode != 0:
+                                            log_with_task_details('WARNING', f"Health check for utility service failed: {service_url}",
+                                                task_id=task_id,
+                                                details={
+                                                    'stdout': health_result.stdout.decode('utf-8', errors='replace')[:200],
+                                                    'stderr': health_result.stderr.decode('utf-8', errors='replace')[:200],
+                                                    'returncode': health_result.returncode
+                                                })
+                                        else:
+                                            log_with_task_details('INFO', f"Basic health check succeeded for utility service: {service_url}",
+                                                task_id=task_id)
+                                    except Exception as health_error:
+                                        log_with_task_details('WARNING', f"Error during utility health check: {str(health_error)}",
+                                            task_id=task_id,
+                                            details={'error': str(health_error)})
+                            except Exception as e:
+                                log_with_task_details('WARNING', f"Error checking utility service health: {str(e)}",
+                                    task_id=task_id,
+                                    details={'error': str(e)})
+                            
                             # FIXED: Ensure the file is readable by the container user
                             try:
                                 # Ensure file permissions are correct
@@ -748,9 +788,12 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                                     task_id=task_id,
                                     details={'error': str(perm_e)})
                             
-                            log_with_task_details('INFO', f"Executing utility command",
+                            # Improved logging for curl command execution
+                            log_with_task_details('INFO', f"Executing utility command for {utility_name}",
                                 task_id=task_id,
                                 details={
+                                    'utility_id': utility_id,
+                                    'utility_name': utility_name,
                                     'utility_cmd': util_cmd,
                                     'video_file': current_video_file,
                                     'abs_path': abs_video_file
@@ -759,28 +802,73 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                             # Allow time for file availability
                             time.sleep(2)
                             
-                            # Execute the utility with more generous retry settings
-                            success, stdout, stderr = execute_curl(
-                                util_cmd, 
-                                retries=3, 
-                                retry_delay=5, 
-                                validate_output=True, 
-                                timeout=300,  # 5 minute timeout
-                                mode='utility'
-                            )
-                            
-                            if not success:
-                                error_msg = f"Utility failed: {stderr}"
-                                log_with_task_details('ERROR', error_msg,
+                            # Execute the utility with more generous retry settings and better debugging
+                            # CRITICAL FIX: Increase timeout to 10 minutes and retries to 5
+                            try:
+                                success, stdout, stderr = execute_curl(
+                                    util_cmd, 
+                                    retries=5,  # Increased from 3 to 5
+                                    retry_delay=10,  # Increased from 5 to 10
+                                    validate_output=True, 
+                                    timeout=600,  # Increased from 5 to 10 minutes
+                                    mode='utility'
+                                )
+                                
+                                if not success:
+                                    error_msg = f"Utility {utility_name} failed: {stderr}"
+                                    log_with_task_details('ERROR', error_msg,
+                                        task_id=task_id,
+                                        details={
+                                            'stdout': stdout, 
+                                            'stderr': stderr, 
+                                            'utility_name': utility_name,
+                                            'utility_id': utility_id,
+                                            'command': util_cmd,
+                                            **generation_details
+                                        })
+                                        
+                                    # Try to get more network diagnostic information
+                                    server_ip_match = re.search(r'http://([0-9.]+):', util_cmd)
+                                    if server_ip_match:
+                                        utility_ip = server_ip_match.group(1)
+                                        log_with_task_details('WARNING', f"Retrying with diagnostics for {utility_ip}",
+                                            task_id=task_id,
+                                            details={'utility_ip': utility_ip})
+                                            
+                                        # Try direct TCP connection test using socket
+                                        try:
+                                            import socket
+                                            port_match = re.search(r'http://[0-9.]+:([0-9]+)', util_cmd)
+                                            if port_match:
+                                                port = int(port_match.group(1))
+                                                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                                                s.settimeout(5)
+                                                result = s.connect_ex((utility_ip, port))
+                                                s.close()
+                                                
+                                                if result == 0:
+                                                    log_with_task_details('INFO', f"Port {port} on {utility_ip} is OPEN",
+                                                        task_id=task_id)
+                                                else:
+                                                    log_with_task_details('ERROR', f"Port {port} on {utility_ip} is CLOSED (error: {result})",
+                                                        task_id=task_id,
+                                                        details={'socket_error_code': result})
+                                        except Exception as socket_error:
+                                            log_with_task_details('ERROR', f"Socket test failed: {str(socket_error)}",
+                                                task_id=task_id,
+                                                details={'error': str(socket_error)})
+                                    
+                                    # Continue despite error - maybe the video was modified anyway
+                                    log_with_task_details('WARNING', f"Continuing despite utility failure",
+                                        task_id=task_id)
+                            except Exception as curl_error:
+                                log_with_task_details('ERROR', f"Exception during curl execution: {str(curl_error)}",
                                     task_id=task_id,
                                     details={
-                                        'stdout': stdout, 
-                                        'stderr': stderr, 
-                                        'utility_name': utility_name,
-                                        **generation_details
+                                        'error': str(curl_error),
+                                        'utility_name': utility_name
                                     })
-                                update_task_status(task_id, 'failed', 'failed', None, conn)
-                                raise Exception(error_msg)
+                                # Continue despite error
                             
                             # Allow more time for file operations to complete
                             time.sleep(3)

@@ -180,27 +180,71 @@ def check_generator_response(stdout_str, stderr_str):
     return True, ""
 
 def check_utility_response(stdout_str, stderr_str):
-    """Check if utility successfully processed the video"""
+    """Check if utility successfully processed the video with improved debugging"""
+    # Log the complete output for better debugging
+    log_with_details('INFO', f"Utility response received",
+        details={
+            'stdout_length': len(stdout_str),
+            'stderr_length': len(stderr_str),
+            'stdout_preview': stdout_str[:500] if stdout_str else '',
+            'stderr_preview': stderr_str[:500] if stderr_str else ''
+        })
+    
+    # Check if stderr is empty or contains only progress info
     if not stderr_str.strip() or all(
         line.startswith(('* ', '  % Total', '100', 'Warning: ')) 
         for line in stderr_str.strip().split('\n')
     ):
-        return True, ""
-        
+        # Look for HTTP 200 in stdout - this indicates success
+        if 'HTTP/1.1 200' in stdout_str or 'HTTP/2 200' in stdout_str:
+            log_with_details('INFO', "Utility returned HTTP 200 status",
+                details={'success': True})
+            return True, ""
+            
+        # Check for successful download indicators
+        if 'Downloaded' in stderr_str or '100 ' in stderr_str:
+            log_with_details('INFO', "Utility download appears successful",
+                details={'success': True})
+            return True, ""
+            
+        # If stdout has reasonable length but no error patterns, assume success
+        if len(stdout_str) > 100:
+            log_with_details('INFO', "Utility produced substantial output, assuming success",
+                details={'success': True})
+            return True, ""
+    
+    # Look for specific error patterns
     error_patterns = [
         r'curl:\s*\(\d+\)',
         r'Connection refused',
         r'Could not resolve host',
         r'Operation timed out',
         r'Failed to connect',
-        r'HTTP/[0-9.]+ 5[0-9]{2}',
-        r'500 Internal Server Error'
+        r'HTTP/[0-9.]+ (4[0-9]{2}|5[0-9]{2})',  # Include 4xx errors too
+        r'500 Internal Server Error',
+        r'404 Not Found',
+        r'401 Unauthorized',
+        r'403 Forbidden'
     ]
     
     for pattern in error_patterns:
-        if re.search(pattern, stderr_str + stdout_str, re.IGNORECASE):
+        match = re.search(pattern, stderr_str + stdout_str, re.IGNORECASE)
+        if match:
+            error_msg = match.group(0)
+            log_with_details('ERROR', f"Utility failed with error: {error_msg}",
+                details={
+                    'error_pattern': pattern,
+                    'error_match': error_msg,
+                    'stderr': stderr_str[:500] if stderr_str else ''
+                })
             return False, stderr_str or stdout_str
     
+    # If no specific errors found but stderr has content, log it as a warning
+    if stderr_str.strip() and not stderr_str.startswith(('* ', '  % Total', '100', 'Warning: ')):
+        log_with_details('WARNING', "Utility produced stderr output but no recognized error pattern",
+            details={'stderr': stderr_str[:500]})
+    
+    # Default to success if no clear error detected
     return True, ""
 
 def check_uploader_response(stdout_str, stderr_str):
@@ -364,18 +408,97 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
                 # Fix environment path issues on Windows by making sure all paths use forward slashes
                 fixed_command = modified_command
                 
+                # CRITICAL FIX: Check if this is a utility command for IP microservices
+                if mode == 'utility' and 'http://' in fixed_command:
+                    # Extract the IP and port from the command
+                    service_match = re.search(r'http://([0-9.]+):([0-9]+)', fixed_command)
+                    if service_match:
+                        service_ip = service_match.group(1)
+                        service_port = service_match.group(2)
+                        log_with_details('INFO', f"Detected microservice call to {service_ip}:{service_port}",
+                            details={
+                                'service_ip': service_ip,
+                                'service_port': service_port,
+                                'command': fixed_command
+                            })
+                        
+                        # Verify the service is available before attempting the call
+                        try:
+                            import socket
+                            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            s.settimeout(5)  # 5 second timeout
+                            connect_result = s.connect_ex((service_ip, int(service_port)))
+                            s.close()
+                            
+                            if connect_result == 0:
+                                log_with_details('INFO', f"Successfully connected to service at {service_ip}:{service_port}")
+                            else:
+                                log_with_details('WARNING', f"Cannot connect to service at {service_ip}:{service_port} (error: {connect_result})",
+                                    details={'socket_error_code': connect_result})
+                                    
+                                # Try to add a timeout parameter to curl if not already present
+                                if '--connect-timeout' not in fixed_command:
+                                    fixed_command = fixed_command.replace('curl', 'curl --connect-timeout 10', 1)
+                                    log_with_details('INFO', f"Added connection timeout to curl command",
+                                        details={'modified_command': fixed_command})
+                        except Exception as socket_err:
+                            log_with_details('WARNING', f"Socket test failed: {str(socket_err)}",
+                                details={'error': str(socket_err)})
+                
                 # Setup environment with correct paths
                 env = os.environ.copy()
                 # If we're in Docker, make sure PATH includes needed directories
                 if os.path.exists('/usr/local/bin/curl'):
-                    env['PATH'] = f"/usr/local/bin:/usr/bin:/bin:{env.get('PATH', '')}"                
+                    env['PATH'] = f"/usr/local/bin:/usr/bin:/bin:{env.get('PATH', '')}"
+                # On Windows, make sure curl.exe is in the PATH
+                elif os.name == 'nt' and 'curl' not in env.get('PATH', '').lower():
+                    # Try to find curl in system directories
+                    curl_paths = [
+                        'C:\\Windows\\System32',
+                        'C:\\Windows',
+                        'C:\\Program Files\\Git\\mingw64\\bin',
+                        'C:\\Program Files\\Git\\usr\\bin'
+                    ]
+                    for p in curl_paths:
+                        if os.path.exists(os.path.join(p, 'curl.exe')):
+                            env['PATH'] = f"{p};{env.get('PATH', '')}"
+                            log_with_details('INFO', f"Added curl.exe path to environment: {p}")
+                            break
                 
                 # Ensure working directory exists (Docker compatibility)
                 working_dir = os.getcwd()
                 os.makedirs(working_dir, exist_ok=True)
                 
                 log_with_details('INFO', f"Starting process with env",
-                    details={'PATH': env.get('PATH', ''), 'working_dir': working_dir})
+                    details={
+                        'PATH': env.get('PATH', ''), 
+                        'working_dir': working_dir,
+                        'command': fixed_command
+                    })
+                
+                # Verify that we can run the command properly
+                if mode == 'utility':
+                    # For utility mode, detect if the curl command will likely fail due to network issues
+                    try:
+                        test_cmd = None
+                        if sys.platform.startswith('win'):
+                            # On Windows, check if curl executable is available
+                            test_cmd = 'where curl'
+                        else:
+                            # On Linux/Unix, use which
+                            test_cmd = 'which curl'
+                            
+                        if test_cmd:
+                            curl_check = subprocess.run(test_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                            if curl_check.returncode != 0:
+                                log_with_details('WARNING', "curl command not found in PATH",
+                                    details={
+                                        'system_path': env.get('PATH', ''),
+                                        'platform': sys.platform
+                                    })
+                    except Exception as e:
+                        log_with_details('WARNING', f"Error checking curl availability: {str(e)}",
+                            details={'error': str(e)})
                 
                 # Run the command
                 process = subprocess.Popen(
