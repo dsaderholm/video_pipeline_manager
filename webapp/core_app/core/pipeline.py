@@ -177,155 +177,167 @@ def check_and_set_lock(task_id=None):
         'timestamp': datetime.now().isoformat(),
         'task_id': task_id
     }
-    
+
     # First check if another process has the global lock 
-    # to avoid even connecting to the DB if so
     if db_lock.locked() and not db_lock.acquire(False):
-        log_with_task_details('INFO', 
-            "Thread lock already held by another process, skipping operation", 
+        log_with_task_details(
+            'INFO',
+            "Thread lock already held by another process, skipping operation",
             task_id=task_id,
-            details=lock_details)
+            details=lock_details
+        )
         return False
-    
-    try:  # Make sure we release the thread lock even on errors
+
+    try:  # OUTERMOST try
         conn = None
         try:
-            # Create a new connection with an extremely aggressive busy timeout
             conn = sqlite3.connect(
                 get_db_path(),
-                timeout=2.0,  # Only wait 2 seconds before failing on locks
-                isolation_level=None,  # Autocommit mode
-                check_same_thread=False  # Allow cross-thread access
+                timeout=2.0,
+                isolation_level=None,
+                check_same_thread=False
             )
-            conn.execute("PRAGMA busy_timeout = 2000")  # 2 seconds
-            
-            # Verify the connection is healthy
+            conn.execute("PRAGMA busy_timeout = 2000")
+
             if not check_connection_health(conn):
-                log_with_task_details('ERROR', 
-                    "Failed to create a healthy database connection for lock check", 
+                log_with_task_details(
+                    'ERROR',
+                    "Failed to create a healthy database connection for lock check",
                     task_id=task_id,
-                    details=lock_details)
+                    details=lock_details
+                )
                 return False
-                
+
             c = conn.cursor()
-            
-            # Start transaction to prevent race conditions
+
             try:
-                c.execute("BEGIN IMMEDIATE")  # This will block until lock is available
+                c.execute("BEGIN IMMEDIATE")
             except sqlite3.OperationalError as e:
                 if "database is locked" in str(e):
-                    log_with_task_details('INFO', 
-                        "Database is locked, could not acquire lock", 
+                    log_with_task_details(
+                        'INFO',
+                        "Database is locked, could not acquire lock",
                         task_id=task_id,
-                        details=lock_details)
+                        details=lock_details
+                    )
                     return False
                 raise
-            
-            # First check current lock status
+
             c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
             current_lock = c.fetchone()
-            
+
             if not current_lock:
-                # No lock record exists, create one
-                c.execute("INSERT INTO task_lock (id, locked, task_id, locked_at) VALUES (1, 1, ?, datetime('now'))", 
-                          (task_id,))
+                c.execute("""
+                    INSERT INTO task_lock (id, locked, task_id, locked_at)
+                    VALUES (1, 1, ?, datetime('now'))
+                """, (task_id,))
                 c.execute("COMMIT")
                 return True
-                
+
             lock_details['current_lock'] = {
-                'locked': current_lock[0] if current_lock else None,
-                'task_id': current_lock[1] if current_lock else None,
-                'locked_at': current_lock[2] if current_lock else None
+                'locked': current_lock[0],
+                'task_id': current_lock[1],
+                'locked_at': current_lock[2]
             }
-            
-            # Check if this task already holds the lock
+
             if current_lock[0] == 1 and current_lock[1] == task_id and task_id is not None:
-                # This task already holds the lock, update timestamp and return success
                 c.execute("""
-                    UPDATE task_lock 
+                    UPDATE task_lock
                     SET locked_at = datetime('now')
                     WHERE id = 1
                 """)
                 c.execute("COMMIT")
-                log_with_task_details('INFO', 
+                log_with_task_details(
+                    'INFO',
                     "Task already holds the lock, returning success",
                     task_id=task_id,
-                    details=lock_details)
+                    details=lock_details
+                )
                 return True
-            
-            # Clear stale locks (older than 15 minutes or NULL timestamp)
+
+            # Clear stale lock
+            is_stale = False
             if current_lock[0] == 1:
-                # Check if lock is stale
                 if current_lock[2] is None:
                     is_stale = True
                 else:
                     try:
                         lock_time = datetime.fromisoformat(current_lock[2])
                         now = datetime.now()
-                        is_stale = (now - lock_time).total_seconds() > 900  # 15 minutes
+                        is_stale = (now - lock_time).total_seconds() > 900
                     except (ValueError, TypeError):
-                        # If we can't parse the timestamp, consider it stale
                         is_stale = True
-                        
-                if is_stale:
-                    c.execute("""
-                        UPDATE task_lock 
-                        SET locked = 0, task_id = NULL, locked_at = NULL 
-                        WHERE id = 1
-                    """)
-                    lock_details['stale_lock_cleared'] = True
-                    log_with_task_details('WARNING', 
-                        f"Cleared stale lock held by task {current_lock[1]}", 
-                        task_id=task_id,
-                        details=lock_details)
-            
-            # Try to acquire lock only if not locked or just cleared stale lock
+
+            if is_stale:
+                c.execute("""
+                    UPDATE task_lock
+                    SET locked = 0, task_id = NULL, locked_at = NULL
+                    WHERE id = 1
+                """)
+                lock_details['stale_lock_cleared'] = True
+                log_with_task_details(
+                    'WARNING',
+                    f"Cleared stale lock held by task {current_lock[1]}",
+                    task_id=task_id,
+                    details=lock_details
+                )
+
+            # Try to acquire lock
             c.execute("""
-                UPDATE task_lock 
-                SET locked = 1, 
-                    task_id = ?, 
-                    locked_at = datetime('now')
+                UPDATE task_lock
+                SET locked = 1, task_id = ?, locked_at = datetime('now')
                 WHERE id = 1 AND locked = 0
             """, (task_id,))
-            
             acquired = c.rowcount > 0
-            
-            # Commit the transaction
+
             c.execute("COMMIT")
-            
+
             if acquired:
-                log_with_task_details('INFO', 
-                    "Successfully acquired pipeline lock", 
+                log_with_task_details(
+                    'INFO',
+                    "Successfully acquired pipeline lock",
                     task_id=task_id,
-                    details=lock_details)
+                    details=lock_details
+                )
             else:
-                log_with_task_details('INFO', 
-                    f"Could not acquire lock - currently held by task {current_lock[1]}", 
+                log_with_task_details(
+                    'INFO',
+                    f"Could not acquire lock - currently held by task {current_lock[1]}",
                     task_id=task_id,
-                    details=lock_details)
-            
+                    details=lock_details
+                )
+
             return acquired
-                
+
         except Exception as e:
-            log_with_task_details('ERROR', 
-                f"Error managing pipeline lock: {str(e)}", 
+            log_with_task_details(
+                'ERROR',
+                f"Error managing pipeline lock: {str(e)}",
                 task_id=task_id,
-                details={**lock_details, 'error': str(e)})
-            
-            # Try to rollback if possible
+                details={**lock_details, 'error': str(e)}
+            )
             if conn:
                 try:
                     conn.rollback()
                 except:
                     pass
             return False
+
         finally:
-            # Always close the connection in finally block
             if conn:
                 try:
                     conn.close()
                 except:
                     pass
+            if db_lock.locked():
+                try:
+                    db_lock.release()
+                except:
+                    pass
+
+    except Exception as e:
+        logger.error(f"Outer error in check_and_set_lock: {str(e)}")
+        return False
 
 def release_lock(task_id=None):
     """Release the task lock with improved thread handling"""
