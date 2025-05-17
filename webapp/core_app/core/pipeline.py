@@ -6,6 +6,7 @@ import logging
 import shutil
 import threading
 import subprocess
+import re
 from datetime import datetime, timedelta
 import logging
 import sqlite3
@@ -129,19 +130,74 @@ def safe_rollback(conn, cursor=None):
         logger.warning(f"Cannot check transaction status: {str(e)}")
         return False
 
+def get_db_path():
+    """Get the path to the SQLite database file"""
+    from webapp.core_app.core.database import get_db_path as db_get_path
+    return db_get_path()
+
+def force_release_lock():
+    """Force release any existing lock regardless of owner"""
+    try:
+        # Create a direct connection with short timeout
+        conn = sqlite3.connect(
+            get_db_path(),
+            timeout=1.0,  # 1 second timeout
+            isolation_level=None  # Autocommit mode
+        )
+        conn.execute("PRAGMA busy_timeout = 1000")  # 1 second timeout
+        
+        # Clear the lock completely
+        c = conn.cursor()
+        c.execute("BEGIN IMMEDIATE")
+        c.execute("""
+            UPDATE task_lock 
+            SET locked = 0, 
+                task_id = NULL, 
+                locked_at = NULL 
+            WHERE id = 1
+        """)
+        c.execute("COMMIT")
+        
+        logger.info("Force-released database lock")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to force-release lock: {str(e)}")
+        return False
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except:
+                pass
+
 def check_and_set_lock(task_id=None):
-    """Improved lock mechanism with better error handling and clearer logic"""
+    """More aggressive lock mechanism with timeouts to prevent deadlocks"""
     lock_details = {
         'operation': 'check_and_set',
         'timestamp': datetime.now().isoformat(),
         'task_id': task_id
     }
     
-    with db_lock:
+    # First check if another process has the global lock 
+    # to avoid even connecting to the DB if so
+    if db_lock.locked() and not db_lock.acquire(False):
+        log_with_task_details('INFO', 
+            "Thread lock already held by another process, skipping operation", 
+            task_id=task_id,
+            details=lock_details)
+        return False
+    
+    try:  # Make sure we release the thread lock even on errors
         conn = None
         try:
-            # Create a new connection directly instead of using the contextmanager
-            conn = db._create_connection()
+            # Create a new connection with an extremely aggressive busy timeout
+            conn = sqlite3.connect(
+                get_db_path(),
+                timeout=2.0,  # Only wait 2 seconds before failing on locks
+                isolation_level=None,  # Autocommit mode
+                check_same_thread=False  # Allow cross-thread access
+            )
+            conn.execute("PRAGMA busy_timeout = 2000")  # 2 seconds
             
             # Verify the connection is healthy
             if not check_connection_health(conn):
@@ -272,18 +328,28 @@ def check_and_set_lock(task_id=None):
                     pass
 
 def release_lock(task_id=None):
-    """Release the task lock"""
+    """Release the task lock with improved thread handling"""
     release_details = {
         'operation': 'release',
         'timestamp': datetime.now().isoformat(),
         'task_id': task_id
     }
     
-    with db_lock:
+    # First check if we hold the thread lock
+    thread_lock_held = db_lock.locked()
+    release_details['thread_lock_held'] = thread_lock_held
+    
+    try:  # We'll release the thread lock in finally if needed
         conn = None
         try:
-            # Create a new connection directly instead of using the contextmanager
-            conn = db._create_connection()
+            # Create a direct connection with short timeout
+            conn = sqlite3.connect(
+                get_db_path(),
+                timeout=1.0,  # 1 second timeout
+                isolation_level=None,  # Autocommit mode
+                check_same_thread=False
+            )
+            conn.execute("PRAGMA busy_timeout = 1000")  # 1 second
             
             # Verify the connection is healthy
             if not check_connection_health(conn):
@@ -395,6 +461,18 @@ def release_lock(task_id=None):
                     conn.close()
                 except:
                     pass
+    finally:
+        # Always release the thread lock if we're holding it
+        if thread_lock_held:
+            try:
+                db_lock.release()
+                log_with_task_details('INFO', 
+                    "Released thread lock",
+                    task_id=task_id)
+            except Exception as e:
+                log_with_task_details('ERROR', 
+                    f"Failed to release thread lock: {str(e)}", 
+                    task_id=task_id)
 
 def update_task_status(task_id, status, processing_status=None, video_path=None, conn=None):
     """Update task status and processing details"""
@@ -2106,13 +2184,34 @@ def process_uploads_with_context():
 
 def cleanup_files(video_files):
     """Cleanup multiple video files with error handling"""
+    if not video_files:
+        return
+        
+    logger.info(f"Cleaning up {len(video_files)} temporary files")
+    cleaned = 0
+    errors = 0
     for file in video_files:
         if file and os.path.exists(file):
             try:
+                # First try to ensure file is not opened by any process
+                try:
+                    # On Windows, we need to force close any open handles
+                    if sys.platform == 'win32':
+                        os.chmod(file, 0o777)  # Make the file fully accessible
+                except:
+                    pass
+                    
+                # Now remove it using the utility function
                 cleanup_video(file)
+                cleaned += 1
+                logger.debug(f"Cleaned up file: {file}")
             except Exception as e:
+                errors += 1
                 log_with_details('ERROR', f"Failed to cleanup file {file}: {str(e)}",
                     details={'file': file, 'error': str(e)})
+    
+    if cleaned > 0 or errors > 0:
+        logger.info(f"File cleanup completed: {cleaned} removed, {errors} failed")
     
     # Safety check - look for any temporary files that have been created in the current directory
     current_dir = os.getcwd()

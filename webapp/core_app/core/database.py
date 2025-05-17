@@ -126,21 +126,45 @@ class DatabaseManager:
         if not os.path.exists(db_dir):
             os.makedirs(db_dir)
             
-        conn = sqlite3.connect(
-            db_path,
-            timeout=120.0,  # 120-second connection timeout
-            isolation_level=None,  # Autocommit mode
-            check_same_thread=False  # Allow cross-thread access
-        )
+        # Use a retry approach for creation to handle temporary lock issues
+        max_retries = 3
+        retry_delay = 0.5  # Start with 500ms delay
+        last_error = None
         
-        # Enable WAL mode for this connection
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=120000")  # 120-second timeout
-        conn.execute("PRAGMA temp_store=MEMORY")
-        conn.execute("PRAGMA cache_size=-64000")
+        for attempt in range(max_retries):
+            try:
+                conn = sqlite3.connect(
+                    db_path,
+                    timeout=5.0,  # 5-second connection timeout - shorter is better to fail fast
+                    isolation_level=None,  # Autocommit mode
+                    check_same_thread=False  # Allow cross-thread access
+                )
+                
+                # Enable WAL mode for this connection
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("PRAGMA synchronous=NORMAL")
+                conn.execute("PRAGMA busy_timeout=5000")  # 5-second timeout - shorter to fail fast
+                conn.execute("PRAGMA temp_store=MEMORY")
+                conn.execute("PRAGMA cache_size=-64000")
+                
+                # Test connection health with a quick query
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1")
+                result = cursor.fetchone()
+                if result is None or result[0] != 1:
+                    raise sqlite3.OperationalError("Connection health check failed")
+                
+                return conn
+            except sqlite3.OperationalError as e:
+                last_error = e
+                delay = retry_delay * (2 ** attempt)  # Exponential backoff
+                logger.warning(f"Database connection creation failed (attempt {attempt+1}/{max_retries}): {e}. Retrying in {delay:.2f}s")
+                time.sleep(delay)
         
-        return conn
+        # If we got here, all attempts failed
+        error_msg = f"Failed to create database connection after {max_retries} attempts: {last_error}"
+        logger.error(error_msg)
+        raise sqlite3.OperationalError(error_msg)
 
     @contextlib.contextmanager
     def get_connection(self, max_retries: int = 5, initial_retry_delay: float = 0.1):

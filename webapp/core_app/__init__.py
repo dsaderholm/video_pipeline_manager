@@ -207,11 +207,11 @@ def init_scheduler(app):
             next_run_time=datetime.now() + timedelta(minutes=1)
         )
 
-        # Add night processing job - run at staggered times but less frequently to avoid lock contention
+        # Run night processing job only ONCE per hour to drastically reduce contention
         scheduler.add_job(
             id='night_processing',
             func=process_night_queue,
-            trigger=CronTrigger(minute='2,22,42'),  # Wider spacing to avoid lock collisions
+            trigger=CronTrigger(minute='2'),  # Just once per hour
             name='Night Video Processing',
             misfire_grace_time=900,  # 15 minute grace time
             max_instances=1,
@@ -234,11 +234,11 @@ def init_scheduler(app):
         
         # Removed the followup job to prevent unnecessary concurrent processing
 
-        # Add scheduled uploads job - run at times that avoid collision with night processing
+        # Add scheduled uploads job - run at wider intervals to drastically reduce contention
         scheduler.add_job(
             id='scheduled_uploads',
             func=process_scheduled_uploads,
-            trigger=CronTrigger(minute='5,17,29,41,53'),  # Timings chosen to avoid overlap with night processing
+            trigger=CronTrigger(minute='30'),  # Run only once at 30 minutes past the hour
             name='Scheduled Video Uploads',
             misfire_grace_time=240,  # 4 minute grace time
             max_instances=1,
@@ -269,17 +269,18 @@ def init_scheduler(app):
         logger.info("Scheduled database maintenance job")
         
         # Add automatic lock reset job to clear any stuck locks
+        # Run more frequently (every 10 minutes) to prevent prolonged deadlocks
         scheduler.add_job(
             id='auto_lock_reset',
             func='webapp.core_app.core.pipeline:force_release_lock',
             trigger='interval',
-            hours=1,  # Run every hour
+            minutes=10,  # Run every 10 minutes to ensure no lock is stuck for long
             name='Automatic Lock Reset',
-            misfire_grace_time=1800,  # 30 minute grace time
+            misfire_grace_time=300,  # 5 minute grace time
             max_instances=1,
             replace_existing=True
         )
-        logger.info("Scheduled automatic lock reset job")
+        logger.info("Scheduled automatic lock reset job to run every 10 minutes")
 
         # Rebuild schedules for existing tasks
         try:
