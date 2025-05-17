@@ -130,11 +130,7 @@ def safe_rollback(conn, cursor=None):
         return False
 
 def check_and_set_lock(task_id=None):
-    """Check if any task is running and set lock if not
-    
-    If this function is called with the same task_id that currently holds
-    the lock, it will return True (success) to prevent self-deadlock.
-    """
+    """Improved lock mechanism with better error handling and clearer logic"""
     lock_details = {
         'operation': 'check_and_set',
         'timestamp': datetime.now().isoformat(),
@@ -144,7 +140,7 @@ def check_and_set_lock(task_id=None):
     with db_lock:
         conn = None
         try:
-            # Create a new connection directly instead of using the contextmanager to avoid generator issues
+            # Create a new connection directly instead of using the contextmanager
             conn = db._create_connection()
             
             # Verify the connection is healthy
@@ -158,11 +154,28 @@ def check_and_set_lock(task_id=None):
             c = conn.cursor()
             
             # Start transaction to prevent race conditions
-            db.begin_transaction(conn)
+            try:
+                c.execute("BEGIN IMMEDIATE")  # This will block until lock is available
+            except sqlite3.OperationalError as e:
+                if "database is locked" in str(e):
+                    log_with_task_details('INFO', 
+                        "Database is locked, could not acquire lock", 
+                        task_id=task_id,
+                        details=lock_details)
+                    return False
+                raise
             
             # First check current lock status
             c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
             current_lock = c.fetchone()
+            
+            if not current_lock:
+                # No lock record exists, create one
+                c.execute("INSERT INTO task_lock (id, locked, task_id, locked_at) VALUES (1, 1, ?, datetime('now'))", 
+                          (task_id,))
+                c.execute("COMMIT")
+                return True
+                
             lock_details['current_lock'] = {
                 'locked': current_lock[0] if current_lock else None,
                 'task_id': current_lock[1] if current_lock else None,
@@ -170,35 +183,47 @@ def check_and_set_lock(task_id=None):
             }
             
             # Check if this task already holds the lock
-            if current_lock and current_lock[0] == 1 and current_lock[1] == task_id and task_id is not None:
-                # This task already holds the lock, so return success
-                db.commit_transaction(conn)
+            if current_lock[0] == 1 and current_lock[1] == task_id and task_id is not None:
+                # This task already holds the lock, update timestamp and return success
+                c.execute("""
+                    UPDATE task_lock 
+                    SET locked_at = datetime('now')
+                    WHERE id = 1
+                """)
+                c.execute("COMMIT")
                 log_with_task_details('INFO', 
                     "Task already holds the lock, returning success",
                     task_id=task_id,
                     details=lock_details)
                 return True
             
-            # Clear stale locks (older than 10 minutes or NULL timestamp)
-            c.execute("""
-                UPDATE task_lock 
-                SET locked = 0, task_id = NULL, locked_at = NULL 
-                WHERE locked = 1 
-                AND (
-                    locked_at IS NULL 
-                    OR datetime(locked_at, '+10 minutes') < datetime('now')
-                )
-            """)
-            expired_cleared = c.rowcount > 0
-            lock_details['expired_cleared'] = expired_cleared
+            # Clear stale locks (older than 15 minutes or NULL timestamp)
+            if current_lock[0] == 1:
+                # Check if lock is stale
+                if current_lock[2] is None:
+                    is_stale = True
+                else:
+                    try:
+                        lock_time = datetime.fromisoformat(current_lock[2])
+                        now = datetime.now()
+                        is_stale = (now - lock_time).total_seconds() > 900  # 15 minutes
+                    except (ValueError, TypeError):
+                        # If we can't parse the timestamp, consider it stale
+                        is_stale = True
+                        
+                if is_stale:
+                    c.execute("""
+                        UPDATE task_lock 
+                        SET locked = 0, task_id = NULL, locked_at = NULL 
+                        WHERE id = 1
+                    """)
+                    lock_details['stale_lock_cleared'] = True
+                    log_with_task_details('WARNING', 
+                        f"Cleared stale lock held by task {current_lock[1]}", 
+                        task_id=task_id,
+                        details=lock_details)
             
-            if expired_cleared:
-                log_with_task_details('INFO', 
-                    "Cleared expired lock",
-                    task_id=task_id,
-                    details={'cleared_lock': lock_details['current_lock']})
-            
-            # Try to acquire lock
+            # Try to acquire lock only if not locked or just cleared stale lock
             c.execute("""
                 UPDATE task_lock 
                 SET locked = 1, 
@@ -208,38 +233,33 @@ def check_and_set_lock(task_id=None):
             """, (task_id,))
             
             acquired = c.rowcount > 0
-            lock_details['acquired'] = acquired
-            
-            # Get final lock status
-            c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
-            final_lock = c.fetchone()
-            lock_details['final_lock'] = {
-                'locked': final_lock[0] if final_lock else None,
-                'task_id': final_lock[1] if final_lock else None,
-                'locked_at': final_lock[2] if final_lock else None
-            }
             
             # Commit the transaction
-            db.commit_transaction(conn)
+            c.execute("COMMIT")
             
-            log_with_task_details('INFO', 
-                "Successfully acquired pipeline lock" if acquired else "Failed to acquire pipeline lock",
-                task_id=task_id,
-                details=lock_details)
+            if acquired:
+                log_with_task_details('INFO', 
+                    "Successfully acquired pipeline lock", 
+                    task_id=task_id,
+                    details=lock_details)
+            else:
+                log_with_task_details('INFO', 
+                    f"Could not acquire lock - currently held by task {current_lock[1]}", 
+                    task_id=task_id,
+                    details=lock_details)
             
             return acquired
                 
         except Exception as e:
-            lock_details['error'] = str(e)
             log_with_task_details('ERROR', 
                 f"Error managing pipeline lock: {str(e)}", 
                 task_id=task_id,
-                details=lock_details)
+                details={**lock_details, 'error': str(e)})
             
             # Try to rollback if possible
             if conn:
                 try:
-                    db.rollback_transaction(conn)
+                    conn.rollback()
                 except:
                     pass
             return False
@@ -488,7 +508,7 @@ def get_next_day_schedules(schedule_str):
     return scheduled_times
 
 def process_video_generation(task_id, schedule_time=None, preview_mode=False, conn=None, parent_has_lock=False):
-    """Handle video generation and utility processing"""
+    """Handle video generation and utility processing with improved lock handling"""
     lock_acquired = False
     generation_details = {
         'task_id': task_id,
@@ -500,6 +520,9 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
     log_with_task_details('INFO', f"Starting video generation",
         task_id=task_id,
         details=generation_details)
+    
+    # Track start time for performance measurement
+    generation_start_time = time.time()
         
     files_to_cleanup = set()
     current_video_file = None
@@ -507,11 +530,19 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
     should_close_conn = conn is None
     
     try:
-        # Only acquire lock if parent doesn't have one
+        # Only acquire lock if parent doesn't have one already
         if not (preview_mode or parent_has_lock):
-            lock_acquired = check_and_set_lock(task_id)
+            # Retry lock acquisition up to 3 times with a delay
+            for attempt in range(3):
+                lock_acquired = check_and_set_lock(task_id)
+                if lock_acquired:
+                    break
+                    
+                if attempt < 2:  # Don't sleep on the last attempt
+                    time.sleep(5 * (attempt + 1))  # Exponential backoff: 5s, 10s
+                    
             if not lock_acquired:
-                log_with_task_details('INFO', "Another task is currently running",
+                log_with_task_details('INFO', "Another task is currently running, skipping generation",
                     task_id=task_id,
                     details=generation_details)
                 return None
@@ -975,12 +1006,15 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
             # Commit the transaction if everything succeeded
             c.execute("COMMIT")
             
-            log_with_task_details('INFO', f"Video generation completed successfully",
+            # Calculate and log the total generation time
+            generation_time = time.time() - generation_start_time
+            log_with_task_details('INFO', f"Video generation completed successfully in {generation_time:.2f} seconds",
                 task_id=task_id,
                 details={
                     'video_path': permanent_path,
                     'original_name': original_name,
                     'video_id': video_id,
+                    'generation_time': f"{generation_time:.2f}s",
                     **generation_details
                 })
             return permanent_path, video_id
@@ -1754,7 +1788,7 @@ def _check_for_missed_processing(force_process=False):
         logger.error(f"Error checking for missed processing: {str(e)}")
 
 def process_night_queue():
-    """Process pending tasks during night window"""
+    """Process pending tasks during night window with improved email handling"""
     # First check if we need to recover from missed processing
     check_for_missed_processing()
     
@@ -1764,7 +1798,13 @@ def process_night_queue():
         logger.debug("Outside night processing window, skipping night queue")
         return
     
-    logger.info("Starting night processing for scheduled tasks")
+    # Check if this is the primary processing run based on time
+    now = datetime.now()
+    night_hour, night_minute = map(int, os.getenv('NIGHT_PROCESSING_START', '01:30').split(':'))
+    expected_start = now.replace(hour=int(night_hour), minute=int(night_minute), second=0, microsecond=0)
+    is_primary_run = abs((now - expected_start).total_seconds()) < 300  # Within 5 minutes of scheduled time
+    
+    logger.info(f"Starting night processing for scheduled tasks (Primary run: {is_primary_run})")
 
     lock_acquired = False
     task_summaries = []  # To store task results for notification
@@ -1773,11 +1813,19 @@ def process_night_queue():
     
     try:
         # Try to acquire lock before processing
-        if not check_and_set_lock("night_processing"):  # Using a consistent task_id for night processing
+        # Retry lock acquisition up to 3 times with a delay
+        for attempt in range(3):
+            lock_acquired = check_and_set_lock("night_processing")
+            if lock_acquired:
+                break
+                
+            if attempt < 2:  # Don't sleep on the last attempt
+                time.sleep(5 * (attempt + 1))  # Exponential backoff: 5s, 10s
+                
+        if not lock_acquired:
             logger.info("Could not acquire lock for night processing, will retry next cycle")
             return
 
-        lock_acquired = True
         with db.get_connection() as conn:
             c = conn.cursor()
             
@@ -1799,7 +1847,7 @@ def process_night_queue():
             for task_id, schedule, task_name, email_notify in tasks:
                 schedule_times = get_next_day_schedules(schedule)
                 if not schedule_times:
-                    logger.info(f"No schedule times found for task {task_id} ({task_name}) on {tomorrow_day}")
+                    logger.info(f"No schedule times found for task {task_id} ({task_name}) on {today_day}")
                     task_summaries.append({
                         'id': task_id,
                         'name': task_name,
@@ -1858,8 +1906,11 @@ def process_night_queue():
                     task_result['status'] = 'failed'
                     task_result['error'] = error_msg
                 
-                # Send individual task notifications if requested and videos were generated
-                if email_notify and task_result['video_count'] > 0:
+                # IMPORTANT CHANGE: Only send individual task notifications if explicitly requested
+                # in environment variable and if videos were generated
+                send_individual_emails = os.getenv('SEND_INDIVIDUAL_TASK_EMAILS', 'false').lower() == 'true'
+                
+                if send_individual_emails and email_notify and task_result['video_count'] > 0:
                     try:
                         from webapp.core_app.core.email_utils import send_task_completion_notification
                         send_task_completion_notification(
@@ -1877,8 +1928,9 @@ def process_night_queue():
             
             logger.info(f"Night processing queue completed: {total_videos_generated} videos generated")
             
-            # Send comprehensive notification if we have recipients
-            if notification_recipients and task_summaries:
+            # IMPORTANT CHANGE: Only send the summary email for the primary night processing run
+            # This prevents duplicate emails from staggered jobs
+            if is_primary_run and notification_recipients and task_summaries:
                 try:
                     from webapp.core_app.core.email_utils import send_night_processing_notification
                     # Convert set to comma-separated string
@@ -1891,7 +1943,9 @@ def process_night_queue():
                     logger.info(f"Sent night processing summary notification to {len(notification_recipients)} recipients")
                 except Exception as e:
                     logger.error(f"Failed to send night processing notification: {str(e)}")
-
+            else:
+                if len(notification_recipients) > 0:
+                    logger.info(f"Skipping summary email (primary run: {is_primary_run}, recipients: {len(notification_recipients)})")
 
     except Exception as e:
         logger.error(f"Error in night processing queue: {str(e)}")
@@ -1908,6 +1962,7 @@ def process_night_queue():
                     logger.info("Force-released lock after night processing")
                 except Exception as force_e:
                     logger.error(f"Force release also failed after night processing: {str(force_e)}")
+
 def process_task_with_times(task_id, schedule_times, conn, task_result, total_videos_generated):
     """Helper function to process a task with its schedule times
     
