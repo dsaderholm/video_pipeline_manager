@@ -1629,18 +1629,18 @@ def _check_for_missed_processing(force_process=False):
         
         logger.info(f"Checking for missed night processing from {yesterday_night_time}")
         
-        # Try to acquire lock
-        lock_acquired = check_and_set_lock("missed_processing_check")
-        if not lock_acquired and not force_process:
-            logger.info("Could not acquire lock for missed processing check, will try later")
-            return
+        # Create a new dedicated connection with autocommit mode
+        with db.get_connection() as conn:
+            # Set autocommit mode BEFORE any other operations
+            conn.autocommit = True
             
-        try:
-            # Create a new dedicated connection with autocommit mode
-            with db.get_connection() as conn:
-                # Set autocommit mode BEFORE any other operations
-                conn.autocommit = True
+            # Try to acquire lock
+            lock_acquired = check_and_set_lock("missed_processing_check")
+            if not lock_acquired and not force_process:
+                logger.info("Could not acquire lock for missed processing check, will try later")
+                return
                 
+            try:
                 c = conn.cursor()
                 
                 # Find all tasks that should have run yesterday
@@ -1696,6 +1696,9 @@ def _check_for_missed_processing(force_process=False):
                                     try:
                                         # Generate the video but don't try to acquire lock again
                                         with db.get_connection() as task_conn:
+                                            # Ensure autocommit mode
+                                            task_conn.autocommit = True
+                                            
                                             video_result = process_video_generation(
                                                 task_id, 
                                                 schedule_time, 
@@ -1730,10 +1733,9 @@ def _check_for_missed_processing(force_process=False):
                     logger.info(f"Recovered {processed_count} missed video generations")
                 else:
                     logger.info("No missed processing detected or recovery not needed")
-                    
-        finally:
-            if lock_acquired:
-                release_lock("missed_processing_check")
+            finally:
+                if lock_acquired:
+                    release_lock("missed_processing_check")
                 
     except Exception as e:
         logger.error(f"Error checking for missed processing: {str(e)}")
