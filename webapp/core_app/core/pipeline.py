@@ -9,7 +9,7 @@ import subprocess
 import re
 from datetime import datetime, timedelta
 import logging
-import sqlite3
+import psycopg2
 logger = logging.getLogger('app')
 # Import log_manager for compatibility, but don't use its handlers
 from webapp.core_app.core.log_manager import db_log_handler
@@ -121,7 +121,7 @@ def safe_rollback(conn, cursor=None):
         try:
             conn.rollback()
             return True
-        except sqlite3.OperationalError as e:
+        except psycopg2.OperationalError as e:
             # Log the rollback error but don't raise
             logger.warning(f"Rollback error: {str(e)}")
             return False
@@ -130,45 +130,33 @@ def safe_rollback(conn, cursor=None):
         logger.warning(f"Cannot check transaction status: {str(e)}")
         return False
 
-def get_db_path():
-    """Get the path to the SQLite database file"""
-    from webapp.core_app.core.database import get_db_path as db_get_path
-    return db_get_path()
+# This function is no longer needed for PostgreSQL
+# def get_db_path():
+#     """Get the path to the SQLite database file"""
+#     from webapp.core_app.core.database import get_db_path as db_get_path
+#     return db_get_path()
 
 def force_release_lock():
     """Force release any existing lock regardless of owner"""
     try:
-        # Create a direct connection with short timeout
-        conn = sqlite3.connect(
-            get_db_path(),
-            timeout=1.0,  # 1 second timeout
-            isolation_level=None  # Autocommit mode
-        )
-        conn.execute("PRAGMA busy_timeout = 1000")  # 1 second timeout
-        
-        # Clear the lock completely
-        c = conn.cursor()
-        c.execute("BEGIN IMMEDIATE")
-        c.execute("""
-            UPDATE task_lock 
-            SET locked = 0, 
-                task_id = NULL, 
-                locked_at = NULL 
-            WHERE id = 1
-        """)
-        c.execute("COMMIT")
+        # Get a connection from the pool
+        with db.get_connection() as conn:
+            with conn.cursor() as c:
+                # Clear the lock completely
+                c.execute("""
+                    UPDATE task_lock 
+                    SET locked = 0, 
+                        task_id = NULL, 
+                        locked_at = NULL 
+                    WHERE id = 1
+                """)
+                conn.commit()
         
         logger.info("Force-released database lock")
         return True
     except Exception as e:
         logger.error(f"Failed to force-release lock: {str(e)}")
         return False
-    finally:
-        if conn:
-            try:
-                conn.close()
-            except:
-                pass
 
 def check_and_set_lock(task_id=None):
     """More aggressive lock mechanism with timeouts to prevent deadlocks"""
@@ -189,125 +177,108 @@ def check_and_set_lock(task_id=None):
         return False
 
     try:  # OUTERMOST try
-        conn = None
         try:
-            conn = sqlite3.connect(
-                get_db_path(),
-                timeout=2.0,
-                isolation_level=None,
-                check_same_thread=False
-            )
-            conn.execute("PRAGMA busy_timeout = 2000")
-
-            if not check_connection_health(conn):
-                log_with_task_details(
-                    'ERROR',
-                    "Failed to create a healthy database connection for lock check",
-                    task_id=task_id,
-                    details=lock_details
-                )
-                return False
-
-            c = conn.cursor()
-
-            try:
-                c.execute("BEGIN IMMEDIATE")
-            except sqlite3.OperationalError as e:
-                if "database is locked" in str(e):
+            with db.get_connection() as conn:
+                # Start transaction to prevent race conditions
+                conn.autocommit = False
+                
+                if not check_connection_health(conn):
                     log_with_task_details(
-                        'INFO',
-                        "Database is locked, could not acquire lock",
+                        'ERROR',
+                        "Failed to create a healthy database connection for lock check",
                         task_id=task_id,
                         details=lock_details
                     )
                     return False
-                raise
 
-            c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
-            current_lock = c.fetchone()
+                with conn.cursor() as c:
+                    c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
+                    current_lock = c.fetchone()
 
-            if not current_lock:
-                c.execute("""
-                    INSERT INTO task_lock (id, locked, task_id, locked_at)
-                    VALUES (1, 1, ?, datetime('now'))
-                """, (task_id,))
-                c.execute("COMMIT")
-                return True
+                    if not current_lock:
+                        c.execute("""
+                            INSERT INTO task_lock (id, locked, task_id, locked_at)
+                            VALUES (1, 1, %s, now())
+                        """, (task_id,))
+                        conn.commit()
+                        return True
 
-            lock_details['current_lock'] = {
-                'locked': current_lock[0],
-                'task_id': current_lock[1],
-                'locked_at': current_lock[2]
-            }
+                    lock_details['current_lock'] = {
+                        'locked': current_lock[0],
+                        'task_id': current_lock[1],
+                        'locked_at': current_lock[2]
+                    }
 
-            if current_lock[0] == 1 and current_lock[1] == task_id and task_id is not None:
-                c.execute("""
-                    UPDATE task_lock
-                    SET locked_at = datetime('now')
-                    WHERE id = 1
-                """)
-                c.execute("COMMIT")
-                log_with_task_details(
-                    'INFO',
-                    "Task already holds the lock, returning success",
-                    task_id=task_id,
-                    details=lock_details
-                )
-                return True
+                    if current_lock[0] == 1 and current_lock[1] == task_id and task_id is not None:
+                        c.execute("""
+                            UPDATE task_lock
+                            SET locked_at = now()
+                            WHERE id = 1
+                        """)
+                        conn.commit()
+                        log_with_task_details(
+                            'INFO',
+                            "Task already holds the lock, returning success",
+                            task_id=task_id,
+                            details=lock_details
+                        )
+                        return True
 
-            # Clear stale lock
-            is_stale = False
-            if current_lock[0] == 1:
-                if current_lock[2] is None:
-                    is_stale = True
-                else:
-                    try:
-                        lock_time = datetime.fromisoformat(current_lock[2])
-                        now = datetime.now()
-                        is_stale = (now - lock_time).total_seconds() > 900
-                    except (ValueError, TypeError):
-                        is_stale = True
+                    # Clear stale lock
+                    is_stale = False
+                    if current_lock[0] == 1:
+                        if current_lock[2] is None:
+                            is_stale = True
+                        else:
+                            try:
+                                lock_time = current_lock[2]
+                                if isinstance(lock_time, str):
+                                    lock_time = datetime.fromisoformat(lock_time)
+                                now = datetime.now()
+                                is_stale = (now - lock_time).total_seconds() > 900
+                            except (ValueError, TypeError):
+                                is_stale = True
 
-            if is_stale:
-                c.execute("""
-                    UPDATE task_lock
-                    SET locked = 0, task_id = NULL, locked_at = NULL
-                    WHERE id = 1
-                """)
-                lock_details['stale_lock_cleared'] = True
-                log_with_task_details(
-                    'WARNING',
-                    f"Cleared stale lock held by task {current_lock[1]}",
-                    task_id=task_id,
-                    details=lock_details
-                )
+                    if is_stale:
+                        c.execute("""
+                            UPDATE task_lock
+                            SET locked = 0, task_id = NULL, locked_at = NULL
+                            WHERE id = 1
+                        """)
+                        lock_details['stale_lock_cleared'] = True
+                        log_with_task_details(
+                            'WARNING',
+                            f"Cleared stale lock held by task {current_lock[1]}",
+                            task_id=task_id,
+                            details=lock_details
+                        )
 
-            # Try to acquire lock
-            c.execute("""
-                UPDATE task_lock
-                SET locked = 1, task_id = ?, locked_at = datetime('now')
-                WHERE id = 1 AND locked = 0
-            """, (task_id,))
-            acquired = c.rowcount > 0
+                    # Try to acquire lock
+                    c.execute("""
+                        UPDATE task_lock
+                        SET locked = 1, task_id = %s, locked_at = now()
+                        WHERE id = 1 AND locked = 0
+                    """, (task_id,))
+                    acquired = c.rowcount > 0
 
-            c.execute("COMMIT")
+                    conn.commit()
 
-            if acquired:
-                log_with_task_details(
-                    'INFO',
-                    "Successfully acquired pipeline lock",
-                    task_id=task_id,
-                    details=lock_details
-                )
-            else:
-                log_with_task_details(
-                    'INFO',
-                    f"Could not acquire lock - currently held by task {current_lock[1]}",
-                    task_id=task_id,
-                    details=lock_details
-                )
+                    if acquired:
+                        log_with_task_details(
+                            'INFO',
+                            "Successfully acquired pipeline lock",
+                            task_id=task_id,
+                            details=lock_details
+                        )
+                    else:
+                        log_with_task_details(
+                            'INFO',
+                            f"Could not acquire lock - currently held by task {current_lock[1]}",
+                            task_id=task_id,
+                            details=lock_details
+                        )
 
-            return acquired
+                    return acquired
 
         except Exception as e:
             log_with_task_details(
@@ -316,19 +287,9 @@ def check_and_set_lock(task_id=None):
                 task_id=task_id,
                 details={**lock_details, 'error': str(e)}
             )
-            if conn:
-                try:
-                    conn.rollback()
-                except:
-                    pass
             return False
 
         finally:
-            if conn:
-                try:
-                    conn.close()
-                except:
-                    pass
             if db_lock.locked():
                 try:
                     db_lock.release()
@@ -352,82 +313,56 @@ def release_lock(task_id=None):
     release_details['thread_lock_held'] = thread_lock_held
     
     try:  # We'll release the thread lock in finally if needed
-        conn = None
         try:
-            # Create a direct connection with short timeout
-            conn = sqlite3.connect(
-                get_db_path(),
-                timeout=1.0,  # 1 second timeout
-                isolation_level=None,  # Autocommit mode
-                check_same_thread=False
-            )
-            conn.execute("PRAGMA busy_timeout = 1000")  # 1 second
-            
-            # Verify the connection is healthy
-            if not check_connection_health(conn):
-                log_with_task_details('ERROR', 
-                    "Failed to create a healthy database connection for lock release", 
-                    task_id=task_id,
-                    details=release_details)
-                # Try force release as fallback
-                try:
-                    return force_release_lock()
-                except Exception as force_e:
-                    release_details['force_error'] = str(force_e)
-                    log_with_task_details('ERROR', 
-                        f"Force release failed after connection health check: {str(force_e)}", 
-                        task_id=task_id,
-                        details=release_details)
-                return False
-                
-            c = conn.cursor()
-            
-            # Start transaction to prevent race conditions
-            db.begin_transaction(conn)
-            
-            # Get current lock status before release
-            c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
-            current_lock = c.fetchone()
-            release_details['before_release'] = {
-                'locked': current_lock[0] if current_lock else None,
-                'task_id': current_lock[1] if current_lock else None,
-                'locked_at': current_lock[2] if current_lock else None
-            }
-            
-            # Only release if we own the lock
-            if task_id:
-                c.execute("""
-                    UPDATE task_lock 
-                    SET locked = 0, 
-                        task_id = NULL, 
-                        locked_at = NULL 
-                    WHERE id = 1 
-                    AND task_id = ?
-                """, (task_id,))
-            else:
-                # Force release if no task_id provided
-                c.execute("""
-                    UPDATE task_lock 
-                    SET locked = 0, 
-                        task_id = NULL, 
-                        locked_at = NULL 
-                    WHERE id = 1
-                """)
-            released = c.rowcount > 0
-            
-            release_details['released'] = released
-            
-            # Get final lock status
-            c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
-            final_lock = c.fetchone()
-            release_details['after_release'] = {
-                'locked': final_lock[0] if final_lock else None,
-                'task_id': final_lock[1] if final_lock else None,
-                'locked_at': final_lock[2] if final_lock else None
-            }
-            
-            # Commit the transaction
-            db.commit_transaction(conn)
+            # Use PostgreSQL's connection pool
+            with db.get_connection() as conn:
+                with conn.cursor() as c:
+                    # Start transaction
+                    conn.autocommit = False
+                    
+                    # Get current lock status before release
+                    c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
+                    current_lock = c.fetchone()
+                    release_details['before_release'] = {
+                        'locked': current_lock[0] if current_lock else None,
+                        'task_id': current_lock[1] if current_lock else None,
+                        'locked_at': current_lock[2] if current_lock else None
+                    }
+                    
+                    # Only release if we own the lock
+                    if task_id:
+                        c.execute("""
+                            UPDATE task_lock 
+                            SET locked = 0, 
+                                task_id = NULL, 
+                                locked_at = NULL 
+                            WHERE id = 1 
+                            AND task_id = %s
+                        """, (task_id,))
+                    else:
+                        # Force release if no task_id provided
+                        c.execute("""
+                            UPDATE task_lock 
+                            SET locked = 0, 
+                                task_id = NULL, 
+                                locked_at = NULL 
+                            WHERE id = 1
+                        """)
+                    released = c.rowcount > 0
+                    
+                    release_details['released'] = released
+                    
+                    # Get final lock status
+                    c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
+                    final_lock = c.fetchone()
+                    release_details['after_release'] = {
+                        'locked': final_lock[0] if final_lock else None,
+                        'task_id': final_lock[1] if final_lock else None,
+                        'locked_at': final_lock[2] if final_lock else None
+                    }
+                    
+                    # Commit the transaction
+                    conn.commit()
             
             if released:
                 log_with_task_details('INFO', 
@@ -449,13 +384,6 @@ def release_lock(task_id=None):
                 task_id=task_id,
                 details=release_details)
             
-            # Try to rollback if possible
-            if conn:
-                try:
-                    db.rollback_transaction(conn)
-                except:
-                    pass
-                    
             # Try force release as last resort
             try:
                 force_release_lock()
@@ -466,13 +394,6 @@ def release_lock(task_id=None):
                     task_id=task_id,
                     details=release_details)
             return False
-        finally:
-            # Always close the connection in finally block
-            if conn:
-                try:
-                    conn.close()
-                except:
-                    pass
     finally:
         # Always release the thread lock if we're holding it
         if thread_lock_held:
@@ -492,19 +413,37 @@ def update_task_status(task_id, status, processing_status=None, video_path=None,
     try:
         if conn is None:
             with db.get_connection() as conn:
-                c = conn.cursor()
-                query = "UPDATE tasks SET status=?"
+                with conn.cursor() as c:
+                    query = "UPDATE tasks SET status=%s"
+                    params = [status]
+                    
+                    if processing_status is not None:
+                        query += ", processing_status=%s"
+                        params.append(processing_status)
+                    
+                    if video_path is not None:
+                        query += ", processed_video_path=%s"
+                        params.append(video_path)
+                    
+                    query += " WHERE id=%s"
+                    params.append(task_id)
+                    
+                    c.execute(query, params)
+                    conn.commit()
+        else:
+            with conn.cursor() as c:
+                query = "UPDATE tasks SET status=%s"
                 params = [status]
                 
                 if processing_status is not None:
-                    query += ", processing_status=?"
+                    query += ", processing_status=%s"
                     params.append(processing_status)
                 
                 if video_path is not None:
-                    query += ", processed_video_path=?"
+                    query += ", processed_video_path=%s"
                     params.append(video_path)
                 
-                query += " WHERE id=?"
+                query += " WHERE id=%s"
                 params.append(task_id)
                 
                 c.execute(query, params)
@@ -521,46 +460,46 @@ def store_generated_video(task_id, original_name, processed_path, scheduled_time
         if conn is None:
             conn = db.get_connection()
             
-        c = conn.cursor()
-        
-        # Only start transaction if not already in one
-        if not in_transaction:
-            c.execute("BEGIN IMMEDIATE")
-        
-        try:
-            # Log the details of what we're storing
-            log_with_details('INFO', f"Storing generated video information",
-                details={
-                    'task_id': task_id,
-                    'original_name': original_name, 
-                    'processed_path': processed_path,
-                    'scheduled_time': scheduled_time
-                })
-                
-            c.execute('''
-                        INSERT INTO generated_videos 
-                        (task_id, original_name, processed_path, scheduled_time, status, upload_status)
-                        VALUES (?, ?, ?, ?, 'completed', 'pending')
-                    ''', (task_id, original_name, processed_path, scheduled_time))
-            
-            video_id = c.lastrowid
-            
-            # Verify the video was stored
-            c.execute("SELECT id FROM generated_videos WHERE id = ?", (video_id,))
-            if not c.fetchone():
-                raise Exception("Failed to verify video storage")
-                
-            # Only commit if we started the transaction
+        with conn.cursor() as c:
+            # Only start transaction if not already in one
             if not in_transaction:
-                c.execute("COMMIT")
+                conn.autocommit = False
             
-            return video_id
-            
-        except Exception as e:
-            # Only rollback if we started the transaction
-            if not in_transaction:
-                safe_rollback(conn, c)
-            raise
+            try:
+                # Log the details of what we're storing
+                log_with_details('INFO', f"Storing generated video information",
+                    details={
+                        'task_id': task_id,
+                        'original_name': original_name, 
+                        'processed_path': processed_path,
+                        'scheduled_time': scheduled_time
+                    })
+                    
+                c.execute('''
+                            INSERT INTO generated_videos 
+                            (task_id, original_name, processed_path, scheduled_time, status, upload_status)
+                            VALUES (%s, %s, %s, %s, 'completed', 'pending')
+                            RETURNING id
+                        ''', (task_id, original_name, processed_path, scheduled_time))
+                
+                video_id = c.fetchone()[0]
+                
+                # Verify the video was stored
+                c.execute("SELECT id FROM generated_videos WHERE id = %s", (video_id,))
+                if not c.fetchone():
+                    raise Exception("Failed to verify video storage")
+                    
+                # Only commit if we started the transaction
+                if not in_transaction:
+                    conn.commit()
+                
+                return video_id
+                
+            except Exception as e:
+                # Only rollback if we started the transaction
+                if not in_transaction:
+                    safe_rollback(conn, c)
+                raise
             
     except Exception as e:
         log_with_task_details('ERROR', f"Failed to store video information: {str(e)}",
@@ -652,7 +591,7 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                        g.generator_curl 
                 FROM tasks t
                 JOIN generators g ON t.generator_id = g.id
-                WHERE t.id=?
+                WHERE t.id=%s
             """, (task_id,))
             task_data = c.fetchone()
             
@@ -729,7 +668,7 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                 try:
                     c.execute("SELECT 1")  # Quick test if transaction is active
                     safe_rollback(conn, c)
-                except sqlite3.OperationalError:
+                except psycopg2.OperationalError:
                     # Transaction wasn't active, that's okay
                     pass
                     
@@ -796,7 +735,7 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                         details={'utility_count': len(utilities)})
                         
                     for index, util_id in enumerate(utilities):
-                        c.execute("SELECT id, utility_curl, name FROM utilities WHERE id=?", (util_id,))
+                        c.execute("SELECT id, utility_curl, name FROM utilities WHERE id=%s", (util_id,))
                         util = c.fetchone()
                         if not util:
                             log_with_task_details('WARNING', f"Utility ID {util_id} not found, skipping",
@@ -1195,9 +1134,9 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
             c.execute("""
                 SELECT id, original_name, processed_path, scheduled_time
                 FROM generated_videos 
-                WHERE task_id = ? 
+                WHERE task_id = %s 
                 AND upload_status = 'pending'
-                AND scheduled_time <= datetime('now', 'localtime')
+                AND scheduled_time <= now()
                 ORDER BY scheduled_time ASC
                 LIMIT 1
             """, (task_id,))
@@ -1227,16 +1166,16 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
                 UPDATE generated_videos 
                 SET status = 'failed',
                     upload_status = 'failed',
-                    error_message = ?
-                WHERE id = ?
+                    error_message = %s
+                WHERE id = %s
             """, ("Video file not found", video_id))
             return False
 
         # Get task data
         c.execute("""
-            SELECT t.name, t.hashtags, t.sound_name, t.sound_volume, t.email_notify
-            FROM tasks t
-            WHERE t.id = ?
+        SELECT t.name, t.hashtags, t.sound_name, t.sound_volume, t.email_notify
+        FROM tasks t
+        WHERE t.id = %s
         """, (task_id,))
         task_data = c.fetchone()
         
@@ -1269,7 +1208,7 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
                    p.default_hashtags, p.fallback_curl, p.fallback_curl_2
             FROM task_platform_accounts tpa
             JOIN platforms p ON tpa.platform_id = p.id
-            WHERE tpa.task_id = ?
+            WHERE tpa.task_id = %s
         """, (task_id,))
         platform_data_list = c.fetchall()
 
@@ -1402,9 +1341,9 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
                 UPDATE generated_videos 
                 SET status = 'failed',
                     upload_status = 'failed',
-                    error_message = ?,
+                    error_message = %s,
                     retry_count = retry_count + 1
-                WHERE id = ?
+                WHERE id = %s
             """, ("Failed to upload to any platform", video_id))
             update_task_status(task_id, 'failed', None, None, conn)
             raise Exception("Failed to upload to any platform")
@@ -1414,8 +1353,8 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
             UPDATE generated_videos 
             SET status = 'completed',
                 upload_status = 'completed',
-                uploaded_at = datetime('now')
-            WHERE id = ?
+                uploaded_at = now()
+            WHERE id = %s
         """, (video_id,))
 
         # Delete the processed video file after successful upload
@@ -1466,7 +1405,7 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
         c.execute("""
             SELECT COUNT(*) 
             FROM generated_videos 
-            WHERE task_id = ? AND upload_status = 'pending'
+            WHERE task_id = %s AND upload_status = 'pending'
         """, (task_id,))
         pending_count = c.fetchone()[0]
 
@@ -1475,8 +1414,8 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
             c.execute("""
                 SELECT COUNT(*) 
                 FROM generated_videos 
-                WHERE task_id = ? AND upload_status = 'pending'
-                AND scheduled_time > datetime('now', 'localtime')
+                WHERE task_id = %s AND upload_status = 'pending'
+                AND scheduled_time > now()
             """, (task_id,))
             future_pending_count = c.fetchone()[0]
             
@@ -1551,9 +1490,9 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
                     UPDATE generated_videos 
                     SET status = 'failed',
                         upload_status = 'failed',
-                        error_message = ?,
+                        error_message = %s,
                         retry_count = retry_count + 1
-                    WHERE id = ?
+                    WHERE id = %s
                 """, (str(e), video_id))
             update_task_status(task_id, 'failed', None, None, conn)
         raise
@@ -1788,7 +1727,7 @@ def _check_for_missed_processing(force_process=False):
                     FROM tasks 
                     WHERE status != 'failed'
                     AND processing_status != 'failed'
-                    AND schedule LIKE ?
+                    AND schedule LIKE %s
                 """, (f'%{yesterday_day}|%',))
                 
                 tasks = c.fetchall()
@@ -1798,8 +1737,8 @@ def _check_for_missed_processing(force_process=False):
                     # Check if we have any generated videos from yesterday
                     c.execute("""
                         SELECT COUNT(*) FROM generated_videos
-                        WHERE task_id = ?
-                        AND DATE(generated_at) = DATE(?) 
+                        WHERE task_id = %s
+                        AND DATE(generated_at) = DATE(%s) 
                     """, (task_id, yesterday.strftime('%Y-%m-%d')))
                     
                     existing_count = c.fetchone()[0]
@@ -1807,8 +1746,8 @@ def _check_for_missed_processing(force_process=False):
                     # Also check today, as sometimes night processing happens right after midnight
                     c.execute("""
                         SELECT COUNT(*) FROM generated_videos
-                        WHERE task_id = ?
-                        AND DATE(generated_at) = DATE(?) 
+                        WHERE task_id = %s
+                        AND DATE(generated_at) = DATE(%s) 
                     """, (task_id, today.strftime('%Y-%m-%d')))
                     
                     today_count = c.fetchone()[0]
@@ -1928,7 +1867,7 @@ def process_night_queue():
                 FROM tasks 
                 WHERE status != 'failed'
                 AND processing_status != 'failed'
-                AND schedule LIKE ?
+                AND schedule LIKE %s
             """, (f'%{today_day}|%',))
             
             tasks = c.fetchall()
@@ -2159,7 +2098,7 @@ def process_uploads_with_context():
             FROM generated_videos v
             JOIN tasks t ON v.task_id = t.id
             WHERE v.upload_status = 'pending'
-            AND v.scheduled_time <= datetime('now', 'localtime')
+            AND v.scheduled_time <= now()
             AND t.status != 'failed'
             ORDER BY v.scheduled_time ASC
         ''')

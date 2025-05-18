@@ -3,6 +3,7 @@ FROM python:3.9-slim
 RUN apt-get update && apt-get install -y \
     curl \
     ffmpeg \
+    postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user and set up the app directory
@@ -17,7 +18,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Create necessary directories
-RUN mkdir -p /app/webapp/previews /app/webapp/processed_videos /app/webapp/database
+RUN mkdir -p /app/webapp/previews /app/webapp/processed_videos
+
+# Make scripts executable
+RUN chmod +x /app/scripts/init_postgres.sh
 
 # Set proper ownership and permissions
 RUN chown -R appuser:appuser /app && \

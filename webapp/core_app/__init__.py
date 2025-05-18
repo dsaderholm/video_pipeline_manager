@@ -6,7 +6,6 @@ import sys
 import os
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-import sqlite3
 
 # Set up logging first, before any other imports
 APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -258,7 +257,7 @@ def init_scheduler(app):
         # Add scheduled database maintenance job
         scheduler.add_job(
             id='database_maintenance',
-            func=db.checkpoint_wal,  # Force WAL checkpoint
+            func=db.vacuum_db,  # Run PostgreSQL VACUUM
             trigger='interval',
             hours=4,  # Run every 4 hours
             name='Database Maintenance',
@@ -382,7 +381,7 @@ def init_scheduler(app):
                                 except Exception as e:
                                     logger.error(f"Error scheduling upload for task {task_id} on {day} at {hour}:{minute}: {e}")
                     
-                except sqlite3.OperationalError as e:
+                except psycopg2.OperationalError as e:
                     logger.warning(f"Could not load existing tasks: {e}")
         except Exception as e:
             logger.error(f"Failed to load tasks: {e}")

@@ -14,14 +14,32 @@ services:
       - FLASK_APP=webapp.core_app:app
       - PYTHONDONTWRITEBYTECODE=1
       - TZ=${TIMEZONE:-America/Denver}
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/video_pipeline
     volumes:
-      - video_pipeline_manager_db_data:/app/webapp/database
       - ./webapp/previews:/app/webapp/previews
       - ./webapp/processed_videos:/app/webapp/processed_videos
     restart: unless-stopped
     networks:
       video_generation:
         ipv4_address: 10.20.0.14
+    depends_on:
+      - db
+    command: sh -c "/app/scripts/init_postgres.sh && python webapp/main.py"
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=video_pipeline
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    networks:
+      video_generation:
+        ipv4_address: 10.20.0.15
+    restart: unless-stopped
 
 networks:
   video_generation:
@@ -29,4 +47,4 @@ networks:
     name: "Video Generation"
 
 volumes:
-  video_pipeline_manager_db_data:
+  postgres_data:

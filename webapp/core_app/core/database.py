@@ -1,4 +1,5 @@
-import sqlite3
+import psycopg2
+from psycopg2 import pool
 import threading
 import contextlib
 from functools import wraps
@@ -8,21 +9,18 @@ import time
 
 logger = logging.getLogger('app')
 
-def get_db_path():
-    """Get the path to the SQLite database file"""
-    db_dir = os.path.join('webapp', 'database')
-    # Make sure the database directory exists
-    if not os.path.exists(db_dir):
-        os.makedirs(db_dir)
-    return os.path.join(db_dir, 'pipeline.db')
+def get_db_connection_string():
+    """Get PostgreSQL connection string from environment or use default"""
+    return os.environ.get('DATABASE_URL', 'postgresql://postgres:postgres@db:5432/video_pipeline')
 
 class DatabaseManager:
     _instance = None
     _lock = threading.Lock()
-    _connection_pool = {}
-    _in_transaction = {}  # Track which connections are in transactions
+    _connection_pool = None
+    _local = threading.local()  # Thread-local storage for connection tracking
     
     def __init__(self):
+        self._setup_connection_pool()
         self.init_db()
     
     @classmethod
@@ -33,230 +31,254 @@ class DatabaseManager:
                     cls._instance = cls()
         return cls._instance
     
-    def init_db(self):
-        """Initialize database with improved settings"""
-        db_path = get_db_path()
-        logger.info(f"Initializing database at {db_path}")
-        
-        # Create database directory if it doesn't exist
-        db_dir = os.path.dirname(db_path)
-        if not os.path.exists(db_dir):
-            os.makedirs(db_dir)
-            logger.info(f"Created database directory: {db_dir}")
+    def _setup_connection_pool(self):
+        """Set up the PostgreSQL connection pool"""
+        try:
+            db_url = get_db_connection_string()
+            # Wait for the PostgreSQL server to start up
+            max_retries = 10
+            retry_delay = 2  # seconds
             
+            for attempt in range(max_retries):
+                try:
+                    # Create a temporary connection to test if PostgreSQL is ready
+                    conn = psycopg2.connect(db_url)
+                    conn.close()
+                    break  # If we get here, connection was successful
+                except psycopg2.OperationalError as e:
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Waiting for PostgreSQL to start (attempt {attempt+1}/{max_retries}): {e}")
+                        time.sleep(retry_delay)
+                    else:
+                        logger.error(f"Failed to connect to PostgreSQL after {max_retries} attempts: {e}")
+                        raise
+                    
+            # Initialize the connection pool with 5 min and 20 max connections
+            self._connection_pool = psycopg2.pool.ThreadedConnectionPool(
+                minconn=5,
+                maxconn=20,
+                dsn=db_url
+            )
+            logger.info("PostgreSQL connection pool initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize connection pool: {e}")
+            raise
+    
+    def init_db(self):
+        """Initialize database tables"""
         try:
             with self.get_connection() as conn:
-                # Set WAL mode and optimize for concurrency
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("PRAGMA synchronous=NORMAL")
-                conn.execute("PRAGMA busy_timeout=120000")  # Increased to 120-second timeout
-                conn.execute("PRAGMA cache_size=-64000")    # 64MB cache
-                conn.execute("PRAGMA temp_store=MEMORY")
-                conn.execute("PRAGMA mmap_size=30000000000") # 30GB memory map
-                conn.execute("PRAGMA page_size=4096")
-                conn.execute("PRAGMA wal_autocheckpoint=1000") # Increase checkpoint threshold
-                
-                # Create tables if they don't exist
-                conn.executescript('''
-                    CREATE TABLE IF NOT EXISTS task_lock (
-                        id INTEGER PRIMARY KEY CHECK (id = 1),
-                        locked INTEGER DEFAULT 0,
-                        task_id INTEGER,
-                        locked_at TEXT
-                    );
+                with conn.cursor() as cursor:
+                    # Create tables if they don't exist
+                    cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS task_lock (
+                            id INTEGER PRIMARY KEY CHECK (id = 1),
+                            locked INTEGER DEFAULT 0,
+                            task_id INTEGER,
+                            locked_at TIMESTAMP
+                        )
+                    ''')
                     
-                    -- Ensure a single lock row exists
-                    INSERT OR IGNORE INTO task_lock (id, locked) VALUES (1, 0);
+                    # Ensure a single lock row exists
+                    cursor.execute('''
+                        INSERT INTO task_lock (id, locked) 
+                        VALUES (1, 0) 
+                        ON CONFLICT (id) DO NOTHING
+                    ''')
                     
-                    -- Create generators table if it doesn't exist
-                    CREATE TABLE IF NOT EXISTS generators (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        name TEXT NOT NULL,
-                        generator_curl TEXT NOT NULL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                ''')
-                
-                logger.info("Database initialized with optimized settings")
-        except sqlite3.Error as e:
+                    # Create generators table if it doesn't exist
+                    cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS generators (
+                            id SERIAL PRIMARY KEY,
+                            name TEXT NOT NULL,
+                            generator_curl TEXT NOT NULL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    ''')
+                    
+                    # Create utilities table
+                    cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS utilities (
+                            id SERIAL PRIMARY KEY,
+                            name TEXT NOT NULL,
+                            utility_curl TEXT NOT NULL,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    ''')
+                    
+                    # Create platforms table
+                    cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS platforms (
+                            id SERIAL PRIMARY KEY,
+                            name TEXT NOT NULL,
+                            uploader_curl TEXT NOT NULL,
+                            fallback_curl TEXT,
+                            fallback_curl_2 TEXT,
+                            default_hashtags TEXT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    ''')
+                    
+                    # Create tasks table
+                    cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS tasks (
+                            id SERIAL PRIMARY KEY,
+                            name TEXT NOT NULL,
+                            generator_id INTEGER,
+                            utilities TEXT,
+                            schedule TEXT NOT NULL,
+                            hashtags TEXT,
+                            sound_name TEXT,
+                            sound_volume TEXT DEFAULT 'background',
+                            status TEXT DEFAULT 'pending',
+                            email_notify TEXT,
+                            retry_count INTEGER DEFAULT 0,
+                            processing_status TEXT DEFAULT 'pending',
+                            processed_video_path TEXT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY(generator_id) REFERENCES generators(id)
+                        )
+                    ''')
+                    
+                    # Create task_platform_accounts junction table
+                    cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS task_platform_accounts (
+                            id SERIAL PRIMARY KEY,
+                            task_id INTEGER NOT NULL,
+                            platform_id INTEGER NOT NULL,
+                            account_name TEXT NOT NULL,
+                            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+                            FOREIGN KEY(platform_id) REFERENCES platforms(id) ON DELETE CASCADE
+                        )
+                    ''')
+                    
+                    # Create generated_videos table
+                    cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS generated_videos (
+                            id SERIAL PRIMARY KEY,
+                            task_id INTEGER NOT NULL,
+                            original_name TEXT NOT NULL,
+                            processed_path TEXT NOT NULL,
+                            scheduled_time TEXT NOT NULL,
+                            status TEXT DEFAULT 'pending',
+                            upload_status TEXT DEFAULT 'pending',
+                            error_message TEXT,
+                            retry_count INTEGER DEFAULT 0,
+                            generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            uploaded_at TIMESTAMP,
+                            FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
+                        )
+                    ''')
+                conn.commit()
+                logger.info("Database tables initialized successfully")
+        except Exception as e:
             logger.error(f"Database initialization error: {e}")
             raise
     
     def reset_db_locks(self):
         """Reset all database locks in case of deadlock"""
         try:
-            # Create a fresh connection for this operation to avoid using potentially closed connections
-            conn = self._create_connection()
-            conn.execute("""
-                UPDATE task_lock 
-                SET locked = 0, 
-                    task_id = NULL, 
-                    locked_at = NULL
-            """)
-            conn.commit()
-            conn.close()
+            with self.get_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        UPDATE task_lock 
+                        SET locked = 0, 
+                            task_id = NULL, 
+                            locked_at = NULL
+                    """)
+                conn.commit()
             logger.info("Database locks have been reset")
         except Exception as e:
             logger.error(f"Failed to reset database locks: {e}")
-
-    # fix_logs_table method removed as we're not using database logging anymore
-            
+    
     def vacuum_db(self):
         """Optimize database and reclaim space"""
         try:
-            # Create a fresh connection for this operation
-            conn = self._create_connection()
-            conn.execute("VACUUM")
-            conn.commit()
-            conn.close()
+            with self.get_connection() as conn:
+                # Set autocommit mode required for VACUUM
+                old_isolation = conn.isolation_level
+                conn.set_isolation_level(0)  # AUTOCOMMIT isolation level
+                
+                with conn.cursor() as cursor:
+                    cursor.execute("VACUUM ANALYZE")
+                
+                # Reset isolation level
+                conn.set_isolation_level(old_isolation)
             logger.info("Database vacuum completed")
         except Exception as e:
             logger.error(f"Failed to vacuum database: {e}")
 
-    def _get_connection_key(self) -> str:
-        """Get unique key for current thread"""
-        return f"thread_{threading.get_ident()}"
-
-    def _create_connection(self) -> sqlite3.Connection:
-        """Create a new database connection with optimized settings"""
-        db_path = get_db_path()
-        
-        # Ensure the database directory exists
-        db_dir = os.path.dirname(db_path)
-        if not os.path.exists(db_dir):
-            os.makedirs(db_dir)
-            
-        # Use a retry approach for creation to handle temporary lock issues
-        max_retries = 3
-        retry_delay = 0.5  # Start with 500ms delay
-        last_error = None
-        
-        for attempt in range(max_retries):
-            try:
-                conn = sqlite3.connect(
-                    db_path,
-                    timeout=5.0,  # 5-second connection timeout - shorter is better to fail fast
-                    isolation_level=None,  # Autocommit mode
-                    check_same_thread=False  # Allow cross-thread access
-                )
-                
-                # Enable WAL mode for this connection
-                conn.execute("PRAGMA journal_mode=WAL")
-                conn.execute("PRAGMA synchronous=NORMAL")
-                conn.execute("PRAGMA busy_timeout=5000")  # 5-second timeout - shorter to fail fast
-                conn.execute("PRAGMA temp_store=MEMORY")
-                conn.execute("PRAGMA cache_size=-64000")
-                
-                # Test connection health with a quick query
-                cursor = conn.cursor()
-                cursor.execute("SELECT 1")
-                result = cursor.fetchone()
-                if result is None or result[0] != 1:
-                    raise sqlite3.OperationalError("Connection health check failed")
-                
-                return conn
-            except sqlite3.OperationalError as e:
-                last_error = e
-                delay = retry_delay * (2 ** attempt)  # Exponential backoff
-                logger.warning(f"Database connection creation failed (attempt {attempt+1}/{max_retries}): {e}. Retrying in {delay:.2f}s")
-                time.sleep(delay)
-        
-        # If we got here, all attempts failed
-        error_msg = f"Failed to create database connection after {max_retries} attempts: {last_error}"
-        logger.error(error_msg)
-        raise sqlite3.OperationalError(error_msg)
-
     @contextlib.contextmanager
     def get_connection(self, max_retries: int = 5, initial_retry_delay: float = 0.1):
         """
-        Get a database connection with exponential backoff retry
+        Get a database connection from the pool with exponential backoff retry
         
         Args:
             max_retries: Maximum number of retry attempts
             initial_retry_delay: Initial delay between retries (doubles each attempt)
         """
-        conn_key = self._get_connection_key()
         conn = None
         last_error = None
         
         for attempt in range(max_retries):
             try:
-                # Check if connection exists and is valid
-                if conn_key in self._connection_pool:
+                # Get connection from pool
+                conn = self._connection_pool.getconn()
+                
+                # Verify connection is alive
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT 1")
+                    result = cursor.fetchone()
+                    if result is None or result[0] != 1:
+                        raise psycopg2.OperationalError("Connection health check failed")
+                
+                # Store thread ID to track this connection
+                conn.thread_id = threading.get_ident()
+                
+                try:
+                    yield conn
+                finally:
+                    # Return connection to the pool
                     try:
-                        # Test existing connection
-                        self._connection_pool[conn_key].cursor().execute("SELECT 1")
-                    except (sqlite3.ProgrammingError, sqlite3.OperationalError):
-                        # Connection is invalid, remove it from pool
-                        logger.warning(f"Detected invalid connection in pool. Creating new connection.")
-                        try:
-                            self._connection_pool[conn_key].close()
-                        except:
-                            pass
-                        del self._connection_pool[conn_key]
-                        if conn_key in self._in_transaction:
-                            del self._in_transaction[conn_key]
-                
-                # Create new connection if needed
-                if conn_key not in self._connection_pool:
-                    self._connection_pool[conn_key] = self._create_connection()
-                    self._in_transaction[conn_key] = False
-                
-                conn = self._connection_pool[conn_key]
-                
-                # Test connection
-                conn.cursor().execute("SELECT 1")
-                
-                # We will track transactions through the execute_transaction method instead
-                # of monkey-patching the connection object
-                
-                yield conn
+                        self._connection_pool.putconn(conn)
+                    except Exception as e:
+                        logger.error(f"Error returning connection to pool: {e}")
                 return
-                
-            except sqlite3.OperationalError as e:
+            
+            except psycopg2.OperationalError as e:
+                last_error = e
                 delay = initial_retry_delay * (2 ** attempt)  # Exponential backoff
+                logger.warning(f"Database connection error, attempt {attempt + 1}/{max_retries}. Retrying in {delay:.2f}s: {e}")
+                time.sleep(delay)
                 
-                if "database is locked" in str(e):
-                    logger.warning(f"Database locked, attempt {attempt + 1}/{max_retries}. Retrying in {delay:.2f}s")
-                    time.sleep(delay)
-                    last_error = e
-                    
-                    # On last attempt, try to reset locks
-                    if attempt == max_retries - 1:
-                        try:
-                            self.reset_db_locks()
-                        except:
-                            pass
-                    continue
-                    
-                logger.error(f"Database error on attempt {attempt + 1}: {e}")
-                # Force recreation of connection
-                if conn_key in self._connection_pool:
+                # On last attempt, try to reset locks
+                if attempt == max_retries - 1 and conn is not None:
                     try:
-                        self._connection_pool[conn_key].close()
+                        self.reset_db_locks()
                     except:
                         pass
-                    del self._connection_pool[conn_key]
-                    if conn_key in self._in_transaction:
-                        del self._in_transaction[conn_key]
-                raise
-                
+                        
+                # If we got a connection but it failed, return it to the pool
+                if conn is not None:
+                    try:
+                        self._connection_pool.putconn(conn, close=True)  # Force close this connection
+                    except:
+                        pass
+                    conn = None
+                        
             except Exception as e:
                 logger.error(f"Unexpected database error: {e}")
-                # Force recreation of connection
-                if conn_key in self._connection_pool:
+                # If we got a connection but it failed, return it to the pool
+                if conn is not None:
                     try:
-                        self._connection_pool[conn_key].close()
+                        self._connection_pool.putconn(conn, close=True)  # Force close this connection
                     except:
                         pass
-                    del self._connection_pool[conn_key]
-                    if conn_key in self._in_transaction:
-                        del self._in_transaction[conn_key]
                 raise
         
         if last_error:
             raise last_error
-        raise sqlite3.OperationalError("Failed to acquire database connection")
+        raise psycopg2.OperationalError("Failed to acquire database connection")
 
     def with_connection(self, f):
         """Decorator to handle database connections"""
@@ -267,54 +289,24 @@ class DatabaseManager:
         return wrapper
 
     def cleanup(self):
-        """Clean up all database connections"""
-        for conn_key, conn in self._connection_pool.items():
-            try:
-                # Check if transaction is active and try to rollback
-                if conn_key in self._in_transaction and self._in_transaction[conn_key]:
-                    try:
-                        conn.execute("ROLLBACK")
-                    except:
-                        pass
-                conn.close()
-            except:
-                pass
-        self._connection_pool.clear()
-        self._in_transaction.clear()
+        """Clean up database connection pool"""
+        if self._connection_pool is not None:
+            self._connection_pool.closeall()
+            logger.info("Database connection pool closed")
 
-    def checkpoint_wal(self):
-        """Force a WAL checkpoint to prevent the WAL file from growing too large"""
-        conn = None
-        try:
-            conn = self._create_connection()
-            conn.execute("PRAGMA wal_checkpoint(FULL)")
-            conn.close()
-            logger.info("WAL checkpoint completed successfully")
-        except Exception as e:
-            logger.error(f"WAL checkpoint failed: {e}")
-            if conn:
-                try:
-                    conn.close()
-                except:
-                    pass
-                    
     def begin_transaction(self, conn):
-        """Mark the connection as being in a transaction"""
-        conn_key = self._get_connection_key()
-        conn.execute("BEGIN IMMEDIATE")
-        self._in_transaction[conn_key] = True
+        """Begin a transaction"""
+        conn.autocommit = False
 
     def commit_transaction(self, conn):
-        """Commit the transaction and mark the connection as not in a transaction"""
-        conn_key = self._get_connection_key()
+        """Commit a transaction"""
         conn.commit()
-        self._in_transaction[conn_key] = False
+        conn.autocommit = True
 
     def rollback_transaction(self, conn):
-        """Rollback the transaction and mark the connection as not in a transaction"""
-        conn_key = self._get_connection_key()
+        """Rollback a transaction"""
         conn.rollback()
-        self._in_transaction[conn_key] = False
+        conn.autocommit = True
 
 # Create the singleton instance
 db = DatabaseManager.get_instance()

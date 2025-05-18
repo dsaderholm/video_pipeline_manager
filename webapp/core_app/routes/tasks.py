@@ -55,72 +55,71 @@ def validate_schedule(schedule):
 
 def get_video_details(video_id, conn):
     """Get detailed video information"""
-    c = conn.cursor()
-    c.execute("""
-        SELECT id, task_id, original_name, processed_path, scheduled_time, 
-               status, upload_status, error_message, retry_count, generated_at
-        FROM generated_videos
-        WHERE id = ?
-    """, (video_id,))
-    video = c.fetchone()
-    if not video:
-        return None
-        
-    return {
-        'id': video[0],
-        'task_id': video[1],
-        'original_name': video[2],
-        'processed_path': video[3],
-        'scheduled_time': localize_timestamp(video[4]),
-        'status': video[5],
-        'upload_status': video[6],
-        'error_message': video[7],
-        'retry_count': video[8],
-        'generated_at': localize_timestamp(video[9])
-    }
+    with conn.cursor() as c:
+        c.execute("""
+            SELECT id, task_id, original_name, processed_path, scheduled_time, 
+                status, upload_status, error_message, retry_count, generated_at
+            FROM generated_videos
+            WHERE id = %s
+        """, (video_id,))
+        video = c.fetchone()
+        if not video:
+            return None
+            
+        return {
+            'id': video[0],
+            'task_id': video[1],
+            'original_name': video[2],
+            'processed_path': video[3],
+            'scheduled_time': localize_timestamp(video[4]),
+            'status': video[5],
+            'upload_status': video[6],
+            'error_message': video[7],
+            'retry_count': video[8],
+            'generated_at': localize_timestamp(video[9])
+        }
 
 def get_task_details(task_id, conn):
     """Get detailed task information including platforms, utilities, and videos"""
-    c = conn.cursor()
-    
-    # Get basic task info with generator name
-    c.execute("""
-        SELECT t.*, g.name as generator_name
-        FROM tasks t
-        LEFT JOIN generators g ON t.generator_id = g.id
-        WHERE t.id = ?
-    """, (task_id,))
-    task = c.fetchone()
-    
-    if not task:
-        return None
+    with conn.cursor() as c:
+        # Get basic task info with generator name
+        c.execute("""
+            SELECT t.*, g.name as generator_name
+            FROM tasks t
+            LEFT JOIN generators g ON t.generator_id = g.id
+            WHERE t.id = %s
+        """, (task_id,))
+        task = c.fetchone()
         
-    # Get utilities
-    utilities = []
-    if task[3]:  # utilities column
-        utility_ids = json.loads(task[3])
-        if utility_ids:
-            placeholders = ','.join('?' * len(utility_ids))
-            c.execute(f"SELECT id, name FROM utilities WHERE id IN ({placeholders})", utility_ids)
-            utilities = [{'id': u[0], 'name': u[1]} for u in c.fetchall()]
+        if not task:
+            return None
+            
+        # Get utilities
+        utilities = []
+        if task[3]:  # utilities column
+            utility_ids = json.loads(task[3])
+            if utility_ids:
+                placeholders = ', '.join(['%s'] * len(utility_ids))
+                c.execute(f"SELECT id, name FROM utilities WHERE id IN ({placeholders})", utility_ids)
+                utilities = [{'id': u[0], 'name': u[1]} for u in c.fetchall()]
 
-    # Get platforms with account names
-    c.execute("""
-        SELECT p.id, p.name, p.uploader_curl, p.fallback_curl, p.fallback_curl_2,
-               p.default_hashtags, tpa.account_name
-        FROM platforms p
-        JOIN task_platform_accounts tpa ON p.id = tpa.platform_id
-        WHERE tpa.task_id = ?
-    """, (task_id,))
-    platforms = c.fetchall()
+        # Get platforms with account names
+        c.execute("""
+            SELECT p.id, p.name, p.uploader_curl, p.fallback_curl, p.fallback_curl_2,
+                p.default_hashtags, tpa.account_name
+            FROM platforms p
+            JOIN task_platform_accounts tpa ON p.id = tpa.platform_id
+            WHERE tpa.task_id = %s
+        """, (task_id,))
+        platforms = c.fetchall()
 
-    # Get generated videos
-    c.execute("""
-        SELECT id FROM generated_videos 
-        WHERE task_id = ? 
-        ORDER BY scheduled_time DESC
-    """, (task_id,))
-    video_ids = [row[0] for row in c.fetchall()]
+        # Get generated videos
+        c.execute("""
+            SELECT id FROM generated_videos 
+            WHERE task_id = %s 
+            ORDER BY scheduled_time DESC
+        """, (task_id,))
+        video_ids = [row[0] for row in c.fetchall()]
     videos = []
     for vid_id in video_ids:
         video_detail = get_video_details(vid_id, conn)
@@ -159,43 +158,41 @@ def get_task_details(task_id, conn):
 def get_tasks():
     with db.get_connection() as conn:
         tasks = []
-        c = conn.cursor()
-        
-        c.execute("""
-            SELECT t.*, g.name as generator_name
-            FROM tasks t
-            LEFT JOIN generators g ON t.generator_id = g.id
-            ORDER BY t.created_at DESC
-        """)
-        task_rows = c.fetchall()
-        
-        for task in task_rows:
-            task_detail = get_task_details(task[0], conn)
-            if task_detail:
-                tasks.append(task_detail)
-                
-        return jsonify(tasks)
+        with conn.cursor() as c:
+            c.execute("""
+                SELECT t.*, g.name as generator_name
+                FROM tasks t
+                LEFT JOIN generators g ON t.generator_id = g.id
+                ORDER BY t.created_at DESC
+            """)
+            task_rows = c.fetchall()
+            
+            for task in task_rows:
+                task_detail = get_task_details(task[0], conn)
+                if task_detail:
+                    tasks.append(task_detail)
+                    
+            return jsonify(tasks)
 
 @tasks_bp.route('/api/tasks/<int:id>/videos', methods=['GET'])
 def get_task_videos(id):
     """Get all videos for a specific task"""
     with db.get_connection() as conn:
-        c = conn.cursor()
-        
-        c.execute("""
-            SELECT id FROM generated_videos 
-            WHERE task_id = ? 
-            ORDER BY scheduled_time DESC
-        """, (id,))
-        video_ids = [row[0] for row in c.fetchall()]
-        
-        videos = []
-        for vid_id in video_ids:
-            video_detail = get_video_details(vid_id, conn)
-            if video_detail:
-                videos.append(video_detail)
-                
-        return jsonify(videos)
+        with conn.cursor() as c:
+            c.execute("""
+                SELECT id FROM generated_videos 
+                WHERE task_id = %s 
+                ORDER BY scheduled_time DESC
+            """, (id,))
+            video_ids = [row[0] for row in c.fetchall()]
+            
+            videos = []
+            for vid_id in video_ids:
+                video_detail = get_video_details(vid_id, conn)
+                if video_detail:
+                    videos.append(video_detail)
+                    
+            return jsonify(videos)
 
 @tasks_bp.route('/api/tasks/<int:id>/videos/<int:video_id>', methods=['GET'])
 def get_task_video(id, video_id):
@@ -211,81 +208,80 @@ def retry_with_backoff(task_id, video_id=None):
     scheduler = current_app.scheduler
     
     with db.get_connection() as conn:
-        c = conn.cursor()
-        
-        if video_id:
-            # Retry specific video
-            c.execute("SELECT retry_count FROM generated_videos WHERE id = ?", (video_id,))
-            result = c.fetchone()
-            retry_count = result[0] if result and result[0] is not None else 0
-            
-            if retry_count >= 3:
+        with conn.cursor() as c:
+            if video_id:
+                # Retry specific video
+                c.execute("SELECT retry_count FROM generated_videos WHERE id = %s", (video_id,))
+                result = c.fetchone()
+                retry_count = result[0] if result and result[0] is not None else 0
+                
+                if retry_count >= 3:
+                    c.execute("""
+                        UPDATE generated_videos 
+                        SET status = 'failed', 
+                            upload_status = 'failed',
+                            retry_count = 0
+                        WHERE id = %s
+                    """, (video_id,))
+                    conn.commit()
+                    return
+                    
+                delay = 60 * (2 ** retry_count)
+                next_run = datetime.now() + timedelta(seconds=delay)
+                
+                from webapp.core_app.core.pipeline import process_video_upload
+                scheduler.add_job(
+                    func=process_video_upload,
+                    trigger='date',
+                    run_date=next_run,
+                    args=[task_id, video_id],
+                    id=f'retry_video_{video_id}_{next_run.timestamp()}'
+                )
+                
                 c.execute("""
                     UPDATE generated_videos 
-                    SET status = 'failed', 
-                        upload_status = 'failed',
-                        retry_count = 0
-                    WHERE id = ?
-                """, (video_id,))
-                conn.commit()
-                return
+                    SET retry_count = %s,
+                        status = 'retrying',
+                        upload_status = 'pending'
+                    WHERE id = %s
+                """, (retry_count + 1, video_id))
                 
-            delay = 60 * (2 ** retry_count)
-            next_run = datetime.now() + timedelta(seconds=delay)
-            
-            from webapp.core_app.core.pipeline import process_video_upload
-            scheduler.add_job(
-                func=process_video_upload,
-                trigger='date',
-                run_date=next_run,
-                args=[task_id, video_id],
-                id=f'retry_video_{video_id}_{next_run.timestamp()}'
-            )
-            
-            c.execute("""
-                UPDATE generated_videos 
-                SET retry_count = ?,
-                    status = 'retrying',
-                    upload_status = 'pending'
-                WHERE id = ?
-            """, (retry_count + 1, video_id))
-            
-        else:
-            # Retry entire task
-            c.execute("SELECT retry_count FROM tasks WHERE id = ?", (task_id,))
-            result = c.fetchone()
-            retry_count = result[0] if result and result[0] is not None else 0
-            
-            if retry_count >= 3:
+            else:
+                # Retry entire task
+                c.execute("SELECT retry_count FROM tasks WHERE id = %s", (task_id,))
+                result = c.fetchone()
+                retry_count = result[0] if result and result[0] is not None else 0
+                
+                if retry_count >= 3:
+                    c.execute("""
+                        UPDATE tasks 
+                        SET status = 'failed', 
+                            retry_count = 0,
+                            processing_status = 'failed'
+                        WHERE id = %s
+                    """, (task_id,))
+                    conn.commit()
+                    return
+                
+                delay = 60 * (2 ** retry_count)
+                next_run = datetime.now() + timedelta(seconds=delay)
+                
+                from webapp.core_app.core.pipeline import process_video_pipeline
+                scheduler.add_job(
+                    func=process_video_pipeline,
+                    trigger='date',
+                    run_date=next_run,
+                    args=[task_id],
+                    id=f'retry_task_{task_id}_{next_run.timestamp()}'
+                )
+                
                 c.execute("""
                     UPDATE tasks 
-                    SET status = 'failed', 
-                        retry_count = 0,
-                        processing_status = 'failed'
-                    WHERE id = ?
-                """, (task_id,))
-                conn.commit()
-                return
-            
-            delay = 60 * (2 ** retry_count)
-            next_run = datetime.now() + timedelta(seconds=delay)
-            
-            from webapp.core_app.core.pipeline import process_video_pipeline
-            scheduler.add_job(
-                func=process_video_pipeline,
-                trigger='date',
-                run_date=next_run,
-                args=[task_id],
-                id=f'retry_task_{task_id}_{next_run.timestamp()}'
-            )
-            
-            c.execute("""
-                UPDATE tasks 
-                SET retry_count = ?,
-                    status = 'retrying',
-                    processing_status = 'pending'
-                WHERE id = ?
-            """, (retry_count + 1, task_id))
+                    SET retry_count = %s,
+                        status = 'retrying',
+                        processing_status = 'pending'
+                    WHERE id = %s
+                """, (retry_count + 1, task_id))
             
         conn.commit()
 
@@ -348,28 +344,28 @@ def create_task():
     
     with db.get_connection() as conn:
         try:
-            conn.execute('BEGIN')
-            c = conn.cursor()
-            
-            # Insert the main task
-            utilities_json = json.dumps(data.get('utilities', []))
-            c.execute('''INSERT INTO tasks 
-                        (name, generator_id, utilities, schedule, 
-                         hashtags, sound_name, sound_volume, email_notify, retry_count,
-                         processing_status)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending')''',
-                     (data['name'], data['generator_id'], utilities_json,
-                      data['schedule'], data.get('hashtags'),
-                      data.get('sound_name'), data.get('sound_volume', 'background'),
-                      data.get('email_notify')))
-            task_id = c.lastrowid
-            
-            # Insert platform associations
-            for platform in data.get('platforms', []):
-                c.execute('''INSERT INTO task_platform_accounts 
-                            (task_id, platform_id, account_name)
-                            VALUES (?, ?, ?)''',
-                         (task_id, platform['id'], platform['account_name']))
+            # Begin transaction
+            with conn.cursor() as c:
+                # Insert the main task
+                utilities_json = json.dumps(data.get('utilities', []))
+                c.execute('''INSERT INTO tasks 
+                            (name, generator_id, utilities, schedule, 
+                             hashtags, sound_name, sound_volume, email_notify, retry_count,
+                             processing_status)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0, 'pending')
+                            RETURNING id''',
+                         (data['name'], data['generator_id'], utilities_json,
+                          data['schedule'], data.get('hashtags'),
+                          data.get('sound_name'), data.get('sound_volume', 'background'),
+                          data.get('email_notify')))
+                task_id = c.fetchone()[0]
+                
+                # Insert platform associations
+                for platform in data.get('platforms', []):
+                    c.execute('''INSERT INTO task_platform_accounts 
+                                (task_id, platform_id, account_name)
+                                VALUES (%s, %s, %s)''',
+                             (task_id, platform['id'], platform['account_name']))
             
             # Add night processing schedule - runs at configured start time every night
             night_job_id = f'task_{task_id}_night_processing'
@@ -463,7 +459,7 @@ def delete_task(id):
             c = conn.cursor()
             
             # Remove scheduled jobs
-            c.execute('SELECT schedule FROM tasks WHERE id = ?', (id,))
+            c.execute('SELECT schedule FROM tasks WHERE id = %s', (id,))
             task = c.fetchone()
             if task and task[0]:
                 day_schedules = task[0].split(';')
@@ -498,7 +494,7 @@ def delete_task(id):
             # Delete generated videos
             c.execute("""
                 SELECT processed_path FROM generated_videos
-                WHERE task_id = ?
+                WHERE task_id = %s
             """, (id,))
             video_paths = [row[0] for row in c.fetchall()]
             
@@ -510,11 +506,11 @@ def delete_task(id):
                         logger.warning(f"Failed to delete video file {path}: {e}")
             
             # Delete task platform associations and videos (will cascade)
-            c.execute('DELETE FROM task_platform_accounts WHERE task_id = ?', (id,))
-            c.execute('DELETE FROM generated_videos WHERE task_id = ?', (id,))
+            c.execute('DELETE FROM task_platform_accounts WHERE task_id = %s', (id,))
+            c.execute('DELETE FROM generated_videos WHERE task_id = %s', (id,))
             
             # Delete the task
-            c.execute('DELETE FROM tasks WHERE id = ?', (id,))
+            c.execute('DELETE FROM tasks WHERE id = %s', (id,))
             
             conn.commit()
             return jsonify({'success': True})
@@ -533,7 +529,7 @@ def run_task(id):
         # First verify task exists and is not already running
         with db.get_connection() as conn:
             c = conn.cursor()
-            c.execute("SELECT id, status FROM tasks WHERE id = ?", (id,))
+            c.execute("SELECT id, status FROM tasks WHERE id = %s", (id,))
             task = c.fetchone()
             if not task:
                 return jsonify({
@@ -550,7 +546,7 @@ def run_task(id):
                 WHERE id = 1 
                 AND (
                     locked_at IS NULL 
-                    OR datetime(locked_at, '+5 minutes') < datetime('now')
+                    OR locked_at + interval '5 minutes' < now()
                 )
             """)
             
@@ -602,7 +598,7 @@ def preview_task(id):
             conn.execute("BEGIN IMMEDIATE")
             
             # Now check this specific task - within transaction
-            c.execute("SELECT id, status, processing_status FROM tasks WHERE id = ?", (id,))
+            c.execute("SELECT id, status, processing_status FROM tasks WHERE id = %s", (id,))
             task = c.fetchone()
             
             if not task:
@@ -643,7 +639,7 @@ def preview_task(id):
                 UPDATE tasks 
                 SET status = 'previewing',
                     processing_status = 'pending'
-                WHERE id = ?
+                WHERE id = %s
             """, (id,))
             
             # Commit transaction
@@ -680,7 +676,7 @@ def preview_task(id):
                         UPDATE tasks 
                         SET status = 'completed',
                             processing_status = 'completed'
-                        WHERE id = ?
+                        WHERE id = %s
                     """, (id,))
                     conn.commit()
                     
@@ -701,7 +697,7 @@ def preview_task(id):
                 UPDATE tasks 
                 SET status = 'failed',
                     processing_status = 'failed'
-                WHERE id = ?
+                WHERE id = %s
             """, (id,))
             conn.commit()
             
@@ -773,7 +769,7 @@ def generate_task(id):
         
         with db.get_connection() as conn:
             c = conn.cursor()
-            c.execute("SELECT id, status, processing_status, schedule FROM tasks WHERE id = ?", (id,))
+            c.execute("SELECT id, status, processing_status, schedule FROM tasks WHERE id = %s", (id,))
             task = c.fetchone()
             
             if not task:
@@ -845,7 +841,7 @@ def upload_video(id, video_id):
                        t.status as task_status
                 FROM generated_videos v
                 JOIN tasks t ON v.task_id = t.id
-                WHERE v.task_id = ? AND v.id = ?
+                WHERE v.task_id = %s AND v.id = %s
             """, (id, video_id))
             video = c.fetchone()
             
@@ -923,7 +919,7 @@ def upload_task(id):
         with db.get_connection() as conn:
             c = conn.cursor()
             c.execute("""
-                SELECT id, status FROM tasks WHERE id = ?
+                SELECT id, status FROM tasks WHERE id = %s
             """, (id,))
             task = c.fetchone()
             
@@ -943,7 +939,7 @@ def upload_task(id):
             c.execute("""
                 SELECT id, original_name, processed_path, scheduled_time
                 FROM generated_videos
-                WHERE task_id = ? 
+                WHERE task_id = %s 
                 AND upload_status = 'pending'
                 AND processed_path IS NOT NULL
                 ORDER BY scheduled_time ASC
@@ -1009,7 +1005,7 @@ def get_night_processing_status():
                 FROM tasks 
                 WHERE status != 'failed'
                 AND processing_status != 'failed'
-                AND schedule LIKE ?
+                AND schedule LIKE %s
             """, (f'%{tomorrow_day}|%',))
             
             tasks = c.fetchall()

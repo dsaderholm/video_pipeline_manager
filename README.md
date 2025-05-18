@@ -31,7 +31,19 @@ A lightweight video pipeline management system for automating video creation, pr
    ```bash
    docker-compose up --build
    ```
-3. Access the web interface at http://localhost:5000
+3. Access the web interface at http://localhost:5898
+
+## PostgreSQL Migration
+
+This version uses PostgreSQL instead of SQLite for better concurrency and reliability:
+
+1. The application now uses a PostgreSQL database instead of SQLite
+2. The system handles multiple concurrent operations without database locking issues
+3. Configuration is managed through the `DATABASE_URL` environment variable
+4. Data is stored in a persistent Docker volume named `postgres_data`
+5. Initial database setup is handled automatically on container start
+
+No data migration is required as per your instructions. The system will create a fresh database.
 
 ## Usage
 
@@ -54,6 +66,7 @@ A lightweight video pipeline management system for automating video creation, pr
 ## Environment Variables
 
 Copy `.env.example` to `.env` and configure:
+- DATABASE_URL: PostgreSQL connection string (default: postgresql://postgres:postgres@db:5432/video_pipeline)
 - SMTP settings for notifications
 - Application configuration
 - Upload folder path
