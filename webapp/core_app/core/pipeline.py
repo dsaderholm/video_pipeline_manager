@@ -22,7 +22,8 @@ from webapp.core_app.core.utils import execute_curl, get_latest_video, cleanup_v
 from webapp.core_app.core.database import db
 from flask import current_app
 
-# Global lock for thread safety (keep this as it's different from database locking)
+# PostgreSQL handles concurrency well, so we don't need the global thread lock anymore
+# The db_lock variable is kept for backward compatibility but should not be used
 db_lock = threading.Lock()
 
 def check_connection_health(conn):
@@ -137,85 +138,84 @@ def safe_rollback(conn, cursor=None):
 #     return db_get_path()
 
 def force_release_lock():
-    """Force release any existing lock regardless of owner"""
+    """Simplified force lock release function for PostgreSQL.
+    
+    With PostgreSQL's row-level locking, we can use a simple approach.
+    """
     try:
-        # Get a connection from the pool
         with db.get_connection() as conn:
+            conn.autocommit = True
+            
             with conn.cursor() as c:
-                # Clear the lock completely
                 c.execute("""
                     UPDATE task_lock 
                     SET locked = 0, 
                         task_id = NULL, 
                         locked_at = NULL 
                     WHERE id = 1
+                    RETURNING id
                 """)
-                conn.commit()
-        
-        logger.info("Force-released database lock")
+                
+                result = c.fetchone()
+                if result:
+                    logger.info("Force-released database lock")
+                    return True
+                else:
+                    logger.info("No lock needed to be force-released")
+                    return True
+                
         return True
     except Exception as e:
         logger.error(f"Failed to force-release lock: {str(e)}")
         return False
 
 def check_and_set_lock(task_id=None):
-    """More aggressive lock mechanism with timeouts to prevent deadlocks"""
+    """Simplified lock mechanism for PostgreSQL.
+    
+    With PostgreSQL's row-level locking, we don't need as complex locking mechanism as with SQLite.
+    This uses PostgreSQL's built-in support for concurrent transactions with row locking.
+    """
     lock_details = {
         'operation': 'check_and_set',
         'timestamp': datetime.now().isoformat(),
         'task_id': task_id
     }
 
-    # First check if another process has the global lock 
-    if db_lock.locked() and not db_lock.acquire(False):
-        log_with_task_details(
-            'INFO',
-            "Thread lock already held by another process, skipping operation",
-            task_id=task_id,
-            details=lock_details
-        )
-        return False
-
-    try:  # OUTERMOST try
-        try:
-            with db.get_connection() as conn:
-                # Start transaction to prevent race conditions
-                conn.autocommit = False
+    try:
+        with db.get_connection() as conn:
+            # Ensure we're using autocommit mode to avoid transaction issues
+            conn.autocommit = True
+            
+            with conn.cursor() as c:
+                # First try to update if the lock isn't held by anyone
+                c.execute("""
+                    UPDATE task_lock
+                    SET locked = 1, task_id = %s, locked_at = now()
+                    WHERE id = 1 AND locked = 0
+                    RETURNING id
+                """, (task_id,))
                 
-                if not check_connection_health(conn):
+                result = c.fetchone()
+                if result:
+                    # We successfully acquired the lock
                     log_with_task_details(
-                        'ERROR',
-                        "Failed to create a healthy database connection for lock check",
+                        'INFO',
+                        "Successfully acquired pipeline lock",
                         task_id=task_id,
                         details=lock_details
                     )
-                    return False
-
-                with conn.cursor() as c:
-                    c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
-                    current_lock = c.fetchone()
-
-                    if not current_lock:
-                        c.execute("""
-                            INSERT INTO task_lock (id, locked, task_id, locked_at)
-                            VALUES (1, 1, %s, now())
-                        """, (task_id,))
-                        conn.commit()
-                        return True
-
-                    lock_details['current_lock'] = {
-                        'locked': current_lock[0],
-                        'task_id': current_lock[1],
-                        'locked_at': current_lock[2]
-                    }
-
-                    if current_lock[0] == 1 and current_lock[1] == task_id and task_id is not None:
+                    return True
+                
+                # If we didn't get the lock, check if we already hold it
+                if task_id is not None:
+                    c.execute("SELECT task_id FROM task_lock WHERE id = 1 AND locked = 1 AND task_id = %s", (task_id,))
+                    if c.fetchone():
+                        # We already hold the lock
                         c.execute("""
                             UPDATE task_lock
                             SET locked_at = now()
                             WHERE id = 1
                         """)
-                        conn.commit()
                         log_with_task_details(
                             'INFO',
                             "Task already holds the lock, returning success",
@@ -223,189 +223,107 @@ def check_and_set_lock(task_id=None):
                             details=lock_details
                         )
                         return True
-
-                    # Clear stale lock
-                    is_stale = False
-                    if current_lock[0] == 1:
-                        if current_lock[2] is None:
-                            is_stale = True
-                        else:
-                            try:
-                                lock_time = current_lock[2]
-                                if isinstance(lock_time, str):
-                                    lock_time = datetime.fromisoformat(lock_time)
-                                now = datetime.now()
-                                is_stale = (now - lock_time).total_seconds() > 900
-                            except (ValueError, TypeError):
-                                is_stale = True
-
-                    if is_stale:
-                        c.execute("""
-                            UPDATE task_lock
-                            SET locked = 0, task_id = NULL, locked_at = NULL
-                            WHERE id = 1
-                        """)
-                        lock_details['stale_lock_cleared'] = True
-                        log_with_task_details(
-                            'WARNING',
-                            f"Cleared stale lock held by task {current_lock[1]}",
-                            task_id=task_id,
-                            details=lock_details
-                        )
-
-                    # Try to acquire lock
+                
+                # Check for stale locks (older than 15 minutes)
+                c.execute("""
+                    UPDATE task_lock
+                    SET locked = 0, task_id = NULL, locked_at = NULL
+                    WHERE id = 1 AND locked = 1 AND locked_at < now() - interval '15 minutes'
+                    RETURNING id
+                """)
+                
+                if c.fetchone():
+                    # Stale lock was cleared, try to acquire it now
                     c.execute("""
                         UPDATE task_lock
                         SET locked = 1, task_id = %s, locked_at = now()
                         WHERE id = 1 AND locked = 0
+                        RETURNING id
                     """, (task_id,))
-                    acquired = c.rowcount > 0
-
-                    conn.commit()
-
-                    if acquired:
+                    
+                    if c.fetchone():
                         log_with_task_details(
                             'INFO',
-                            "Successfully acquired pipeline lock",
+                            "Acquired lock after clearing stale lock",
                             task_id=task_id,
                             details=lock_details
                         )
-                    else:
-                        log_with_task_details(
-                            'INFO',
-                            f"Could not acquire lock - currently held by task {current_lock[1]}",
-                            task_id=task_id,
-                            details=lock_details
-                        )
-
-                    return acquired
-
-        except Exception as e:
-            log_with_task_details(
-                'ERROR',
-                f"Error managing pipeline lock: {str(e)}",
-                task_id=task_id,
-                details={**lock_details, 'error': str(e)}
-            )
-            return False
-
-        finally:
-            if db_lock.locked():
-                try:
-                    db_lock.release()
-                except:
-                    pass
+                        return True
+                
+                # Get info about who holds the lock for logging
+                c.execute("SELECT task_id, locked_at FROM task_lock WHERE id = 1")
+                current_lock = c.fetchone()
+                if current_lock:
+                    log_with_task_details(
+                        'INFO',
+                        f"Could not acquire lock - currently held by task {current_lock[0]}",
+                        task_id=task_id,
+                        details={
+                            **lock_details,
+                            'current_holder': current_lock[0],
+                            'locked_since': current_lock[1].isoformat() if current_lock[1] else None
+                        }
+                    )
+                
+                return False
 
     except Exception as e:
-        logger.error(f"Outer error in check_and_set_lock: {str(e)}")
+        log_with_task_details(
+            'ERROR',
+            f"Error managing pipeline lock: {str(e)}",
+            task_id=task_id,
+            details={'error': str(e), **lock_details}
+        )
         return False
 
 def release_lock(task_id=None):
-    """Release the task lock with improved thread handling"""
-    release_details = {
-        'operation': 'release',
-        'timestamp': datetime.now().isoformat(),
-        'task_id': task_id
-    }
+    """Simplified release lock function for PostgreSQL.
     
-    # First check if we hold the thread lock
-    thread_lock_held = db_lock.locked()
-    release_details['thread_lock_held'] = thread_lock_held
-    
-    try:  # We'll release the thread lock in finally if needed
-        try:
-            # Use PostgreSQL's connection pool
-            with db.get_connection() as conn:
-                with conn.cursor() as c:
-                    # Start transaction
-                    conn.autocommit = False
-                    
-                    # Get current lock status before release
-                    c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
-                    current_lock = c.fetchone()
-                    release_details['before_release'] = {
-                        'locked': current_lock[0] if current_lock else None,
-                        'task_id': current_lock[1] if current_lock else None,
-                        'locked_at': current_lock[2] if current_lock else None
-                    }
-                    
-                    # Only release if we own the lock
-                    if task_id:
-                        c.execute("""
-                            UPDATE task_lock 
-                            SET locked = 0, 
-                                task_id = NULL, 
-                                locked_at = NULL 
-                            WHERE id = 1 
-                            AND task_id = %s
-                        """, (task_id,))
-                    else:
-                        # Force release if no task_id provided
-                        c.execute("""
-                            UPDATE task_lock 
-                            SET locked = 0, 
-                                task_id = NULL, 
-                                locked_at = NULL 
-                            WHERE id = 1
-                        """)
-                    released = c.rowcount > 0
-                    
-                    release_details['released'] = released
-                    
-                    # Get final lock status
-                    c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
-                    final_lock = c.fetchone()
-                    release_details['after_release'] = {
-                        'locked': final_lock[0] if final_lock else None,
-                        'task_id': final_lock[1] if final_lock else None,
-                        'locked_at': final_lock[2] if final_lock else None
-                    }
-                    
-                    # Commit the transaction
-                    conn.commit()
+    With PostgreSQL, we don't need the complex locking mechanism that was required for SQLite.
+    """
+    try:
+        with db.get_connection() as conn:
+            # Use autocommit mode for simplicity
+            conn.autocommit = True
             
-            if released:
-                log_with_task_details('INFO', 
-                    "Successfully released pipeline lock",
-                    task_id=task_id,
-                    details=release_details)
-            else:
-                log_with_task_details('DEBUG', 
-                    "No lock needed to be released",
-                    task_id=task_id,
-                    details=release_details)
-            
-            return released
+            with conn.cursor() as c:
+                # Only release if we own the lock or force release
+                if task_id:
+                    c.execute("""
+                        UPDATE task_lock 
+                        SET locked = 0, 
+                            task_id = NULL, 
+                            locked_at = NULL 
+                        WHERE id = 1 
+                        AND task_id = %s
+                        RETURNING id
+                    """, (task_id,))
+                else:
+                    # Force release if no task_id provided
+                    c.execute("""
+                        UPDATE task_lock 
+                        SET locked = 0, 
+                            task_id = NULL, 
+                            locked_at = NULL 
+                        WHERE id = 1
+                        RETURNING id
+                    """)
                 
-        except Exception as e:
-            release_details['error'] = str(e)
-            log_with_task_details('ERROR', 
-                f"Error releasing pipeline lock: {str(e)}", 
-                task_id=task_id,
-                details=release_details)
-            
-            # Try force release as last resort
-            try:
-                force_release_lock()
-            except Exception as force_error:
-                release_details['force_release_error'] = str(force_error)
-                log_with_task_details('ERROR', 
-                    f"Force release also failed: {str(force_error)}", 
-                    task_id=task_id,
-                    details=release_details)
+                result = c.fetchone()
+                released = result is not None
+                
+                if released:
+                    logger.info(f"Released lock for task {task_id if task_id else 'all tasks'}")
+                return released
+                
+    except Exception as e:
+        logger.error(f"Error releasing pipeline lock: {str(e)}")
+        # Try force release as last resort
+        try:
+            return force_release_lock()
+        except Exception as force_error:
+            logger.error(f"Force release also failed: {str(force_error)}")
             return False
-    finally:
-        # Always release the thread lock if we're holding it
-        if thread_lock_held:
-            try:
-                db_lock.release()
-                log_with_task_details('INFO', 
-                    "Released thread lock",
-                    task_id=task_id)
-            except Exception as e:
-                log_with_task_details('ERROR', 
-                    f"Failed to release thread lock: {str(e)}", 
-                    task_id=task_id)
 
 def update_task_status(task_id, status, processing_status=None, video_path=None, conn=None):
     """Update task status and processing details"""
