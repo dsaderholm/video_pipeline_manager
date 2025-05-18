@@ -1718,7 +1718,11 @@ def _check_for_missed_processing(force_process=False):
             return
             
         try:
+            # Create a new dedicated connection with autocommit mode
             with db.get_connection() as conn:
+                # Set autocommit mode BEFORE any other operations
+                conn.autocommit = True
+                
                 c = conn.cursor()
                 
                 # Find all tasks that should have run yesterday
