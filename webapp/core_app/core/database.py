@@ -232,8 +232,9 @@ class DatabaseManager:
                     if result is None or result[0] != 1:
                         raise psycopg2.OperationalError("Connection health check failed")
                 
-                # Store thread ID to track this connection
-                conn.thread_id = threading.get_ident()
+                # Store thread ID to track this connection in thread-local storage
+                self._local.thread_id = threading.get_ident()
+                self._local.connection = conn
                 
                 try:
                     yield conn
@@ -241,6 +242,9 @@ class DatabaseManager:
                     # Return connection to the pool
                     try:
                         self._connection_pool.putconn(conn)
+                        # Clear thread-local storage
+                        if hasattr(self._local, 'connection'):
+                            self._local.connection = None
                     except Exception as e:
                         logger.error(f"Error returning connection to pool: {e}")
                 return
@@ -262,6 +266,9 @@ class DatabaseManager:
                 if conn is not None:
                     try:
                         self._connection_pool.putconn(conn, close=True)  # Force close this connection
+                        # Clear thread-local storage
+                        if hasattr(self._local, 'connection'):
+                            self._local.connection = None
                     except:
                         pass
                     conn = None
@@ -272,6 +279,9 @@ class DatabaseManager:
                 if conn is not None:
                     try:
                         self._connection_pool.putconn(conn, close=True)  # Force close this connection
+                        # Clear thread-local storage
+                        if hasattr(self._local, 'connection'):
+                            self._local.connection = None
                     except:
                         pass
                 raise

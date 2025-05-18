@@ -3,6 +3,12 @@
 # This will run inside the web container to check if it can connect to PostgreSQL
 # and initialize the database if needed
 
+# Set PostgreSQL environment variables
+export PGUSER=postgres
+export PGPASSWORD=postgres
+export PGHOST=db
+export PGPORT=5432
+
 # Wait for PostgreSQL to be ready
 echo "Waiting for PostgreSQL to start..."
 MAX_ATTEMPTS=30
