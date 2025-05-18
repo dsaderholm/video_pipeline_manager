@@ -38,7 +38,7 @@ services:
       - "5433:5432"
     networks:
       video_generation:
-        ipv4_address: 10.20.0.15
+        ipv4_address: 10.20.0.9
     restart: unless-stopped
 
 networks:
