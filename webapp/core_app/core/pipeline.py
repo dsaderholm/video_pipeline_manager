@@ -1,4 +1,15 @@
-import json
+def cleanup_files(files_to_cleanup):
+    """Clean up temporary files used during video processing"""
+    if not files_to_cleanup:
+        return
+        
+    for file_path in files_to_cleanup:
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+                logger.debug(f"Cleaned up temporary file: {file_path}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temporary file {file_path}: {str(e)}")import json
 import time
 import os
 import sys
@@ -1508,7 +1519,7 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
                     details={'error': str(e)})
 
 def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, parent_has_lock=False):
-    """Main pipeline process that coordinates generation and upload"""
+    """Main pipeline process that coordinates generation and upload with improved connection handling"""
     pipeline_details = {
         'task_id': task_id,
         'mode': 'preview' if preview_mode else 'normal',
@@ -1522,14 +1533,38 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, pare
         details=pipeline_details)
     
     # Don't update status or acquire lock for previews
-    if not preview_mode:
-        update_task_status(task_id, 'running', 'pending')
+    try:
+        # Use a direct connection outside the pool for status update
+        # This avoids connection sharing/pooling issues
+        status_conn = db.create_connection()
+        status_conn.autocommit = True
+        
+        try:
+            with status_conn.cursor() as status_cursor:
+                if not preview_mode:
+                    status_cursor.execute("UPDATE tasks SET status = %s, processing_status = %s WHERE id = %s", 
+                                     ('running', 'pending', task_id))
+        finally:
+            status_conn.close()
+    except Exception as status_e:
+        log_with_task_details('WARNING', 
+            f"Failed to update initial status: {str(status_e)}",
+            task_id=task_id,
+            details={'error': str(status_e)})
     
     lock_acquired = False
     try:
         # Lock handling - only try to acquire if parent doesn't already have it
         if not preview_mode and not parent_has_lock:
-            lock_acquired = check_and_set_lock(task_id)
+            # Retry lock acquisition up to 3 times with a delay
+            for attempt in range(3):
+                lock_acquired = check_and_set_lock(task_id)
+                if lock_acquired:
+                    break
+                    
+                if attempt < 2:  # Don't sleep on the last attempt
+                    time.sleep(5 * (attempt + 1))  # Exponential backoff: 5s, 10s
+                    
             if not lock_acquired:
                 log_with_task_details('INFO', 
                     "Another task is currently running. Task will retry later.",
@@ -1537,7 +1572,12 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, pare
                     details=pipeline_details)
                 return None
         
-        with db.get_connection() as conn:
+        # Create a dedicated connection for this pipeline run
+        # Using direct connection instead of pool to avoid connection sharing issues
+        pipeline_conn = db.create_connection()
+        pipeline_conn.autocommit = True
+        
+        try:
             # Night processing check
             if not preview_mode and not should_process_at_night():
                 # Only proceed if this is a manual run
@@ -1554,7 +1594,7 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, pare
                     task_id, 
                     schedule_time, 
                     preview_mode, 
-                    conn,
+                    pipeline_conn,
                     parent_has_lock=parent_has_lock or lock_acquired  # Pass lock state to nested function
                 )
             except Exception as e:
@@ -1579,15 +1619,16 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, pare
                 # Manual run is indicated by current_app.manual_run flag or missing schedule time
                 if not schedule_time or schedule_time <= datetime.now() or getattr(current_app, 'manual_run', False):
                     log_with_task_details('INFO', f"Executing immediate video upload" + 
-                                               (" (manual run)" if getattr(current_app, 'manual_run', False) else ""),
+                                              (" (manual run)" if getattr(current_app, 'manual_run', False) else ""),
                         task_id=task_id,
                         details={'manual_run': getattr(current_app, 'manual_run', False)})
                     
                     try:
                         # Fetch the correct original name from the database using video_id
-                        c = conn.cursor()
-                        c.execute("SELECT original_name FROM generated_videos WHERE id = ?", (video_id,))
-                        original_name_result = c.fetchone()
+                        with pipeline_conn.cursor() as c:
+                            c.execute("SELECT original_name FROM generated_videos WHERE id = %s", (video_id,))
+                            original_name_result = c.fetchone()
+                            
                         if original_name_result and original_name_result[0]:
                             original_name = original_name_result[0]
                             log_with_task_details('INFO', f"Retrieved original name from database for upload",
@@ -1604,7 +1645,7 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, pare
                             task_id, 
                             (video_id, original_name, video_path, datetime.now().isoformat()),
                             preview_mode, 
-                            conn
+                            pipeline_conn
                         )
                         pipeline_details['upload_result'] = upload_result
                         return upload_result
@@ -1618,14 +1659,40 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, pare
                 return True  # Video generated successfully, will be uploaded at scheduled time
             
             return None
+        finally:
+            # Close the dedicated pipeline connection
+            try:
+                pipeline_conn.close()
+            except Exception as conn_error:
+                log_with_task_details('WARNING', 
+                    f"Failed to close pipeline connection: {str(conn_error)}",
+                    task_id=task_id,
+                    details={'error': str(conn_error)})
             
     except Exception as e:
         log_with_task_details('ERROR', 
             f"Pipeline failed: {str(e)}",
             task_id=task_id,
             details={'error': str(e), **pipeline_details})
+            
+        # Update task status to failed using a new dedicated connection
         if not preview_mode:
-            update_task_status(task_id, 'failed', 'failed')
+            try:
+                # Create a direct connection for status update
+                status_conn = db.create_connection()
+                status_conn.autocommit = True
+                
+                try:
+                    with status_conn.cursor() as status_cursor:
+                        status_cursor.execute("UPDATE tasks SET status = %s, processing_status = %s WHERE id = %s", 
+                                         ('failed', 'failed', task_id))
+                finally:
+                    status_conn.close()
+            except Exception as status_e:
+                log_with_task_details('ERROR', 
+                    f"Failed to update failure status: {str(status_e)}",
+                    task_id=task_id,
+                    details={'error': str(status_e)})
         raise
         
     finally:
