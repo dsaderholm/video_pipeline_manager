@@ -157,8 +157,20 @@ def force_release_lock():
     """
     try:
         # Create a direct connection outside the pool since the pool might be the source of issues
-        conn = db.create_connection()
-        conn.autocommit = True
+        try:
+            # First try the normal create_connection method
+            conn = db.create_connection()
+            conn.autocommit = True
+        except AttributeError as ae:
+            # If create_connection doesn't exist, use a direct connection approach
+            if "_create_connection" in str(ae) or "create_connection" in str(ae):
+                # Create a manual connection directly instead
+                logger.info("Using direct connection for lock release")
+                db_url = db.get_db_connection_string()
+                conn = psycopg2.connect(db_url)
+                conn.autocommit = True
+            else:
+                raise ae
         
         try:
             with conn.cursor() as c:
@@ -182,35 +194,6 @@ def force_release_lock():
             conn.close()
                 
         return True
-    except AttributeError as ae:
-        if "_create_connection" in str(ae):
-            # Handle the specific case where the method name is wrong
-            try:
-                # Create a manual connection directly instead
-                db_url = db.get_db_connection_string()
-                conn = psycopg2.connect(db_url)
-                conn.autocommit = True
-                
-                try:
-                    with conn.cursor() as c:
-                        c.execute("""
-                            UPDATE task_lock 
-                            SET locked = 0, 
-                                task_id = NULL, 
-                                locked_at = NULL 
-                            WHERE id = 1
-                        """)
-                        conn.commit()
-                        logger.info("Force-released database lock (fallback method)")
-                        return True
-                finally:
-                    conn.close()
-            except Exception as fallback_error:
-                logger.error(f"Fallback force release failed: {str(fallback_error)}")
-                return False
-        else:
-            logger.error(f"AttributeError in force_release_lock: {str(ae)}")
-            return False
     except Exception as e:
         logger.error(f"Failed to force-release lock: {str(e)}")
         return False
@@ -591,7 +574,7 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
             
         c = conn.cursor()
         # Start a transaction for the whole generation process
-        c.execute("BEGIN IMMEDIATE")
+        conn.autocommit = False
         
         try:
             c.execute("""
@@ -1008,7 +991,8 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                 
                 shutil.copy2(current_video_file, preview_path)
                 update_task_status(task_id, 'completed', None, None, conn)
-                c.execute("COMMIT")
+                conn.commit()
+                conn.autocommit = True
                 return preview_path
 
             # Store processed video
@@ -1043,7 +1027,8 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
             update_task_status(task_id, 'pending', 'processed', permanent_path, conn)
             
             # Commit the transaction if everything succeeded
-            c.execute("COMMIT")
+            conn.commit()
+            conn.autocommit = True
             
             # Calculate and log the total generation time
             generation_time = time.time() - generation_start_time
