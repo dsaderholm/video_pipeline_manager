@@ -34,7 +34,7 @@ def init_db():
                     id SERIAL PRIMARY KEY,
                     name TEXT NOT NULL,
                     generator_curl TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             
@@ -44,7 +44,7 @@ def init_db():
                     id SERIAL PRIMARY KEY,
                     name TEXT NOT NULL,
                     utility_curl TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
             
@@ -57,7 +57,7 @@ def init_db():
                     fallback_curl TEXT,
                     fallback_curl_2 TEXT,
                     default_hashtags TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
 
@@ -77,7 +77,7 @@ def init_db():
                     retry_count INTEGER DEFAULT 0,
                     processing_status TEXT DEFAULT 'pending',
                     processed_video_path TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(generator_id) REFERENCES generators(id)
                 )
             ''')
@@ -101,13 +101,13 @@ def init_db():
                     task_id INTEGER NOT NULL,
                     original_name TEXT NOT NULL,
                     processed_path TEXT NOT NULL,
-                    scheduled_time TEXT NOT NULL,
+                    scheduled_time TIMESTAMP WITH TIME ZONE NOT NULL,
                     status TEXT DEFAULT 'pending',
                     upload_status TEXT DEFAULT 'pending',
                     error_message TEXT,
                     retry_count INTEGER DEFAULT 0,
-                    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    uploaded_at TIMESTAMP,
+                    generated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    uploaded_at TIMESTAMP WITH TIME ZONE,
                     FOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE
                 )
             ''')
@@ -118,7 +118,7 @@ def init_db():
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     locked INTEGER DEFAULT 0,
                     task_id INTEGER,
-                    locked_at TIMESTAMP
+                    locked_at TIMESTAMP WITH TIME ZONE
                 )
             ''')
             
@@ -159,7 +159,7 @@ def init_db():
             if not column_exists('generated_videos', 'uploaded_at'):
                 # Add uploaded_at column
                 try:
-                    c.execute("ALTER TABLE generated_videos ADD COLUMN uploaded_at TIMESTAMP")
+                    c.execute("ALTER TABLE generated_videos ADD COLUMN uploaded_at TIMESTAMP WITH TIME ZONE")
                     logger.info("Added uploaded_at column to generated_videos table")
                 except Exception as e:
                     logger.error(f"Failed to add uploaded_at column: {str(e)}")
