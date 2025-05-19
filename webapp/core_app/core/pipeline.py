@@ -798,36 +798,7 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                             # Get absolute path for the current video file
                             abs_video_file = os.path.abspath(current_video_file)
                             
-                            # Try pinging the utility service as a test
-                            try:
-                                # If host is reachable but service is not, log a clearer error
-                                # Try a direct curl with minimal options as a health check
-                                if server_ip_match and sys.platform == 'win32':
-                                    service_url = f"http://{utility_ip}:{service_port}"
-                                    health_cmd = f"curl -m 5 -s -f -I {service_url}"
-                                    log_with_task_details('INFO', f"Testing utility service with basic curl: {service_url}",
-                                        task_id=task_id)
-                                    try:
-                                        health_result = subprocess.run(health_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
-                                        if health_result.returncode != 0:
-                                            log_with_task_details('WARNING', f"Health check for utility service failed: {service_url}",
-                                                task_id=task_id,
-                                                details={
-                                                    'stdout': health_result.stdout.decode('utf-8', errors='replace')[:200],
-                                                    'stderr': health_result.stderr.decode('utf-8', errors='replace')[:200],
-                                                    'returncode': health_result.returncode
-                                                })
-                                        else:
-                                            log_with_task_details('INFO', f"Basic health check succeeded for utility service: {service_url}",
-                                                task_id=task_id)
-                                    except Exception as health_error:
-                                        log_with_task_details('WARNING', f"Error during utility health check: {str(health_error)}",
-                                            task_id=task_id,
-                                            details={'error': str(health_error)})
-                            except Exception as e:
-                                log_with_task_details('WARNING', f"Error checking utility service health: {str(e)}",
-                                    task_id=task_id,
-                                    details={'error': str(e)})
+                            # No need for service health checking in Docker environment
                             
                             # FIXED: Ensure the file is readable by the container user
                             try:
@@ -880,36 +851,7 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                                             **generation_details
                                         })
                                         
-                                    # Try to get more network diagnostic information
-                                    server_ip_match = re.search(r'http://([0-9.]+):', util_cmd)
-                                    if server_ip_match:
-                                        utility_ip = server_ip_match.group(1)
-                                        log_with_task_details('WARNING', f"Retrying with diagnostics for {utility_ip}",
-                                            task_id=task_id,
-                                            details={'utility_ip': utility_ip})
-                                            
-                                        # Try direct TCP connection test using socket
-                                        try:
-                                            import socket
-                                            port_match = re.search(r'http://[0-9.]+:([0-9]+)', util_cmd)
-                                            if port_match:
-                                                port = int(port_match.group(1))
-                                                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                                                s.settimeout(5)
-                                                result = s.connect_ex((utility_ip, port))
-                                                s.close()
-                                                
-                                                if result == 0:
-                                                    log_with_task_details('INFO', f"Port {port} on {utility_ip} is OPEN",
-                                                        task_id=task_id)
-                                                else:
-                                                    log_with_task_details('ERROR', f"Port {port} on {utility_ip} is CLOSED (error: {result})",
-                                                        task_id=task_id,
-                                                        details={'socket_error_code': result})
-                                        except Exception as socket_error:
-                                            log_with_task_details('ERROR', f"Socket test failed: {str(socket_error)}",
-                                                task_id=task_id,
-                                                details={'error': str(socket_error)})
+                                    # Docker services should be available through compose networking
                                     
                                     # Continue despite error - maybe the video was modified anyway
                                     log_with_task_details('WARNING', f"Continuing despite utility failure",
