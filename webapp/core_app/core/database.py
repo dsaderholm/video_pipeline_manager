@@ -298,6 +298,16 @@ class DatabaseManager:
                 return f(conn, *args, **kwargs)
         return wrapper
 
+    def create_connection(self):
+        """Create a new connection directly (not from the pool) for special operations"""
+        try:
+            db_url = get_db_connection_string()
+            conn = psycopg2.connect(db_url)
+            return conn
+        except Exception as e:
+            logger.error(f"Failed to create direct connection: {e}")
+            raise
+            
     def cleanup(self):
         """Clean up database connection pool"""
         if self._connection_pool is not None:

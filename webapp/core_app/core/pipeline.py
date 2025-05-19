@@ -143,9 +143,11 @@ def force_release_lock():
     With PostgreSQL's row-level locking, we can use a simple approach.
     """
     try:
-        with db.get_connection() as conn:
-            conn.autocommit = True
-            
+        # Create a direct connection outside the pool since the pool might be the source of issues
+        conn = db.create_connection()
+        conn.autocommit = True
+        
+        try:
             with conn.cursor() as c:
                 c.execute("""
                     UPDATE task_lock 
@@ -163,6 +165,8 @@ def force_release_lock():
                 else:
                     logger.info("No lock needed to be force-released")
                     return True
+        finally:
+            conn.close()
                 
         return True
     except Exception as e:
@@ -1569,56 +1573,13 @@ def process_video_pipeline(task_id, schedule_time=None, preview_mode=False, pare
                         details={'error': str(force_e), **pipeline_details})
 
 def check_for_missed_processing(force_process=False):
-    """Check if any night processing was missed, typically after a restart. Now with improved scheduler job handling.
+    """Check if any night processing was missed, typically after a restart.
     
     Args:
         force_process: If True, will process regardless of time window
     """
-    # Store original function to avoid recursive import issues
-    _original_check_function = _check_for_missed_processing
-    
-    # Try to determine if we're in an app context
     try:
-        from flask import current_app
-        try:
-            # Try to access current_app to check if we're in app context
-            current_app._get_current_object()
-            # We're in app context, call the original function directly
-            return _original_check_function(force_process)
-        except Exception:
-            # Not in app context, create one
-            try:
-                # First try to get the app from our module
-                from webapp.core_app import flask_app
-                if flask_app:
-                    with flask_app.app_context():
-                        return _original_check_function(force_process)
-                else:
-                    # Fall back to direct import if app reference not available
-                    from webapp.core_app import app 
-                    with app.app_context():
-                        return _original_check_function(force_process)
-            except ImportError as e:
-                logger.error(f"Failed to import app module: {e}")
-                # Try a direct import as fallback
-                try:
-                    from webapp.core_app.core_app import app
-                    with app.app_context():
-                        return _original_check_function(force_process)
-                except ImportError:
-                    logger.error("Could not find Flask app, last resort attempt")
-                    from flask import Flask
-                    # Create a minimal temp app context
-                    app = Flask("temp_app")
-                    with app.app_context():
-                        return _original_check_function(force_process)
-    except Exception as e:
-        logger.error(f"Error checking for missed processing (app context error): {str(e)}")
-        return False
-
-def _check_for_missed_processing(force_process=False):
-    """Internal implementation for checking missed processing - always call through check_for_missed_processing"""
-    try:
+        # Direct implementation to avoid issues with complex context management
         today = datetime.now().date()
         yesterday = today - timedelta(days=1)
         yesterday_day = yesterday.strftime('%A')[:3].lower()
@@ -1629,120 +1590,225 @@ def _check_for_missed_processing(force_process=False):
         
         logger.info(f"Checking for missed night processing from {yesterday_night_time}")
         
-        # Create a new dedicated connection with autocommit mode
-        with db.get_connection() as conn:
-            # Set autocommit mode BEFORE any other operations
-            conn.autocommit = True
+        # Create a direct connection with autocommit mode
+        connection = db.create_connection()
+        connection.autocommit = True
+        
+        try:
+            cursor = connection.cursor()
             
-            # Try to acquire lock
-            lock_acquired = check_and_set_lock("missed_processing_check")
-            if not lock_acquired and not force_process:
-                logger.info("Could not acquire lock for missed processing check, will try later")
-                return
+            # Find all tasks that should have run yesterday
+            cursor.execute("""
+                SELECT id, schedule 
+                FROM tasks 
+                WHERE status != 'failed'
+                AND processing_status != 'failed'
+                AND schedule LIKE %s
+            """, (f'%{yesterday_day}|%',))
+            
+            tasks = cursor.fetchall()
+            processed_count = 0
+            
+            for task_id, schedule in tasks:
+                # Check if we have any generated videos from yesterday
+                cursor.execute("""
+                    SELECT COUNT(*) FROM generated_videos
+                    WHERE task_id = %s
+                    AND DATE(generated_at) = DATE(%s) 
+                """, (task_id, yesterday.strftime('%Y-%m-%d')))
                 
-            try:
-                c = conn.cursor()
+                existing_count = cursor.fetchone()[0]
                 
-                # Find all tasks that should have run yesterday
-                c.execute("""
-                    SELECT id, schedule 
-                    FROM tasks 
-                    WHERE status != 'failed'
-                    AND processing_status != 'failed'
-                    AND schedule LIKE %s
-                """, (f'%{yesterday_day}|%',))
+                # Also check today, as sometimes night processing happens right after midnight
+                cursor.execute("""
+                    SELECT COUNT(*) FROM generated_videos
+                    WHERE task_id = %s
+                    AND DATE(generated_at) = DATE(%s) 
+                """, (task_id, today.strftime('%Y-%m-%d')))
                 
-                tasks = c.fetchall()
-                processed_count = 0
+                today_count = cursor.fetchone()[0]
+                total_count = existing_count + today_count
                 
-                for task_id, schedule in tasks:
-                    # Check if we have any generated videos from yesterday
-                    c.execute("""
-                        SELECT COUNT(*) FROM generated_videos
-                        WHERE task_id = %s
-                        AND DATE(generated_at) = DATE(%s) 
-                    """, (task_id, yesterday.strftime('%Y-%m-%d')))
+                if total_count == 0 or force_process:
+                    # No videos were generated yesterday or today for this task, generate now
+                    logger.info(f"Detected missed night processing for task {task_id}")
                     
-                    existing_count = c.fetchone()[0]
+                    # Get today's schedule times for this task
+                    today_schedules = get_next_day_schedules(schedule)
                     
-                    # Also check today, as sometimes night processing happens right after midnight
-                    c.execute("""
-                        SELECT COUNT(*) FROM generated_videos
-                        WHERE task_id = %s
-                        AND DATE(generated_at) = DATE(%s) 
-                    """, (task_id, today.strftime('%Y-%m-%d')))
-                    
-                    today_count = c.fetchone()[0]
-                    total_count = existing_count + today_count
-                    
-                    if total_count == 0 or force_process:
-                        # No videos were generated yesterday or today for this task, generate now
-                        log_with_task_details('INFO', 
-                            f"Detected missed night processing for yesterday ({yesterday_day}) or startup recovery",
-                            task_id=task_id)
+                    if today_schedules:
+                        # Process the task for today's schedules
+                        from flask import current_app
+                        manual_run_flag = getattr(current_app, 'manual_run', False)
+                        current_app.manual_run = True  # Force processing
                         
-                        # Get today's schedule times for this task
-                        today_schedules = get_next_day_schedules(schedule)
-                        
-                        if today_schedules:
-                            # Process the task for today's schedules
+                        for schedule_time in today_schedules:
                             try:
-                                # Already in app context from outer function
-                                from flask import current_app
-                                current_app.manual_run = True  # Set manual flag to force processing
+                                # Create a dedicated connection for this task with autocommit
+                                task_conn = db.create_connection()
+                                task_conn.autocommit = True
                                 
-                                for schedule_time in today_schedules:
-                                    # IMPORTANT CHANGE: Pass the parent_lock to inform the pipeline that we already have the lock
-                                    try:
-                                        # Generate the video but don't try to acquire lock again
-                                        with db.get_connection() as task_conn:
-                                            # Ensure autocommit mode
-                                            task_conn.autocommit = True
-                                            
-                                            video_result = process_video_generation(
-                                                task_id, 
-                                                schedule_time, 
-                                                conn=task_conn,
-                                                parent_has_lock=True  # Tell the function we already have the lock
-                                            )
-                                            
-                                            if video_result and isinstance(video_result, tuple):
-                                                video_path, video_id = video_result
-                                                log_with_task_details('INFO', 
-                                                    f"Successfully generated video for missed processing",
-                                                    task_id=task_id,
-                                                    details={
-                                                        'video_path': video_path,
-                                                        'video_id': video_id,
-                                                        'schedule_time': schedule_time.isoformat() if schedule_time else None
-                                                    })
-                                                processed_count += 1
-                                    except Exception as task_e:
-                                        log_with_task_details('ERROR', 
-                                            f"Failed to generate video for missed task: {str(task_e)}",
-                                            task_id=task_id,
-                                            details={'error': str(task_e)})
-                                
-                                current_app.manual_run = False  # Reset flag
+                                try:
+                                    # Process the task with parent_has_lock=True to avoid transaction issues
+                                    with task_conn.cursor() as task_cursor:
+                                        # Make task_cursor available for process_video_generation
+                                        result = process_video_pipeline(
+                                            task_id,
+                                            schedule_time=schedule_time,
+                                            parent_has_lock=True
+                                        )
+                                        
+                                        if result:
+                                            processed_count += 1
+                                            logger.info(f"Successfully processed missed task {task_id}")
+                                finally:
+                                    task_conn.close()
+                                    
                             except Exception as e:
-                                log_with_task_details('ERROR', 
-                                    f"Failed to process missed task {task_id}: {str(e)}",
-                                    task_id=task_id)
+                                logger.error(f"Error processing missed task {task_id}: {str(e)}")
+                        
+                        # Restore original manual_run flag
+                        current_app.manual_run = manual_run_flag
+            
+            if processed_count > 0:
+                logger.info(f"Recovered {processed_count} missed video generations")
+            else:
+                logger.info("No missed processing detected or recovery not needed")
                 
-                if processed_count > 0:
-                    logger.info(f"Recovered {processed_count} missed video generations")
-                else:
-                    logger.info("No missed processing detected or recovery not needed")
-            finally:
-                if lock_acquired:
-                    release_lock("missed_processing_check")
-                
+        finally:
+            connection.close()
+            
     except Exception as e:
         logger.error(f"Error checking for missed processing: {str(e)}")
 
+# Legacy function - no longer used
+# def _check_for_missed_processing(force_process=False):
+#     """Internal implementation for checking missed processing - always call through check_for_missed_processing"""
+#     try:
+#         today = datetime.now().date()
+#         yesterday = today - timedelta(days=1)
+#         yesterday_day = yesterday.strftime('%A')[:3].lower()
+#         
+#         # Get yesterday's date at start of night processing time
+#         night_hour, night_minute = map(int, os.getenv('NIGHT_PROCESSING_START', '01:30').split(':'))
+#         yesterday_night_time = datetime.combine(yesterday, datetime.min.time().replace(hour=night_hour, minute=night_minute))
+#         
+#         logger.info(f"Checking for missed night processing from {yesterday_night_time}")
+#         
+#         # Create a new dedicated connection with autocommit mode
+#         with db.get_connection() as conn:
+#             # Set autocommit mode BEFORE any other operations
+#             conn.autocommit = True
+#             
+#             # Try to acquire lock
+#             lock_acquired = check_and_set_lock("missed_processing_check")
+#             if not lock_acquired and not force_process:
+#                 logger.info("Could not acquire lock for missed processing check, will try later")
+#                 return
+#                 
+#             try:
+#                 c = conn.cursor()
+#                 
+#                 # Find all tasks that should have run yesterday
+#                 c.execute("""
+#                     SELECT id, schedule 
+#                     FROM tasks 
+#                     WHERE status != 'failed'
+#                     AND processing_status != 'failed'
+#                     AND schedule LIKE %s
+#                 """, (f'%{yesterday_day}|%',))
+#                 
+#                 tasks = c.fetchall()
+#                 processed_count = 0
+#                 
+#                 for task_id, schedule in tasks:
+#                     # Check if we have any generated videos from yesterday
+#                     c.execute("""
+#                         SELECT COUNT(*) FROM generated_videos
+#                         WHERE task_id = %s
+#                         AND DATE(generated_at) = DATE(%s) 
+#                     """, (task_id, yesterday.strftime('%Y-%m-%d')))
+#                     
+#                     existing_count = c.fetchone()[0]
+#                     
+#                     # Also check today, as sometimes night processing happens right after midnight
+#                     c.execute("""
+#                         SELECT COUNT(*) FROM generated_videos
+#                         WHERE task_id = %s
+#                         AND DATE(generated_at) = DATE(%s) 
+#                     """, (task_id, today.strftime('%Y-%m-%d')))
+#                     
+#                     today_count = c.fetchone()[0]
+#                     total_count = existing_count + today_count
+#                     
+#                     if total_count == 0 or force_process:
+#                         # No videos were generated yesterday or today for this task, generate now
+#                         log_with_task_details('INFO', 
+#                             f"Detected missed night processing for yesterday ({yesterday_day}) or startup recovery",
+#                             task_id=task_id)
+#                         
+#                         # Get today's schedule times for this task
+#                         today_schedules = get_next_day_schedules(schedule)
+#                         
+#                         if today_schedules:
+#                             # Process the task for today's schedules
+#                             try:
+#                                 # Already in app context from outer function
+#                                 from flask import current_app
+#                                 current_app.manual_run = True  # Set manual flag to force processing
+#                                 
+#                                 for schedule_time in today_schedules:
+#                                     # IMPORTANT CHANGE: Pass the parent_lock to inform the pipeline that we already have the lock
+#                                     try:
+#                                         # Generate the video but don't try to acquire lock again
+#                                         with db.get_connection() as task_conn:
+#                                             # Ensure autocommit mode
+#                                             task_conn.autocommit = True
+#                                             
+#                                             video_result = process_video_generation(
+#                                                 task_id, 
+#                                                 schedule_time, 
+#                                                 conn=task_conn,
+#                                                 parent_has_lock=True  # Tell the function we already have the lock
+#                                             )
+#                                             
+#                                             if video_result and isinstance(video_result, tuple):
+#                                                 video_path, video_id = video_result
+#                                                 log_with_task_details('INFO', 
+#                                                     f"Successfully generated video for missed processing",
+#                                                     task_id=task_id,
+#                                                     details={
+#                                                         'video_path': video_path,
+#                                                         'video_id': video_id,
+#                                                         'schedule_time': schedule_time.isoformat() if schedule_time else None
+#                                                     })
+#                                                 processed_count += 1
+#                                     except Exception as task_e:
+#                                         log_with_task_details('ERROR', 
+#                                             f"Failed to generate video for missed task: {str(task_e)}",
+#                                             task_id=task_id,
+#                                             details={'error': str(task_e)})
+#                                 
+#                                 current_app.manual_run = False  # Reset flag
+#                             except Exception as e:
+#                                 log_with_task_details('ERROR', 
+#                                     f"Failed to process missed task {task_id}: {str(e)}",
+#                                     task_id=task_id)
+#                 
+#                 if processed_count > 0:
+#                     logger.info(f"Recovered {processed_count} missed video generations")
+#                 else:
+#                     logger.info("No missed processing detected or recovery not needed")
+#             finally:
+#                 if lock_acquired:
+#                     release_lock("missed_processing_check")
+#                 
+#     except Exception as e:
+#         logger.error(f"Error checking for missed processing: {str(e)}")
+
 def process_night_queue():
     """Process pending tasks during night window with improved email handling"""
-    # First check if we need to recover from missed processing
+    # Process missed videos from the night window
     check_for_missed_processing()
     
     # Check if we should process at night
