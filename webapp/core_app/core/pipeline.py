@@ -1,15 +1,4 @@
-def cleanup_files(files_to_cleanup):
-    """Clean up temporary files used during video processing"""
-    if not files_to_cleanup:
-        return
-        
-    for file_path in files_to_cleanup:
-        if file_path and os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-                logger.debug(f"Cleaned up temporary file: {file_path}")
-            except Exception as e:
-                logger.warning(f"Failed to clean up temporary file {file_path}: {str(e)}")import json
+import json
 import time
 import os
 import sys
@@ -36,6 +25,19 @@ from flask import current_app
 # PostgreSQL handles concurrency well, so we don't need the global thread lock anymore
 # The db_lock variable is kept for backward compatibility but should not be used
 db_lock = threading.Lock()
+
+def cleanup_files(files_to_cleanup):
+    """Clean up temporary files used during video processing"""
+    if not files_to_cleanup:
+        return
+        
+    for file_path in files_to_cleanup:
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+                logger.debug(f"Cleaned up temporary file: {file_path}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temporary file {file_path}: {str(e)}")
 
 def check_connection_health(conn):
     """Verify if a database connection is healthy and active"""
