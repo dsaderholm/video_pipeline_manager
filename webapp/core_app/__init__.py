@@ -164,7 +164,7 @@ def init_scheduler(app):
                         UPDATE tasks 
                         SET status = 'failed',
                             processing_status = 'failed'
-                        WHERE id = ?
+                        WHERE id = %s
                     """, (task_id,))
                     conn.commit()
                     app_logger.info(f"Updated task {task_id} status to failed after job error")
@@ -269,10 +269,10 @@ def init_scheduler(app):
         
         # Add automatic lock reset job to clear any stuck locks
         # Run more frequently (every 10 minutes) to prevent prolonged deadlocks
-        from webapp.core_app.core.pipeline import force_release_lock
+        # Use string reference to ensure we always get the latest version of the function
         scheduler.add_job(
             id='auto_lock_reset',
-            func=force_release_lock,  # Use direct function reference
+            func='webapp.core_app.core.pipeline:force_release_lock',  # Use string reference instead of direct function
             trigger='interval',
             minutes=10,  # Run every 10 minutes to ensure no lock is stuck for long
             name='Automatic Lock Reset',
