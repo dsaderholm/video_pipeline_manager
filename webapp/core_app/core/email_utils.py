@@ -1,5 +1,6 @@
 import os
-import sqlite3
+import psycopg2
+from webapp.core_app.core.database import db  # Use our database manager
 import json
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -8,8 +9,7 @@ from datetime import datetime, timedelta
 import logging
 logger = logging.getLogger('app')
 
-def get_db_path():
-    return os.path.join('webapp', 'database', 'pipeline.db')
+# PostgreSQL connection is handled by the db manager
 
 def load_smtp_config():
     """Load SMTP configuration from environment variables with improved validation"""
@@ -80,7 +80,7 @@ def safely_parse_json(json_str, default=None):
 def get_task_details(task_id):
     """Get detailed task information without relying on logs table"""
     try:
-        with sqlite3.connect(get_db_path()) as conn:
+        with db.get_connection() as conn:
             c = conn.cursor()
             
             # Get task with generator name
@@ -88,7 +88,7 @@ def get_task_details(task_id):
                 SELECT t.*, g.name as generator_name 
                 FROM tasks t
                 JOIN generators g ON t.generator_id = g.id
-                WHERE t.id = ?
+                WHERE t.id = %s
             """, (task_id,))
             task = c.fetchone()
             
@@ -114,7 +114,7 @@ def get_task_details(task_id):
                 SELECT id, original_name, processed_path, scheduled_time, status, upload_status, 
                        generated_at, uploaded_at, error_message
                 FROM generated_videos
-                WHERE task_id = ?
+                WHERE task_id = %s
                 ORDER BY generated_at DESC
             """, (task_id,))
             
@@ -161,7 +161,7 @@ def get_task_details(task_id):
             utilities = []
             util_ids = safely_parse_json(task[3], [])
             if util_ids:
-                placeholders = ','.join('?' * len(util_ids))
+                placeholders = ','.join(['%s'] * len(util_ids))  # Use %s for PostgreSQL
                 c.execute(f"SELECT name FROM utilities WHERE id IN ({placeholders})", util_ids)
                 utilities = [u[0] for u in c.fetchall()]
             
@@ -171,7 +171,7 @@ def get_task_details(task_id):
                 SELECT p.name, tpa.account_name 
                 FROM task_platform_accounts tpa
                 JOIN platforms p ON tpa.platform_id = p.id
-                WHERE tpa.task_id = ?
+                WHERE tpa.task_id = %s
             """, (task_id,))
             platforms = [f"{p[0]} ({p[1]})" for p in c.fetchall()]
             

@@ -156,7 +156,8 @@ def force_release_lock():
     Directly creates a connection to release the lock in a Docker environment.
     """
     try:
-        # Create a direct connection using db instance to avoid import issues
+        # Use the database manager's create_connection method
+        from webapp.core_app.core.database import db
         conn = db.create_connection()
         conn.autocommit = True
         
