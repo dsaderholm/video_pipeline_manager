@@ -169,15 +169,44 @@ def force_release_lock():
             conn.close()
                 
         return True
+    except AttributeError as ae:
+        if "_create_connection" in str(ae):
+            # Handle the specific case where the method name is wrong
+            try:
+                # Create a manual connection directly instead
+                db_url = db.get_db_connection_string()
+                conn = psycopg2.connect(db_url)
+                conn.autocommit = True
+                
+                try:
+                    with conn.cursor() as c:
+                        c.execute("""
+                            UPDATE task_lock 
+                            SET locked = 0, 
+                                task_id = NULL, 
+                                locked_at = NULL 
+                            WHERE id = 1
+                        """)
+                        conn.commit()
+                        logger.info("Force-released database lock (fallback method)")
+                        return True
+                finally:
+                    conn.close()
+            except Exception as fallback_error:
+                logger.error(f"Fallback force release failed: {str(fallback_error)}")
+                return False
+        else:
+            logger.error(f"AttributeError in force_release_lock: {str(ae)}")
+            return False
     except Exception as e:
         logger.error(f"Failed to force-release lock: {str(e)}")
         return False
 
 def check_and_set_lock(task_id=None):
-    """Simplified lock mechanism for PostgreSQL.
+    """Improved lock mechanism for PostgreSQL with advisory locks.
     
-    With PostgreSQL's row-level locking, we don't need as complex locking mechanism as with SQLite.
-    This uses PostgreSQL's built-in support for concurrent transactions with row locking.
+    Using PostgreSQL's built-in support for concurrent transactions with row locking
+    and fallback to advisory locks for better reliability.
     """
     lock_details = {
         'operation': 'check_and_set',
@@ -185,12 +214,23 @@ def check_and_set_lock(task_id=None):
         'task_id': task_id
     }
 
+    advisory_lock_key = 12345  # Unique key for app-wide advisory lock
+    advisory_lock_acquired = False
+    
     try:
-        with db.get_connection() as conn:
-            # Ensure we're using autocommit mode to avoid transaction issues
-            conn.autocommit = True
-            
+        # Create a direct connection outside the pool for lock operations
+        # This helps avoid connection pooling issues
+        conn = db.create_connection()
+        conn.autocommit = True
+        
+        try:
             with conn.cursor() as c:
+                # First try to get an advisory lock to prevent race conditions
+                # This is a non-blocking attempt
+                c.execute("SELECT pg_try_advisory_lock(%s)", (advisory_lock_key,))
+                result = c.fetchone()
+                advisory_lock_acquired = result[0] if result else False
+                
                 # First try to update if the lock isn't held by anyone
                 c.execute("""
                     UPDATE task_lock
@@ -228,11 +268,11 @@ def check_and_set_lock(task_id=None):
                         )
                         return True
                 
-                # Check for stale locks (older than 15 minutes)
+                # Check for stale locks (older than 5 minutes) - reduced from 15 minutes
                 c.execute("""
                     UPDATE task_lock
                     SET locked = 0, task_id = NULL, locked_at = NULL
-                    WHERE id = 1 AND locked = 1 AND locked_at < now() - interval '15 minutes'
+                    WHERE id = 1 AND locked = 1 AND locked_at < now() - interval '5 minutes'
                     RETURNING id
                 """)
                 
@@ -258,18 +298,35 @@ def check_and_set_lock(task_id=None):
                 c.execute("SELECT task_id, locked_at FROM task_lock WHERE id = 1")
                 current_lock = c.fetchone()
                 if current_lock:
+                    # Check if lock holder is still active
+                    current_holder = current_lock[0]
+                    locked_since = current_lock[1]
+                    
+                    # Calculate lock age
+                    lock_age = datetime.now(locked_since.tzinfo) - locked_since if locked_since else None
+                    lock_age_seconds = lock_age.total_seconds() if lock_age else None
+                    
                     log_with_task_details(
                         'INFO',
-                        f"Could not acquire lock - currently held by task {current_lock[0]}",
+                        f"Could not acquire lock - currently held by task {current_holder}",
                         task_id=task_id,
                         details={
                             **lock_details,
-                            'current_holder': current_lock[0],
-                            'locked_since': current_lock[1].isoformat() if current_lock[1] else None
+                            'current_holder': current_holder,
+                            'locked_since': locked_since.isoformat() if locked_since else None,
+                            'lock_age_seconds': lock_age_seconds
                         }
                     )
                 
                 return False
+        finally:
+            # Release advisory lock if we acquired it
+            if advisory_lock_acquired:
+                with conn.cursor() as c:
+                    c.execute("SELECT pg_advisory_unlock(%s)", (advisory_lock_key,))
+            
+            # Close the direct connection
+            conn.close()
 
     except Exception as e:
         log_with_task_details(
@@ -281,16 +338,26 @@ def check_and_set_lock(task_id=None):
         return False
 
 def release_lock(task_id=None):
-    """Simplified release lock function for PostgreSQL.
+    """Improved release lock function for PostgreSQL.
     
-    With PostgreSQL, we don't need the complex locking mechanism that was required for SQLite.
+    Using direct connection to avoid connection pool issues and advisory locks
+    for better concurrency control.
     """
+    advisory_lock_key = 12345  # Same key as in check_and_set_lock
+    advisory_lock_acquired = False
+    
     try:
-        with db.get_connection() as conn:
-            # Use autocommit mode for simplicity
-            conn.autocommit = True
-            
+        # Create a direct connection outside the pool for lock operations
+        conn = db.create_connection()
+        conn.autocommit = True
+        
+        try:
             with conn.cursor() as c:
+                # First try to get an advisory lock to prevent race conditions
+                c.execute("SELECT pg_try_advisory_lock(%s)", (advisory_lock_key,))
+                result = c.fetchone()
+                advisory_lock_acquired = result[0] if result else False
+                
                 # Only release if we own the lock or force release
                 if task_id:
                     c.execute("""
@@ -319,6 +386,14 @@ def release_lock(task_id=None):
                 if released:
                     logger.info(f"Released lock for task {task_id if task_id else 'all tasks'}")
                 return released
+        finally:
+            # Release advisory lock if we acquired it
+            if advisory_lock_acquired:
+                with conn.cursor() as c:
+                    c.execute("SELECT pg_advisory_unlock(%s)", (advisory_lock_key,))
+            
+            # Close the direct connection
+            conn.close()
                 
     except Exception as e:
         logger.error(f"Error releasing pipeline lock: {str(e)}")
