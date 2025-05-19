@@ -74,89 +74,21 @@ def log_with_details(level, message, task_id=None, details=None, source=None):
         if details:
             print(f"Details: {json.dumps(details, default=str)}", file=sys.stderr)
 
-def parse_curl_response(stdout_str, stderr_str):
-    """Parse curl response and extract HTTP status code, headers, and body"""
-    response = {
-        'status_code': None,
-        'headers': {},
-        'body': '',
-        'error': None,
-        'platform_specific': {}
-    }
-    
-    # First, look for HTTP status line
-    status_match = re.search(r'HTTP/\d\.\d\s+(\d{3})', stdout_str + stderr_str)
-    if status_match:
-        response['status_code'] = int(status_match.group(1))
-    
-    # Look for JSON response in stdout
-    try:
-        json_start = stdout_str.find('{')
-        if json_start != -1:
-            json_content = stdout_str[json_start:]
-            response['body'] = json.loads(json_content)
-    except json.JSONDecodeError:
-        # If not JSON, store raw content
-        response['body'] = stdout_str.strip()
-    
-    # Check for platform-specific patterns
-    platform_patterns = {
-        'tiktok': {
-            'error_code': r'error_code["\']:\s*(\d+)',
-            'error_message': r'error_message["\']:\s*["\']([^"\']+)',
-            'success_pattern': r'share_url["\']:\s*["\']([^"\']+)'
-        },
-        'instagram': {
-            'error_type': r'error_type["\']:\s*["\']([^"\']+)',
-            'media_id': r'media_id["\']:\s*["\']([^"\']+)'
-        },
-        'youtube': {
-            'error': r'error["\']:\s*{([^}]+)}',
-            'video_id': r'videoId["\']:\s*["\']([^"\']+)'
-        }
-    }
-    
-    for platform, patterns in platform_patterns.items():
-        platform_data = {}
-        for key, pattern in patterns.items():
-            match = re.search(pattern, stdout_str)
-            if match:
-                platform_data[key] = match.group(1)
-        if platform_data:
-            response['platform_specific'][platform] = platform_data
-    
-    return response
-
 def check_generator_response(stdout_str, stderr_str):
-    """Check if generator successfully created a video file"""
     response_details = {
         'stdout_length': len(stdout_str),
         'stderr_length': len(stderr_str),
         'stdout_sample': stdout_str[:200] if stdout_str else '',
         'stderr_sample': stderr_str[:200] if stderr_str else ''
     }
-    
-    # First check for HTTP 200 status code in the output
-    status_match = re.search(r'HTTP/\d\.\d\s+(\d{3})', stdout_str + stderr_str)
-    if status_match: 
-        response_details['http_status'] = status_match.group(1)
-        if status_match.group(1) == '200':
-            log_with_details('INFO', "Generator returned HTTP 200 status", details=response_details)
-            return True, ""
-    
-    # Check for successful download message in stderr
-    if stderr_str and ('100' in stderr_str or 'Downloaded' in stderr_str):
-        log_with_details('INFO', "Generator download appears successful", details=response_details)
+
+    # Check for HTTP 200 status code
+    status_match = re.search(r'HTTP/\d\.\d\s+(200)', stdout_str + stderr_str)
+    if status_match:
+        log_with_details('INFO', "Generator returned HTTP 200 status", details=response_details)
         return True, ""
-        
-    # Also consider it a success if stderr is empty or only contains progress info
-    if not stderr_str.strip() or all(
-        line.startswith(('* ', '  % Total', '100', 'Warning: ')) 
-        for line in stderr_str.strip().split('\n')
-    ):
-        log_with_details('INFO', "Generator completed with minimal output", details=response_details)
-        return True, ""
-        
+
+    # Check for known error patterns
     error_patterns = [
         r'curl:\s*\(\d+\)',
         r'Connection refused',
@@ -167,248 +99,93 @@ def check_generator_response(stdout_str, stderr_str):
         r'403 Forbidden',
         r'500 Internal Server Error'
     ]
-    
     for pattern in error_patterns:
         if re.search(pattern, stderr_str + stdout_str, re.IGNORECASE):
-            log_with_details('ERROR', f"Generator failed with error pattern: {pattern}", 
-                            details=response_details)
+            log_with_details('ERROR', f"Generator failed with error pattern: {pattern}", details=response_details)
             return False, stderr_str
-    
-    # If we don't detect specific errors, assume success
-    log_with_details('INFO', "Generator considered successful (no error patterns detected)", 
-                    details=response_details)
-    return True, ""
+
+    # If no clear error and not much stderr, assume success
+    if not stderr_str.strip():
+        log_with_details('INFO', "Generator completed successfully with minimal output", details=response_details)
+        return True, ""
+
+    log_with_details('WARNING', "Generator completed with unrecognized output", details=response_details)
+    return False, stderr_str or "Unknown generator failure"
 
 def check_utility_response(stdout_str, stderr_str):
-    """Check if utility successfully processed the video with improved debugging"""
-    # Log the complete output for better debugging
-    log_with_details('INFO', f"Utility response received",
-        details={
-            'stdout_length': len(stdout_str),
-            'stderr_length': len(stderr_str),
-            'stdout_preview': stdout_str[:500] if stdout_str else '',
-            'stderr_preview': stderr_str[:500] if stderr_str else ''
-        })
-    
-    # Check if stderr is empty or contains only progress info
-    if not stderr_str.strip() or all(
-        line.startswith(('* ', '  % Total', '100', 'Warning: ')) 
-        for line in stderr_str.strip().split('\n')
-    ):
-        # Look for HTTP 200 in stdout - this indicates success
-        if 'HTTP/1.1 200' in stdout_str or 'HTTP/2 200' in stdout_str:
-            log_with_details('INFO', "Utility returned HTTP 200 status",
-                details={'success': True})
-            return True, ""
-            
-        # Check for successful download indicators
-        if 'Downloaded' in stderr_str or '100 ' in stderr_str:
-            log_with_details('INFO', "Utility download appears successful",
-                details={'success': True})
-            return True, ""
-            
-        # If stdout has reasonable length but no error patterns, assume success
-        if len(stdout_str) > 100:
-            log_with_details('INFO', "Utility produced substantial output, assuming success",
-                details={'success': True})
-            return True, ""
-            
-    # Consider a return code of 2 from Captions utility as success
-    # This is a specific case for the Captions utility that returns 2 even when successful
-    if "Captions" in stderr_str or "10.20.0.10:8080" in stderr_str:
-        log_with_details('INFO', "Captions utility completed with return code 2, treating as success",
-            details={'contains_captions_indicator': True})
+    response_details = {
+        'stdout_length': len(stdout_str),
+        'stderr_length': len(stderr_str),
+        'stdout_sample': stdout_str[:200] if stdout_str else '',
+        'stderr_sample': stderr_str[:200] if stderr_str else ''
+    }
+
+    combined = stdout_str + stderr_str
+
+    # Look for HTTP 200
+    if re.search(r'HTTP/\d\.\d\s+200', combined):
+        log_with_details('INFO', "Utility returned HTTP 200 status", details=response_details)
         return True, ""
-    
-    # Look for specific error patterns
+
+    # Check for known error patterns
     error_patterns = [
+        r'HTTP/\d\.\d\s+[45]\d{2}',
         r'curl:\s*\(\d+\)',
         r'Connection refused',
         r'Could not resolve host',
         r'Operation timed out',
-        r'Failed to connect',
-        r'HTTP/[0-9.]+ (4[0-9]{2}|5[0-9]{2})',  # Include 4xx errors too
-        r'500 Internal Server Error',
-        r'404 Not Found',
-        r'401 Unauthorized',
-        r'403 Forbidden'
+        r'Failed to connect'
     ]
-    
     for pattern in error_patterns:
-        match = re.search(pattern, stderr_str + stdout_str, re.IGNORECASE)
-        if match:
-            error_msg = match.group(0)
-            log_with_details('ERROR', f"Utility failed with error: {error_msg}",
-                details={
-                    'error_pattern': pattern,
-                    'error_match': error_msg,
-                    'stderr': stderr_str[:500] if stderr_str else ''
-                })
+        if re.search(pattern, combined, re.IGNORECASE):
+            log_with_details('ERROR', f"Utility failed with error pattern: {pattern}", details=response_details)
             return False, stderr_str or stdout_str
-    
-    # If no specific errors found but stderr has content, log it as a warning
-    if stderr_str.strip() and not stderr_str.startswith(('* ', '  % Total', '100', 'Warning: ')):
-        log_with_details('WARNING', "Utility produced stderr output but no recognized error pattern",
-            details={'stderr': stderr_str[:500]})
-    
-    # Default to success if no clear error detected
-    return True, ""
+
+    # No clear error
+    if not stderr_str.strip():
+        log_with_details('INFO', "Utility succeeded (no stderr output)", details=response_details)
+        return True, ""
+
+    log_with_details('WARNING', "Utility stderr present with no clear failure pattern", details=response_details)
+    return True, ""  # fallback to success if no hard error
 
 def check_uploader_response(stdout_str, stderr_str):
-    """Check if upload was successful with comprehensive error detection"""
-    # Log full response details for debugging
     response_details = {
         'stdout_length': len(stdout_str),
         'stderr_length': len(stderr_str),
-        'stdout_preview': stdout_str[:500] if stdout_str else '',
-        'stderr_preview': stderr_str[:500] if stderr_str else ''
+        'stdout_sample': stdout_str[:200] if stdout_str else '',
+        'stderr_sample': stderr_str[:200] if stderr_str else ''
     }
-    log_with_details('INFO', "Checking uploader response", 
-                   details=response_details)
-    
-    # Combine stdout and stderr for easier searching
+
     full_response = stdout_str + stderr_str
-    
-    # First check for HTTP 500 errors explicitly - these are critical to catch
-    http_500_patterns = [
-        r'HTTP/[0-9\.]+ 500',
-        r'500 Internal Server Error',
-        r'The requested URL returned error: 500',
-        r'server error: 500'
-    ]
-    
-    for pattern in http_500_patterns:
-        if re.search(pattern, full_response, re.IGNORECASE):
-            error_msg = f"HTTP 500 Server Error detected: {pattern}"
-            log_with_details('ERROR', error_msg, 
-                details={'error_type': 'server_error', 'match': pattern})
-            return False, error_msg
-    
-    # Check for all HTTP 4xx and 5xx errors
-    http_error_match = re.search(r'HTTP/[0-9\.]+ ([45][0-9]{2})', full_response, re.IGNORECASE)
-    if http_error_match:
-        status_code = http_error_match.group(1)
-        error_msg = f"HTTP error {status_code}"
-        log_with_details('ERROR', error_msg, 
-            details={'error_type': 'http_error', 'status_code': status_code})
-        return False, error_msg
-    
-    # Platform-specific error checks
-    # TikTok errors
-    tiktok_error_patterns = [
-        r'NO COOKIES FILE FOUND',
-        r'COOKIES EXPIRED',
-        r'PLEASE LOG-IN',
-        r'LOGIN FAILURE',
-        r'authentication failed',
-        r'TikTok login error',
-        r'rate limited',
-        r'video (upload|processing) failed',
-        r'content violation'
-    ]
-    
-    for pattern in tiktok_error_patterns:
-        if re.search(pattern, full_response, re.IGNORECASE):
-            error_msg = f"TikTok error: {pattern}"
-            log_with_details('ERROR', error_msg, 
-                details={'error_type': 'tiktok', 'match': pattern})
-            return False, error_msg
-    
-    # General connection errors
-    connection_error_patterns = [
-        r'curl: \((\d+)\)',
+
+    # HTTP status check
+    http_error = re.search(r'HTTP/\d\.\d\s+([45]\d{2})', full_response)
+    if http_error:
+        code = http_error.group(1)
+        log_with_details('ERROR', f"Uploader returned HTTP error {code}", details=response_details)
+        return False, f"HTTP error {code}"
+
+    # Connection issues
+    conn_errors = [
+        r'curl:\s*\(\d+\)',
         r'Connection refused',
         r'Could not resolve host',
-        r'Operation timed out',
-        r'Failed to connect',
-        r'SSL (certificate|handshake) (error|problem)',
+        r'Timed out',
+        r'SSL (certificate|handshake)',
         r'connection reset by peer'
     ]
-    
-    for pattern in connection_error_patterns:
-        match = re.search(pattern, full_response, re.IGNORECASE)
-        if match:
-            error_detail = match.group(0)
-            error_msg = f"Connection error: {error_detail}"
-            log_with_details('ERROR', error_msg, 
-                details={'error_type': 'connection', 'match': error_detail})
-            return False, error_msg
-    
-    # Check for JSON error responses
-    try:
-        json_start = stdout_str.find('{')
-        if json_start >= 0:
-            json_response = json.loads(stdout_str[json_start:])
-            if isinstance(json_response, dict):
-                # Check for error indicators
-                if any(key in json_response for key in ['error', 'errors', 'detail', 'message']) and \
-                   not (json_response.get('success') == True or 'video_id' in json_response):
-                    
-                    error_key = next((k for k in ['error', 'errors', 'detail', 'message'] if k in json_response), None)
-                    error_msg = f"API error: {json_response.get(error_key)}"
-                    log_with_details('ERROR', error_msg, 
-                        details={'error_type': 'api', 'json_response': json_response})
-                    return False, error_msg
-                
-                # Check for success indicators
-                if json_response.get('success') == True or \
-                   any(key in json_response for key in ['video_id', 'id', 'media_id']):
-                    log_with_details('INFO', "Upload successful based on JSON response", 
-                        details={'success_indicators': [k for k in ['success', 'video_id', 'id', 'media_id'] if k in json_response]})
-                    return True, ""
-    except Exception as e:
-        # JSON parsing error is not a failure
-        log_with_details('INFO', f"JSON parsing error (not critical): {str(e)}", 
-            details={'error': str(e)})
-    
-    # Check for success patterns in text output
-    success_patterns = [
-        r'upload(ed)? successful',
-        r'100% complete',
-        r'video (_)?id',
-        r'media (_)?id',
-        r'success',
-        r'HTTP/[0-9\.]+ 20[0-9]'
-    ]
-    
-    for pattern in success_patterns:
+    for pattern in conn_errors:
         if re.search(pattern, full_response, re.IGNORECASE):
-            success_match = re.search(pattern, full_response, re.IGNORECASE).group(0)
-            log_with_details('INFO', f"Upload successful: {success_match}", 
-                details={'match': success_match})
-            return True, ""
-    
-    # If stderr is empty, it's likely a success
-    if not stderr_str.strip() and len(stdout_str) > 0:
-        log_with_details('INFO', "Upload appears successful (no error output)", 
-            details={'stdout_length': len(stdout_str)})
-        return True, ""
-    
-    # If stderr only contains progress indicators or curl info, it's likely a success
-    if stderr_str and all(line.startswith(('* ', '  % Total', '100')) 
-                    for line in stderr_str.strip().split('\n')):
-        log_with_details('INFO', "Upload appears successful (only progress indicators in stderr)", 
-            details={'stderr_preview': stderr_str[:200]})
-        return True, ""
-        
-    # If process returned successful but we can't confirm it, log a warning but treat as success
+            log_with_details('ERROR', f"Uploader connection error: {pattern}", details=response_details)
+            return False, f"Connection error: {pattern}"
+
+    # Minimal stderr – likely success
     if not stderr_str.strip():
-        log_with_details('WARNING', "Upload treated as successful but without clear confirmation", 
-            details={'stdout_preview': stdout_str[:200]})
+        log_with_details('INFO', "Uploader completed without stderr – assuming success", details=response_details)
         return True, ""
-    
-    # If stderr contains substantial output but no recognized errors, log as a warning
-    log_with_details('WARNING', "Upload has stderr output but no recognized error patterns", 
-        details={'stderr_preview': stderr_str[:300]})
-        
-    # Default to failure if stderr is not empty and no success patterns found
-    if stderr_str.strip():
-        error_msg = "Upload failed with unrecognized error"
-        log_with_details('ERROR', error_msg, 
-            details={'stderr_preview': stderr_str[:300]})
-        return False, stderr_str
-    
-    # If we get here with no clear indicators either way, default to success
+
+    log_with_details('WARNING', "Uploader stderr present but no error pattern matched", details=response_details)
     return True, ""
 
 # Fix for the utility command formatting section in execute_curl
