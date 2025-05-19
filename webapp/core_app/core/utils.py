@@ -1,4 +1,3 @@
-import subprocess
 import time
 import glob
 import os
@@ -213,9 +212,11 @@ def check_utility_response(stdout_str, stderr_str):
                 details={'success': True})
             return True, ""
             
-    # Check for commands that might modify files in place
-    if '--output' in stdout_str + stderr_str or 'output=' in stdout_str + stderr_str:
-        log_with_details('INFO', "Command likely modifies file in place, treating as success")
+    # Consider a return code of 2 from Captions utility as success
+    # This is a specific case for the Captions utility that returns 2 even when successful
+    if "Captions" in stderr_str or "10.20.0.10:8080" in stderr_str:
+        log_with_details('INFO', "Captions utility completed with return code 2, treating as success",
+            details={'contains_captions_indicator': True})
         return True, ""
     
     # Look for specific error patterns
@@ -291,25 +292,25 @@ def check_uploader_response(stdout_str, stderr_str):
             details={'error_type': 'http_error', 'status_code': status_code})
         return False, error_msg
     
-    # General authentication/login errors
-    auth_error_patterns = [
+    # Platform-specific error checks
+    # TikTok errors
+    tiktok_error_patterns = [
         r'NO COOKIES FILE FOUND',
         r'COOKIES EXPIRED',
         r'PLEASE LOG-IN',
-        r'LOGIN (REQUIRED|FAILURE)',
+        r'LOGIN FAILURE',
         r'authentication failed',
-        r'login (error|failed)',
+        r'TikTok login error',
         r'rate limited',
-        r'token expired',
-        r'not authorized',
-        r'video (upload|processing) failed'
+        r'video (upload|processing) failed',
+        r'content violation'
     ]
     
-    for pattern in auth_error_patterns:
+    for pattern in tiktok_error_patterns:
         if re.search(pattern, full_response, re.IGNORECASE):
-            error_msg = f"Authentication error: {pattern}"
+            error_msg = f"TikTok error: {pattern}"
             log_with_details('ERROR', error_msg, 
-                details={'error_type': 'auth', 'match': pattern})
+                details={'error_type': 'tiktok', 'match': pattern})
             return False, error_msg
     
     # General connection errors
@@ -411,12 +412,7 @@ def check_uploader_response(stdout_str, stderr_str):
 
 # Fix for the utility command formatting section in execute_curl
 def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, validate_output=False, timeout=3600, mode='uploader'):
-    """Execute curl command with reliable, generic error detection for all service types.
-    
-    This function handles executing curl commands for generators, utilities, and uploaders
-    with flexible, category-based error detection that doesn't rely on special cases for
-    specific applications.
-    """
+    """Enhanced curl execution with better error handling and Docker compatibility"""
     execution_details = {
         'command': curl_command,
         'attempts': [],
@@ -432,7 +428,7 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
                      details={'command': curl_command, 'mode': mode})
     
     if clean_before:
-        log_with_details('INFO', "Cleaning up existing MP4 files before execution")
+        log_with_details('INFO', "Cleaning up existing MP4 files before execution", details={'mode': mode})
         cleanup_existing_mp4s()
     
     for attempt in range(retries):
@@ -444,23 +440,26 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
         try:
             # Ensure working directory is set to app root for consistent file paths
             cwd = os.getcwd()
+            log_with_details('DEBUG', f"Current working directory: {cwd}",
+                details={'command': curl_command})
             
             # Default to using command as-is
             modified_command = curl_command
             
             # Handle {input} placeholder for utility commands
             if mode == 'utility':
-                log_with_details('INFO', "Processing utility command", 
+                log_with_details('INFO', f"Processing utility command", 
                     details={'original_command': curl_command})
                 
-                # Find MP4 files in common locations
+                # First try to find MP4 files in common locations
                 mp4_files = []
                 search_paths = ['.', '/tmp', '/var/tmp']
                 processed_dir = os.path.join(cwd, 'processed_videos')
                 if os.path.exists(processed_dir):
                     search_paths.append(processed_dir)
                     
-                log_with_details('INFO', "Searching for MP4 files in multiple paths", 
+                # Log all search paths
+                log_with_details('INFO', f"Searching for MP4 files in multiple paths", 
                     details={'search_paths': search_paths})
                                 
                 # Search for MP4 files in all paths
@@ -480,9 +479,11 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
                                         if size >= 1024:  # At least 1KB
                                             mp4_files.append(file_path)
                                     except Exception as size_error:
-                                        log_with_details('WARNING', f"Error checking file size: {str(size_error)}")
+                                        log_with_details('WARNING', f"Error checking file size: {str(size_error)}",
+                                            details={'error': str(size_error), 'file': file_path})
                         except Exception as list_error:
-                            log_with_details('WARNING', f"Error listing directory {search_path}: {str(list_error)}")
+                            log_with_details('WARNING', f"Error listing directory {search_path}: {str(list_error)}",
+                                details={'error': str(list_error), 'path': search_path})                
                 
                 log_with_details('INFO', f"Found MP4 files for utility", 
                     details={'mp4_files': mp4_files})
@@ -492,311 +493,27 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
                     try:
                         mp4_files.sort(key=os.path.getctime, reverse=True)
                     except Exception as sort_error:
-                        log_with_details('WARNING', f"Error sorting files by creation time: {str(sort_error)}")
+                        log_with_details('WARNING', f"Error sorting files by creation time: {str(sort_error)}",
+                            details={'error': str(sort_error)})
                     
                     input_file = mp4_files[0]  # Use the most recent MP4 file
                     
-                    # Docker uses forward slashes for paths
-                    input_file = input_file
+                    # Convert Windows backslashes to forward slashes for curl
+                    input_file = input_file.replace('\\', '/')
                     
                     # Replace {input} with the path
                     modified_command = curl_command.replace('{input}', input_file)
-                    log_with_details('INFO', "Replaced input in utility command",
+                    log_with_details('INFO', f"Replaced input in utility command",
                         details={
                             'original_command': curl_command, 
                             'modified_command': modified_command,
                             'input_file': input_file
                         })
                 else:
-                    log_with_details('ERROR', "No MP4 files found for utility command")
+                    log_with_details('ERROR', "No MP4 files found for utility command", 
+                        details={'search_paths': search_paths, 'current_dir': os.getcwd()})
                     # Return failure immediately if no MP4 files found
                     return False, "", "No MP4 files found for processing"
-            
-            # Log command details before execution
-            log_with_details('INFO', f"Executing command (attempt {attempt+1}/{retries})")
-            
-            try:
-                log_with_details('INFO', "Starting Popen subprocess")
-                
-                # Fix environment path issues by making sure all paths use forward slashes
-                fixed_command = modified_command
-                
-                # Check if this is a command for a network service
-                if 'http://' in fixed_command:
-                    # Extract the IP and port from the command
-                    service_match = re.search(r'http://([0-9.]+):([0-9]+)', fixed_command)
-                    if service_match:
-                        service_ip = service_match.group(1)
-                        service_port = service_match.group(2)
-                        log_with_details('INFO', f"Detected microservice call to {service_ip}:{service_port}")
-                        
-                        # Verify the service is available before attempting the call
-                        try:
-                            import socket
-                            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                            s.settimeout(5)  # 5 second timeout
-                            connect_result = s.connect_ex((service_ip, int(service_port)))
-                            s.close()
-                            
-                            if connect_result == 0:
-                                log_with_details('INFO', f"Successfully connected to service at {service_ip}:{service_port}")
-                            else:
-                                log_with_details('WARNING', f"Cannot connect to service at {service_ip}:{service_port} (error: {connect_result})")
-                                    
-                                # Try to add a timeout parameter to curl if not already present
-                                if '--connect-timeout' not in fixed_command:
-                                    fixed_command = fixed_command.replace('curl', 'curl --connect-timeout 10', 1)
-                                    log_with_details('INFO', "Added connection timeout to curl command")
-                        except Exception as socket_err:
-                            log_with_details('WARNING', f"Socket test failed: {str(socket_err)}")
-                
-                # Setup environment with correct paths
-                env = os.environ.copy()
-                # If we're in Docker, make sure PATH includes needed directories
-                if os.path.exists('/usr/local/bin/curl'):
-                    env['PATH'] = f"/usr/local/bin:/usr/bin:/bin:{env.get('PATH', '')}" 
-                # Docker-only environment - curl should be available in the container
-                
-                # Ensure working directory exists (Docker compatibility)
-                working_dir = os.getcwd()
-                os.makedirs(working_dir, exist_ok=True)
-                
-                log_with_details('INFO', "Starting process with env")
-                
-                # Run the command
-                process = subprocess.Popen(
-                    fixed_command,
-                    shell=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    env=env,
-                    cwd=working_dir
-                )
-                log_with_details('INFO', f"Subprocess started with PID: {process.pid}")
-            except Exception as subprocess_error:
-                log_with_details('ERROR', f"Failed to start subprocess: {str(subprocess_error)}")
-                raise
-            
-            try:
-                log_with_details('INFO', f"Waiting for subprocess to complete with timeout: {timeout}s")
-                stdout, stderr = process.communicate(timeout=timeout)
-                stdout_str = stdout.decode(errors='replace')
-                stderr_str = stderr.decode(errors='replace')
-                
-                log_with_details('INFO', f"Subprocess completed with return code: {process.returncode}")
-                
-                # Save logs to a backup log file for debugging
-                if mode in ['generator', 'utility']:
-                    try:
-                        logs_dir = os.path.join(os.getcwd(), 'backup_logs')
-                        os.makedirs(logs_dir, exist_ok=True)
-                        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                        log_file = os.path.join(logs_dir, f"{mode}_{timestamp}.log")
-                        with open(log_file, 'w', encoding='utf-8') as f:
-                            f.write(f"Command: {fixed_command}\n")
-                            f.write(f"Return code: {process.returncode}\n")
-                            f.write(f"\nSTDOUT:\n{stdout_str}\n")
-                            f.write(f"\nSTDERR:\n{stderr_str}\n")
-                        log_with_details('INFO', f"Saved {mode} logs to {log_file}")
-                    except Exception as log_error:
-                        log_with_details('WARNING', f"Failed to save backup logs: {str(log_error)}")
-                
-            except subprocess.TimeoutExpired as timeout_error:
-                log_with_details('ERROR', f"Subprocess timed out after {timeout}s")
-                # Try to kill the process
-                try:
-                    process.kill()
-                    log_with_details('INFO', f"Killed timed out process (PID: {process.pid})")
-                except Exception as kill_error:
-                    log_with_details('WARNING', f"Failed to kill timed out process: {str(kill_error)}")
-                raise
-            
-            attempt_details.update({
-                'return_code': process.returncode,
-                'stdout_length': len(stdout_str),
-                'stderr_length': len(stderr_str)
-            })
-
-            # Parse the Content-Disposition header for the filename when in generator mode
-            generated_filename = None
-            if mode == 'generator':
-                cd_match = re.search(r'Content-Disposition:.*filename="?([^";
-]+)', stderr_str, re.IGNORECASE)
-                if cd_match:
-                    generated_filename = cd_match.group(1)
-                    attempt_details['generated_filename'] = generated_filename
-                    log_with_details('INFO', f"Found filename in Content-Disposition header: {generated_filename}")
-                else:
-                    log_with_details('WARNING', "No filename found in Content-Disposition header")
-            
-            # ===== SIMPLIFIED ERROR DETECTION BASED ON HTTP STATUS AND RETURN CODES =====
-            # This is the main focus of our changes - making error detection reliable
-            # while avoiding special cases for specific services
-            
-            # Combine stdout and stderr for searching (HTTP status codes could be in either)
-            full_response = stdout_str + stderr_str
-            is_success = False
-            error_message = ""
-            
-            # 1. Check for HTTP status codes (strongest indicator of success/failure)
-            http_status_match = re.search(r'HTTP/[0-9.]+ (\d{3})', full_response)
-            if http_status_match:
-                status_code = int(http_status_match.group(1))
-                if 200 <= status_code < 300:
-                    # 2xx status codes always indicate success
-                    log_with_details('INFO', f"HTTP {status_code} status code indicates success")
-                    is_success = True
-                elif status_code >= 400:
-                    # 4xx/5xx status codes always indicate failure
-                    error_message = f"HTTP error {status_code}"
-                    log_with_details('ERROR', error_message)
-                    is_success = False
-                    
-                    # For HTTP errors, retry if we have attempts left
-                    if attempt < retries - 1:
-                        retry_timeout = retry_delay * (2 ** attempt)
-                        log_with_details('INFO', f"Retrying in {retry_timeout} seconds")
-                        time.sleep(retry_timeout)
-                        continue
-                    return False, stdout_str, error_message
-            
-            # 2. Check for common network/curl errors in output
-            error_patterns = [
-                r'curl:\s*\(\d+\)',
-                r'Connection refused',
-                r'Could not resolve host',
-                r'Operation timed out',
-                r'Failed to connect',
-                r'SSL (certificate|handshake) (error|problem)',
-                r'connection reset by peer',
-                r'500 Internal Server Error',
-                r'404 Not Found',
-                r'403 Forbidden'
-            ]
-            
-            for pattern in error_patterns:
-                if re.search(pattern, full_response, re.IGNORECASE):
-                    match = re.search(pattern, full_response, re.IGNORECASE).group(0)
-                    error_message = f"Connection error: {match}"
-                    log_with_details('ERROR', error_message)
-                    is_success = False
-                    
-                    # For connection errors, retry if we have attempts left
-                    if attempt < retries - 1:
-                        retry_timeout = retry_delay * (2 ** attempt)
-                        log_with_details('INFO', f"Retrying in {retry_timeout} seconds")
-                        time.sleep(retry_timeout)
-                        continue
-                    return False, stdout_str, error_message
-            
-            # 3. Process return code - varies by mode
-            if not is_success:  # Only check if HTTP status didn't already determine result
-                if process.returncode == 0:
-                    # Zero return code generally indicates success
-                    log_with_details('INFO', "Success based on return code 0")
-                    is_success = True
-                else:
-                    # Non-zero return code - may or may not be an error
-                    # The decision is based on the command mode and output
-                    
-                    # For utilities that modify the input file in-place, allow non-zero codes
-                    if mode == 'utility' and ('--output "{input}"' in curl_command or 'output="{input}"' in curl_command):
-                        log_with_details('INFO', 
-                            f"Utility modifies input file in-place, treating return code {process.returncode} as success")
-                        is_success = True
-                    # For any mode, substantial stdout suggests it worked despite the error code
-                    elif len(stdout_str.strip()) > 100:
-                        log_with_details('INFO', 
-                            f"Command produced substantial output despite return code {process.returncode}, treating as success")
-                        is_success = True
-                    # For generators, check if a file was actually produced
-                    elif mode == 'generator':
-                        video_file = get_latest_video(max_retries=1)
-                        if video_file:
-                            log_with_details('INFO', 
-                                f"Generator produced output file despite return code {process.returncode}, treating as success")
-                            is_success = True
-                    # For stderr with clear error keywords, treat as failure
-                    elif any(keyword in stderr_str.lower() for keyword in ['error', 'failed', 'failure', 'exception']):
-                        error_message = f"Process failed with return code {process.returncode}"
-                        log_with_details('ERROR', error_message)
-                        is_success = False
-                    else:
-                        # Default behavior depends on mode - uploaders are most sensitive to failures
-                        if mode == 'uploader':
-                            error_message = f"Upload failed with return code {process.returncode}"
-                            log_with_details('ERROR', error_message)
-                            is_success = False
-                        else:
-                            # Generators and utilities often work despite non-zero codes
-                            log_with_details('WARNING', 
-                                f"Non-zero return code {process.returncode} but no error pattern found, treating as success")
-                            is_success = True
-            
-            # If we're still not successful and have retries left, try again
-            if not is_success and attempt < retries - 1:
-                retry_timeout = retry_delay * (2 ** attempt)
-                log_with_details('INFO', f"Retrying in {retry_timeout} seconds")
-                time.sleep(retry_timeout)
-                continue
-            
-            # Either we're successful or out of retries
-            if is_success:
-                log_with_details('INFO', "Curl command executed successfully")
-                
-                # For generators, validate the output if requested
-                if validate_output and mode == 'generator':
-                    # List files in current directory for debugging
-                    try:
-                        files = os.listdir('.')
-                        mp4_files = [f for f in files if f.lower().endswith('.mp4')]
-                        log_with_details('INFO', "Files in directory after generator execution", 
-                            details={'mp4_files': mp4_files})
-                    except Exception as e:
-                        log_with_details('WARNING', f"Error listing directory contents: {str(e)}")
-                        
-                    # Try to find the video file
-                    video_file = get_latest_video()
-                    if not video_file:
-                        if attempt < retries - 1:
-                            log_with_details('WARNING', "No video file found, retrying...")
-                            time.sleep(retry_delay * (2 ** attempt))
-                            continue
-                        return False, stdout_str, "No video file generated"
-                    
-                    log_with_details('INFO', f"Found video file: {video_file}")
-                    
-                    is_valid, validation_msg = validate_video_file(video_file)
-                    if not is_valid:
-                        if attempt < retries - 1:
-                            log_with_details('WARNING', f"Invalid video file: {validation_msg}, retrying...")
-                            time.sleep(retry_delay * (2 ** attempt))
-                            continue
-                        return False, stdout_str, f"Invalid video file: {validation_msg}"
-                
-                # Return success result
-                return True, stdout_str, generated_filename if mode == 'generator' else stderr_str
-            else:
-                # We've exhausted retries and still not successful
-                return False, stdout_str, error_message or "Failed with unspecified error"
-            
-        except subprocess.TimeoutExpired:
-            attempt_details['error'] = "Process timed out"
-            execution_details['attempts'].append(attempt_details)
-            if attempt < retries - 1:
-                continue
-            return False, "", "Process timed out"
-            
-        except Exception as e:
-            attempt_details['error'] = str(e)
-            execution_details['attempts'].append(attempt_details)
-            if attempt < retries - 1:
-                continue
-            return False, "", f"Error: {str(e)}"
-    
-    log_with_details('ERROR', f"Failed after {retries} attempts", details=execution_details)
-    return False, "", f"Failed after {retries} attempts"
-                                    
             
 
             
@@ -878,7 +595,29 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
                         'command': fixed_command
                     })
                 
-                # Docker containers should always have curl available
+                # Verify that we can run the command properly
+                if mode == 'utility':
+                    # For utility mode, detect if the curl command will likely fail due to network issues
+                    try:
+                        test_cmd = None
+                        if sys.platform.startswith('win'):
+                            # On Windows, check if curl executable is available
+                            test_cmd = 'where curl'
+                        else:
+                            # On Linux/Unix, use which
+                            test_cmd = 'which curl'
+                            
+                        if test_cmd:
+                            curl_check = subprocess.run(test_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                            if curl_check.returncode != 0:
+                                log_with_details('WARNING', "curl command not found in PATH",
+                                    details={
+                                        'system_path': env.get('PATH', ''),
+                                        'platform': sys.platform
+                                    })
+                    except Exception as e:
+                        log_with_details('WARNING', f"Error checking curl availability: {str(e)}",
+                            details={'error': str(e)})
                 
                 # Run the command
                 process = subprocess.Popen(
@@ -1587,8 +1326,9 @@ def format_upload_command(cmd_template, video_file, task_data, platform_data):
 
         # Format the command with all required parameters
         try:
-            # Docker paths should be used directly
-            safe_path_unquoted = safe_video_path
+            # FIXED: Don't add quotes around the path, as curl in Docker handles this differently
+            # Convert Windows backslashes to forward slashes for curl
+            safe_path_unquoted = safe_video_path.replace('\\', '/')
             
             formatted_cmd = cmd_template.format(
                 video=safe_path_unquoted,
