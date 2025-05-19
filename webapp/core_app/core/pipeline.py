@@ -151,26 +151,15 @@ def safe_rollback(conn, cursor=None):
 #     return db_get_path()
 
 def force_release_lock():
-    """Simplified force lock release function for PostgreSQL.
+    """Force release lock function for PostgreSQL.
     
-    With PostgreSQL's row-level locking, we can use a simple approach.
+    Directly creates a connection to release the lock in a Docker environment.
     """
     try:
-        # Create a direct connection outside the pool since the pool might be the source of issues
-        try:
-            # First try the normal create_connection method
-            conn = db.create_connection()
-            conn.autocommit = True
-        except AttributeError as ae:
-            # If create_connection doesn't exist, use a direct connection approach
-            if "_create_connection" in str(ae) or "create_connection" in str(ae):
-                # Create a manual connection directly instead
-                logger.info("Using direct connection for lock release")
-                db_url = db.get_db_connection_string()
-                conn = psycopg2.connect(db_url)
-                conn.autocommit = True
-            else:
-                raise ae
+        # Create a direct connection
+        db_url = get_db_connection_string()
+        conn = psycopg2.connect(db_url)
+        conn.autocommit = True
         
         try:
             with conn.cursor() as c:
