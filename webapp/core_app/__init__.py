@@ -269,9 +269,10 @@ def init_scheduler(app):
         
         # Add automatic lock reset job to clear any stuck locks
         # Run more frequently (every 10 minutes) to prevent prolonged deadlocks
+        from webapp.core_app.core.pipeline import force_release_lock
         scheduler.add_job(
             id='auto_lock_reset',
-            func='webapp.core_app.core.pipeline:force_release_lock',
+            func=force_release_lock,  # Use direct function reference
             trigger='interval',
             minutes=10,  # Run every 10 minutes to ensure no lock is stuck for long
             name='Automatic Lock Reset',

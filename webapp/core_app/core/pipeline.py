@@ -2027,52 +2027,57 @@ def process_task_with_times(task_id, schedule_times, conn, task_result, total_vi
 
 def process_scheduled_uploads():
     """Process tasks that are ready for upload - Modified to process ALL pending videos"""
-    lock_acquired = False
     try:
         # Always log that we're checking for uploads
         logger.info("Checking for videos ready to upload...")
         
-        if not check_and_set_lock():
-            logger.debug("Task lock is held, skipping scheduled uploads")
-            return
-            
-        lock_acquired = True
+        # Create a direct connection with autocommit for reliable locks
+        connection = db.create_connection()
+        connection.autocommit = True
         
-        # Check if we need to create an app context
         try:
-            from flask import current_app
-            in_app_context = False
+            cursor = connection.cursor()
+            # Modified query to get ALL pending uploads for the current time
+            # Removed LIMIT 1 to process all pending videos
+            cursor.execute('''
+                SELECT v.task_id, v.id, v.original_name, v.processed_path, v.scheduled_time
+                FROM generated_videos v
+                JOIN tasks t ON v.task_id = t.id
+                WHERE v.upload_status = 'pending'
+                AND v.scheduled_time <= now()
+                AND t.status != 'failed'
+                ORDER BY v.scheduled_time ASC
+            ''')
+            pending_uploads = cursor.fetchall()
             
-            try:
-                # Try to access current_app to see if we're in an app context
-                current_app._get_current_object()
-                in_app_context = True
-            except Exception:
-                # We're not in an app context
-                in_app_context = False
+            if pending_uploads:
+                logger.info(f"Found {len(pending_uploads)} pending videos to upload")
                 
-            if in_app_context:
-                # Already in app context, proceed normally
-                process_uploads_with_context()
-            else:
-                # Create an app context first
-                from webapp.core_app import app
-                with app.app_context():
-                    process_uploads_with_context()
-        except Exception as e:
-            logger.error(f"Error in scheduled uploads processor: {str(e)}")
-            
-    finally:
-        # Release lock if acquired
-        if lock_acquired:
-            try:
-                release_lock()
-            except Exception as e:
-                logger.error(f"Failed to release lock after scheduled uploads: {str(e)}")
-                try:
-                    force_release_lock()
-                except Exception as force_e:
-                    logger.error(f"Force release also failed after scheduled uploads: {str(force_e)}")
+                for pending_upload in pending_uploads:
+                    task_id, video_id, original_name, processed_path, scheduled_time = pending_upload
+                    try:
+                        # Important: Create a new direct connection for each video upload
+                        upload_conn = db.create_connection()
+                        upload_conn.autocommit = True
+                        
+                        try:
+                            # Call the upload function with our parameters
+                            process_video_upload(
+                                task_id, 
+                                (video_id, original_name, processed_path, scheduled_time), 
+                                conn=upload_conn
+                            )
+                            logger.info(f"Successfully processed upload for video {video_id}, task {task_id}")
+                        finally:
+                            upload_conn.close()
+                            
+                    except Exception as e:
+                        logger.error(f"Failed to process upload for task {task_id}: {str(e)}")
+        finally:
+            connection.close()
+                
+    except Exception as e:
+        logger.error(f"Error in scheduled uploads processor: {str(e)}")
                     
 def process_uploads_with_context():
     """Helper function to process uploads with proper context"""
