@@ -156,9 +156,8 @@ def force_release_lock():
     Directly creates a connection to release the lock in a Docker environment.
     """
     try:
-        # Create a direct connection
-        db_url = get_db_connection_string()
-        conn = psycopg2.connect(db_url)
+        # Create a direct connection using db instance to avoid import issues
+        conn = db.create_connection()
         conn.autocommit = True
         
         try:
@@ -1192,17 +1191,58 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
             current_stdout = ""
             current_stderr = ""
 
-            # Try primary upload
-            success, stdout, stderr = execute_curl(upload_cmd, retries=3, retry_delay=5, mode='uploader', timeout=600)  # 10 minute timeout
-            current_stdout, current_stderr = stdout, stderr
+            # Try primary upload with enhanced retry logic
+            max_retries = 3
+            retry_delay_base = 10  # seconds
             used_fallback = False
             fallback_level = 0  # 0 = no fallback, 1 = primary fallback, 2 = secondary fallback
+            current_stdout = ""
+            current_stderr = ""
+            detailed_errors = []
 
-            # If primary fails, try fallback
-            if not success and fallback_curl:
-                log_with_task_details('INFO', f"Primary upload failed, attempting fallback for {platform_name}",
+            # Primary upload attempt with retries
+            primary_success = False
+            for primary_attempt in range(max_retries):
+                log_with_task_details('INFO', f"Primary upload attempt {primary_attempt+1}/{max_retries} for {platform_name}",
                     task_id=task_id,
-                    details={'primary_error': stderr, **platform_details})
+                    details={'platform': platform_name, 'attempt': primary_attempt+1})
+                    
+                success, stdout, stderr = execute_curl(upload_cmd, retries=1, retry_delay=5, mode='uploader', timeout=600)  # 10 minute timeout
+                current_stdout, current_stderr = stdout, stderr
+                
+                if success:
+                    primary_success = True
+                    log_with_task_details('INFO', f"Primary upload succeeded on attempt {primary_attempt+1}",
+                        task_id=task_id,
+                        details={'platform': platform_name})
+                    break
+                    
+                # Log the failure details
+                error_detail = {
+                    'attempt': primary_attempt+1,
+                    'uploader': 'primary',
+                    'platform': platform_name,
+                    'error': stderr,
+                    'stdout': stdout[:500] if stdout else ''
+                }
+                detailed_errors.append(error_detail)
+                
+                log_with_task_details('WARNING', f"Primary upload attempt {primary_attempt+1} failed for {platform_name}",
+                    task_id=task_id,
+                    details=error_detail)
+                    
+                # Don't wait after last attempt
+                if primary_attempt < max_retries - 1:
+                    retry_delay = retry_delay_base * (2 ** primary_attempt)  # Exponential backoff
+                    log_with_task_details('INFO', f"Retrying primary upload in {retry_delay} seconds",
+                        task_id=task_id)
+                    time.sleep(retry_delay)
+            
+            # If primary upload fails all retries and fallback_curl exists, try fallback
+            if not primary_success and fallback_curl:
+                log_with_task_details('INFO', f"Primary upload failed after {max_retries} attempts, switching to fallback for {platform_name}",
+                    task_id=task_id,
+                    details={'primary_errors': detailed_errors, **platform_details})
                 
                 fallback_cmd, fallback_safe_path = format_upload_command(
                     fallback_curl,
@@ -1213,34 +1253,114 @@ def process_video_upload(task_id, video_info=None, preview_mode=False, conn=None
                 
                 if fallback_safe_path:
                     files_to_cleanup.add(fallback_safe_path)
+                
+                # Reset detailed errors for fallback
+                detailed_errors = []
+                
+                # Try fallback with retries
+                fallback_success = False
+                for fallback_attempt in range(max_retries):
+                    log_with_task_details('INFO', f"Fallback upload attempt {fallback_attempt+1}/{max_retries} for {platform_name}",
+                        task_id=task_id,
+                        details={'platform': platform_name, 'attempt': fallback_attempt+1, 'uploader': 'fallback'})
+                        
+                    success, stdout, stderr = execute_curl(fallback_cmd, retries=1, retry_delay=5, mode='uploader', timeout=600)  # 10 minute timeout
                     
-                success, stdout, stderr = execute_curl(fallback_cmd, retries=3, retry_delay=5, mode='uploader', timeout=600)  # 10 minute timeout
-                if success:
-                    used_fallback = True
-                    fallback_level = 1
-                    current_stdout, current_stderr = stdout, stderr
+                    if success:
+                        fallback_success = True
+                        used_fallback = True
+                        fallback_level = 1
+                        current_stdout, current_stderr = stdout, stderr
+                        log_with_task_details('INFO', f"Fallback upload succeeded on attempt {fallback_attempt+1}",
+                            task_id=task_id,
+                            details={'platform': platform_name})
+                        break
+                        
+                    # Log the failure details
+                    error_detail = {
+                        'attempt': fallback_attempt+1,
+                        'uploader': 'fallback',
+                        'platform': platform_name,
+                        'error': stderr,
+                        'stdout': stdout[:500] if stdout else ''
+                    }
+                    detailed_errors.append(error_detail)
+                    
+                    log_with_task_details('WARNING', f"Fallback upload attempt {fallback_attempt+1} failed for {platform_name}",
+                        task_id=task_id,
+                        details=error_detail)
+                        
+                    # Don't wait after last attempt
+                    if fallback_attempt < max_retries - 1:
+                        retry_delay = retry_delay_base * (2 ** fallback_attempt)  # Exponential backoff
+                        log_with_task_details('INFO', f"Retrying fallback upload in {retry_delay} seconds",
+                            task_id=task_id)
+                        time.sleep(retry_delay)
 
-            # If fallback fails, try secondary fallback
-            if not success and fallback_curl_2:
-                log_with_task_details('INFO', f"Fallback upload failed, attempting secondary fallback for {platform_name}",
-                    task_id=task_id,
-                    details={'fallback_error': stderr, **platform_details})
-                
-                fallback_cmd_2, fallback_safe_path_2 = format_upload_command(
-                    fallback_curl_2,
-                    platform_video_file,
-                    task_dict,
-                    platform_dict
-                )
-                
-                if fallback_safe_path_2:
-                    files_to_cleanup.add(fallback_safe_path_2)
+                # If fallback fails all retries and secondary fallback exists, try it
+                if not fallback_success and fallback_curl_2:
+                    log_with_task_details('INFO', f"Fallback upload failed after {max_retries} attempts, switching to secondary fallback for {platform_name}",
+                        task_id=task_id,
+                        details={'fallback_errors': detailed_errors, **platform_details})
                     
-                success, stdout, stderr = execute_curl(fallback_cmd_2, retries=3, retry_delay=5, mode='uploader', timeout=600)  # 10 minute timeout
-                if success:
-                    used_fallback = True
-                    fallback_level = 2
-                    current_stdout, current_stderr = stdout, stderr
+                    fallback_cmd_2, fallback_safe_path_2 = format_upload_command(
+                        fallback_curl_2,
+                        platform_video_file,
+                        task_dict,
+                        platform_dict
+                    )
+                    
+                    if fallback_safe_path_2:
+                        files_to_cleanup.add(fallback_safe_path_2)
+                    
+                    # Reset detailed errors for secondary fallback
+                    detailed_errors = []
+                    
+                    # Try secondary fallback with retries
+                    secondary_success = False
+                    for secondary_attempt in range(max_retries):
+                        log_with_task_details('INFO', f"Secondary fallback upload attempt {secondary_attempt+1}/{max_retries} for {platform_name}",
+                            task_id=task_id,
+                            details={'platform': platform_name, 'attempt': secondary_attempt+1, 'uploader': 'secondary_fallback'})
+                            
+                        success, stdout, stderr = execute_curl(fallback_cmd_2, retries=1, retry_delay=5, mode='uploader', timeout=600)  # 10 minute timeout
+                        
+                        if success:
+                            secondary_success = True
+                            used_fallback = True
+                            fallback_level = 2
+                            current_stdout, current_stderr = stdout, stderr
+                            log_with_task_details('INFO', f"Secondary fallback upload succeeded on attempt {secondary_attempt+1}",
+                                task_id=task_id,
+                                details={'platform': platform_name})
+                            break
+                            
+                        # Log the failure details
+                        error_detail = {
+                            'attempt': secondary_attempt+1,
+                            'uploader': 'secondary_fallback',
+                            'platform': platform_name,
+                            'error': stderr,
+                            'stdout': stdout[:500] if stdout else ''
+                        }
+                        detailed_errors.append(error_detail)
+                        
+                        log_with_task_details('WARNING', f"Secondary fallback upload attempt {secondary_attempt+1} failed for {platform_name}",
+                            task_id=task_id,
+                            details=error_detail)
+                            
+                        # Don't wait after last attempt
+                        if secondary_attempt < max_retries - 1:
+                            retry_delay = retry_delay_base * (2 ** secondary_attempt)  # Exponential backoff
+                            log_with_task_details('INFO', f"Retrying secondary fallback upload in {retry_delay} seconds",
+                                task_id=task_id)
+                            time.sleep(retry_delay)
+                    
+                    success = secondary_success
+                else:
+                    success = fallback_success
+            else:
+                success = primary_success
 
             if success:
                 uploaded_platforms.append(platform_name)
