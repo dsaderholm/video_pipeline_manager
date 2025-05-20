@@ -2366,7 +2366,7 @@ def force_release_lock():
     conn = None
     try:
         # Create a direct connection instead of using contextmanager
-        conn = db._create_connection()
+        conn = db.create_connection()
         
         # Verify the connection is healthy
         if not check_connection_health(conn):
