@@ -470,15 +470,27 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
             # Parse the Content-Disposition header for the filename when in generator mode
             generated_filename = None
             if mode == 'generator':
-                cd_match = re.search(r'Content-Disposition:.*filename="?([^";\n]+)', stderr_str, re.IGNORECASE)
+                # Try to extract filename from Content-Disposition
+                cd_match = re.search(r'Content-Disposition:.*filename="?([^";\n]+)', stdout_str + stderr_str, re.IGNORECASE)
                 if cd_match:
                     generated_filename = cd_match.group(1)
                     attempt_details['generated_filename'] = generated_filename
-                    log_with_details('INFO', f"Found filename in Content-Disposition header: {generated_filename}",
-                        details={'stdout_length': len(stdout_str), 'stderr_length': len(stderr_str)})
+                    log_with_details('INFO', f"Found filename in Content-Disposition header: {generated_filename}")
                 else:
-                    log_with_details('WARNING', "No filename found in Content-Disposition header",
-                        details={'stderr_snippet': stderr_str[:500]})
+                    # Fallback: Search for .mp4 mention in stdout
+                    mp4_lines = [line.strip() for line in (stdout_str + stderr_str).splitlines() if '.mp4' in line.lower()]
+                    if mp4_lines:
+                        for line in mp4_lines:
+                            filename_match = re.search(r'([\w.-]+\.mp4)', line)
+                            if filename_match:
+                                generated_filename = filename_match.group(1)
+                                attempt_details['generated_filename'] = generated_filename
+                                log_with_details('INFO', f"Found filename from stdout fallback: {generated_filename}",
+                                    details={'line': line})
+                                break
+                    else:
+                        log_with_details('WARNING', "No filename found in Content-Disposition header or output",
+                            details={'stdout_snippet': stdout_str[:300], 'stderr_snippet': stderr_str[:300]})
             
             # Use appropriate response checker based on mode
             if mode == 'generator':
