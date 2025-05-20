@@ -2357,29 +2357,20 @@ def cleanup_files(video_files):
         log_with_details('ERROR', f"Error searching for additional files to clean up: {str(e)}")
                     
 def force_release_lock():
-    """Force release any existing lock regardless of state"""
+    """Force release any existing lock regardless of state (PostgreSQL-safe)."""
     release_details = {
         'operation': 'force_release',
         'timestamp': datetime.now().isoformat()
     }
-    
+
     conn = None
     try:
-        # Create a direct connection instead of using contextmanager
+        # Create a direct connection outside the pool
         conn = db.create_connection()
-        
-        # Verify the connection is healthy
-        if not check_connection_health(conn):
-            logger.error("Failed to create a healthy database connection for force lock release")
-            # If we can't get a good connection, we can't do much - consider the lock cleared anyway
-            # because the next attempt will try again with a fresh connection
-            return True
-            
+        conn.autocommit = False  # Safe manual transaction control
+
         c = conn.cursor()
-        
-        # Start transaction to prevent race conditions
-        db.begin_transaction(conn)
-        
+
         # Get current lock state for logging
         c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
         current_lock = c.fetchone()
@@ -2388,18 +2379,17 @@ def force_release_lock():
             'task_id': current_lock[1] if current_lock else None,
             'locked_at': current_lock[2] if current_lock else None
         }
-        
+
         # Force release the lock
         c.execute("""
             UPDATE task_lock 
             SET locked = 0, task_id = NULL, locked_at = NULL 
             WHERE id = 1
         """)
-        
         released = c.rowcount > 0
         release_details['released'] = released
-        
-        # Get final state for logging
+
+        # Final state
         c.execute("SELECT locked, task_id, locked_at FROM task_lock WHERE id = 1")
         final_lock = c.fetchone()
         release_details['after_release'] = {
@@ -2407,33 +2397,33 @@ def force_release_lock():
             'task_id': final_lock[1] if final_lock else None,
             'locked_at': final_lock[2] if final_lock else None
         }
-        
-        db.commit_transaction(conn)
-        
-        log_with_task_details('INFO', 
+
+        conn.commit()
+        log_with_task_details(
+            'INFO',
             "Successfully force-released pipeline lock" if released else "No lock needed to be released",
             task_id=None,
-            details=release_details)
-        
+            details=release_details
+        )
+
         return released
-        
+
     except Exception as e:
         release_details['error'] = str(e)
-        log_with_task_details('ERROR', 
-            f"Failed to force release lock: {str(e)}", 
+        log_with_task_details(
+            'ERROR',
+            f"Failed to force release lock: {str(e)}",
             task_id=None,
-            details=release_details)
-        
-        # Try to rollback if possible
+            details=release_details
+        )
         if conn:
             try:
-                db.rollback_transaction(conn)
+                conn.rollback()
             except:
                 pass
-        
         return False
+
     finally:
-        # Always close the connection in finally block
         if conn:
             try:
                 conn.close()
