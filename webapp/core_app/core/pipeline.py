@@ -26,6 +26,12 @@ from flask import current_app
 # The db_lock variable is kept for backward compatibility but should not be used
 db_lock = threading.Lock()
 
+def get_preview_dir():
+    """Get the path to the preview directory"""
+    preview_dir = os.path.join('static', 'previews')
+    os.makedirs(preview_dir, exist_ok=True)
+    return preview_dir
+
 def cleanup_files(files_to_cleanup):
     """Clean up temporary files used during video processing"""
     if not files_to_cleanup:
@@ -390,11 +396,76 @@ def release_lock(task_id=None):
             return False
 
 def update_task_status(task_id, status, processing_status=None, video_path=None, conn=None):
-    """Update task status and processing details"""
+    """Update task status and processing details with improved error handling"""
     should_close_conn = conn is None
+    success = False
+    status_details = {
+        'task_id': task_id,
+        'status': status,
+        'processing_status': processing_status,
+        'video_path': video_path,
+        'provided_connection': conn is not None
+    }
+    
     try:
         if conn is None:
-            with db.get_connection() as conn:
+            # Create a new connection if one wasn't provided
+            try:
+                conn = db.get_connection()
+                if not conn:
+                    log_with_details('ERROR', f"Failed to get database connection for status update", 
+                        task_id=task_id, details=status_details)
+                    return False
+            except Exception as conn_error:
+                log_with_details('ERROR', f"Connection error: {str(conn_error)}",
+                    task_id=task_id, details={**status_details, 'error': str(conn_error)})
+                return False
+                
+            # Use conn as a context manager with error handling
+            try:
+                with conn:
+                    with conn.cursor() as c:
+                        query = "UPDATE tasks SET status=%s"
+                        params = [status]
+                        
+                        if processing_status is not None:
+                            query += ", processing_status=%s"
+                            params.append(processing_status)
+                        
+                        if video_path is not None:
+                            query += ", processed_video_path=%s"
+                            params.append(video_path)
+                        
+                        query += " WHERE id=%s"
+                        params.append(task_id)
+                        
+                        c.execute(query, params)
+                        conn.commit()
+                        success = True
+            except Exception as update_error:
+                log_with_details('ERROR', f"Status update error: {str(update_error)}",
+                    task_id=task_id, details={**status_details, 'error': str(update_error)})
+                # Explicitly try to rollback this transaction
+                try:
+                    conn.rollback()
+                except:
+                    pass
+                raise
+        else:
+            # Using provided connection
+            try:
+                # Verify that the connection is still valid
+                if not check_connection_health(conn):
+                    log_with_details('WARNING', f"Provided connection is unhealthy, creating new one",
+                        task_id=task_id, details=status_details)
+                    # Close the bad connection and create a new one
+                    try:
+                        conn.close()
+                    except:
+                        pass
+                    conn = db.get_connection()
+                    should_close_conn = True
+                
                 with conn.cursor() as c:
                     query = "UPDATE tasks SET status=%s"
                     params = [status]
@@ -411,27 +482,36 @@ def update_task_status(task_id, status, processing_status=None, video_path=None,
                     params.append(task_id)
                     
                     c.execute(query, params)
-                    conn.commit()
-        else:
-            with conn.cursor() as c:
-                query = "UPDATE tasks SET status=%s"
-                params = [status]
+                    # Don't commit unless transaction was explicitly started
+                    if conn.autocommit is False:
+                        # Check if in transaction by executing a simple query
+                        try:
+                            c.execute("SELECT 1")
+                            conn.commit()
+                        except Exception as tx_error:
+                            log_with_details('WARNING', f"Transaction error in update_task_status: {str(tx_error)}",
+                                task_id=task_id,
+                                details={'error': str(tx_error)})
+                    success = True
+            except Exception as provided_conn_error:
+                log_with_details('ERROR', f"Error using provided connection: {str(provided_conn_error)}",
+                    task_id=task_id, details={**status_details, 'error': str(provided_conn_error)})
+                raise
                 
-                if processing_status is not None:
-                    query += ", processing_status=%s"
-                    params.append(processing_status)
-                
-                if video_path is not None:
-                    query += ", processed_video_path=%s"
-                    params.append(video_path)
-                
-                query += " WHERE id=%s"
-                params.append(task_id)
-                
-                c.execute(query, params)
+        return success
+        
+    except Exception as e:
+        log_with_details('ERROR', f"Failed to update task status: {str(e)}",
+            task_id=task_id, details={**status_details, 'error': str(e)})
+        return False
+        
     finally:
         if should_close_conn and conn:
-            conn.close()
+            try:
+                conn.close()
+            except Exception as close_error:
+                log_with_details('WARNING', f"Error closing connection: {str(close_error)}",
+                    task_id=task_id, details={'error': str(close_error)})
 
 def store_generated_video(task_id, original_name, processed_path, scheduled_time, conn=None, in_transaction=False):
     """Store information about a newly generated video"""
@@ -913,18 +993,35 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
 
             # Handle preview mode
             if preview_mode:
-                preview_dir = os.path.join('static', 'previews')
-                os.makedirs(preview_dir, exist_ok=True)
+                # Use the get_preview_dir function for consistency
+                preview_dir = get_preview_dir()
                 preview_path = os.path.join(preview_dir, f'preview_task_{task_id}.mp4')
                 
                 if os.path.exists(preview_path):
-                    os.remove(preview_path)
+                    try:
+                        os.remove(preview_path)
+                    except Exception as e:
+                        log_with_task_details('WARNING', f"Could not remove existing preview file: {str(e)}",
+                            task_id=task_id,
+                            details={'error': str(e), 'path': preview_path})
                 
-                shutil.copy2(current_video_file, preview_path)
-                update_task_status(task_id, 'completed', None, None, conn)
-                conn.commit()
-                conn.autocommit = True
-                return preview_path
+                try:
+                    shutil.copy2(current_video_file, preview_path)
+                    # Update task status with transaction handling to prevent connection errors
+                    update_task_status(task_id, 'completed', None, None, conn)
+                    try:
+                        conn.commit()
+                        conn.autocommit = True
+                    except Exception as tx_error:
+                        log_with_task_details('WARNING', f"Transaction error in preview mode: {str(tx_error)}",
+                            task_id=task_id,
+                            details={'error': str(tx_error)})
+                    return preview_path
+                except Exception as copy_error:
+                    log_with_task_details('ERROR', f"Failed to create preview file: {str(copy_error)}",
+                        task_id=task_id,
+                        details={'error': str(copy_error), 'source': current_video_file, 'target': preview_path})
+                    raise
 
             # Store processed video
             os.makedirs('processed_videos', exist_ok=True)

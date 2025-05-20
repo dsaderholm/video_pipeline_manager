@@ -55,32 +55,58 @@ load_dotenv()
 
 def cleanup_preview_files():
     """Clean up preview files older than 1 hour"""
-    preview_dir = os.path.join(APP_ROOT, 'previews')
-    if not os.path.exists(preview_dir):
-        return
-        
-    app_logger.info("Starting scheduled preview files cleanup")
-    deleted_count = 0
-    error_count = 0
-    current_time = datetime.now().timestamp()
-    
-    for file in os.listdir(preview_dir):
-        if not file.startswith('preview_task_'):
-            continue
+    try:
+        # Use the new utility function that handles its own logging
+        from webapp.core_app.core.utils import cleanup_preview_directory
+        cleanup_preview_directory()
+    except Exception as e:
+        app_logger.error(f"Error during preview cleanup: {str(e)}")
+        # Fall back to the old method if the new one fails
+        try:
+            from webapp.core_app.core.pipeline import get_preview_dir
+            preview_dir = get_preview_dir()
+            if not os.path.exists(preview_dir):
+                return
+                
+            app_logger.info("Starting scheduled preview files cleanup (fallback method)")
+            deleted_count = 0
+            error_count = 0
+            current_time = datetime.now().timestamp()
             
-        file_path = os.path.join(preview_dir, file)
-        # If file is older than 1 hour
-        if os.path.getmtime(file_path) < current_time - 3600:
+            for file in os.listdir(preview_dir):
+                if not file.startswith('preview_task_'):
+                    continue
+                    
+                file_path = os.path.join(preview_dir, file)
+                # If file is older than 1 hour
+                if os.path.getmtime(file_path) < current_time - 3600:
+                    try:
+                        os.remove(file_path)
+                        deleted_count += 1
+                        logger.debug(f"Deleted old preview file: {file}")
+                    except Exception as e:
+                        error_count += 1
+                        logger.error(f"Error cleaning up old preview file {file_path}: {e}")
+            
+            if deleted_count > 0 or error_count > 0:
+                app_logger.info(f"Preview cleanup complete. Deleted: {deleted_count}, Errors: {error_count}")
+        except Exception as fallback_error:
+            app_logger.error(f"Fallback preview cleanup also failed: {str(fallback_error)}")
+            # Final fallback - try static/previews directory
             try:
-                os.remove(file_path)
-                deleted_count += 1
-                logger.debug(f"Deleted old preview file: {file}")
+                preview_dir = os.path.join('static', 'previews')
+                if os.path.exists(preview_dir):
+                    app_logger.info(f"Attempting final fallback cleanup in {preview_dir}")
+                    for file in os.listdir(preview_dir):
+                        if file.startswith('preview_') and file.endswith('.mp4'):
+                            try:
+                                os.remove(os.path.join(preview_dir, file))
+                                app_logger.info(f"Removed preview file: {file}")
+                            except Exception as e:
+                                app_logger.error(f"Could not remove preview file: {file}, error: {str(e)}")
             except Exception as e:
-                error_count += 1
-                logger.error(f"Error cleaning up old preview file {file_path}: {e}")
-    
-    if deleted_count > 0 or error_count > 0:
-        app_logger.info(f"Preview cleanup complete. Deleted: {deleted_count}, Errors: {error_count}")
+                app_logger.error(f"All preview cleanup methods failed: {str(e)}")
+                pass
 
 from webapp.core_app.core.pipeline import process_night_queue, process_scheduled_uploads  # Updated import path
 

@@ -1025,6 +1025,42 @@ def cleanup_processed_video(video_path):
         log_with_details('ERROR', f"Failed to clean up processed video: {str(e)}",
             details=cleanup_details)
 
+def cleanup_preview_directory():
+    """Clean up old preview files"""
+    try:
+        from webapp.core_app.core.pipeline import get_preview_dir
+        preview_dir = get_preview_dir()
+        if not os.path.exists(preview_dir):
+            log_with_details('INFO', f"Preview directory does not exist: {preview_dir}")
+            return
+            
+        log_with_details('INFO', f"Cleaning up preview directory: {preview_dir}")
+        count = 0
+        
+        # Find preview files older than 24 hours
+        now = time.time()
+        max_age = 86400  # 24 hours in seconds
+        
+        for filename in os.listdir(preview_dir):
+            if filename.startswith('preview_task_') and filename.endswith('.mp4'):
+                file_path = os.path.join(preview_dir, filename)
+                try:
+                    file_age = now - os.path.getmtime(file_path)
+                    if file_age > max_age:
+                        os.remove(file_path)
+                        count += 1
+                        log_with_details('INFO', f"Removed old preview file: {filename}", 
+                            details={'age_seconds': file_age, 'path': file_path})
+                except Exception as e:
+                    log_with_details('WARNING', f"Error removing preview file {filename}: {str(e)}", 
+                        details={'error': str(e), 'path': file_path})
+                        
+        log_with_details('INFO', f"Cleaned up {count} preview files")
+    except Exception as e:
+        log_with_details('ERROR', f"Error during preview directory maintenance: {str(e)}", 
+            details={'error': str(e)})
+        print(f"Error during preview directory maintenance: {str(e)}", file=sys.stderr)
+
 def create_safe_filename(original_path):
     """Create a safe temporary filename for uploads"""
     directory = os.path.dirname(original_path) or '.'
