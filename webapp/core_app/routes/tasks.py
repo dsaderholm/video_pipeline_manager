@@ -455,7 +455,8 @@ def delete_task(id):
     
     with db.get_connection() as conn:
         try:
-            conn.execute('BEGIN')
+            with conn.cursor() as begin_cursor:
+                begin_cursor.execute('BEGIN')
             c = conn.cursor()
             
             # Remove scheduled jobs
@@ -595,7 +596,8 @@ def preview_task(id):
             c = conn.cursor()
             
             # Begin transaction
-            conn.execute("BEGIN IMMEDIATE")
+            with conn.cursor() as cursor:
+                cursor.execute("BEGIN")
             
             # Now check this specific task - within transaction
             c.execute("SELECT id, status, processing_status FROM tasks WHERE id = %s", (id,))
