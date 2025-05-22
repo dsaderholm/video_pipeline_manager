@@ -293,6 +293,19 @@ def init_scheduler(app):
         )
         logger.info("Scheduled database maintenance job")
         
+        # Add periodic status correction job
+        scheduler.add_job(
+            id='status_correction',
+            func='webapp.core_app.routes.tasks:auto_correct_task_statuses',
+            trigger='interval',
+            minutes=5,  # Run every 5 minutes
+            name='Automatic Status Correction',
+            misfire_grace_time=120,  # 2 minute grace time
+            max_instances=1,
+            replace_existing=True
+        )
+        logger.info("Scheduled automatic status correction job")
+        
         # Add automatic lock reset job to clear any stuck locks
         # Run more frequently (every 10 minutes) to prevent prolonged deadlocks
         # Use string reference to ensure we always get the latest version of the function
@@ -443,6 +456,52 @@ def init_scheduler(app):
 
     return scheduler
 
+def cleanup_stuck_tasks():
+    """Clean up tasks that may be stuck in preview or processing states from unexpected shutdown"""
+    try:
+        from webapp.core_app.core.database import db
+        
+        with db.get_connection() as conn:
+            c = conn.cursor()
+            
+            # Reset any tasks stuck in 'previewing' status
+            c.execute("""
+                UPDATE tasks 
+                SET status = 'pending', 
+                    processing_status = 'pending'
+                WHERE status = 'previewing'
+            """)
+            preview_reset_count = c.rowcount
+            
+            # Reset any tasks stuck in 'running' status (from unexpected shutdown)
+            c.execute("""
+                UPDATE tasks 
+                SET status = 'pending', 
+                    processing_status = 'pending'
+                WHERE status = 'running'
+            """)
+            running_reset_count = c.rowcount
+            
+            # Force release any stuck locks
+            c.execute("""
+                UPDATE task_lock 
+                SET locked = 0, 
+                    task_id = NULL, 
+                    locked_at = NULL 
+                WHERE id = 1
+            """)
+            lock_reset_count = c.rowcount
+            
+            conn.commit()
+            
+            if preview_reset_count > 0 or running_reset_count > 0 or lock_reset_count > 0:
+                app_logger.info(f"Startup cleanup completed: {preview_reset_count} preview tasks reset, {running_reset_count} running tasks reset, {lock_reset_count} locks released")
+            else:
+                app_logger.info("Startup cleanup completed: no stuck tasks found")
+                
+    except Exception as e:
+        app_logger.error(f"Error during startup cleanup: {str(e)}")
+
 def create_app():
     """Create and configure the Flask application"""
     app_logger.info("Starting application initialization...")
@@ -478,6 +537,51 @@ def create_app():
             # Database configuration
             from webapp.core_app.core.database import db
             # No need to fix logs table anymore
+            
+            # Clean up any stuck tasks from previous shutdown
+            cleanup_stuck_tasks()
+            
+            # Clean up any orphaned preview files from previous shutdown
+            try:
+                from webapp.core_app.core.pipeline import get_preview_dir
+                import glob
+                preview_dir = get_preview_dir()
+                preview_files = glob.glob(os.path.join(preview_dir, 'preview_task_*.mp4'))
+                cleaned_files = 0
+                
+                # Get a fresh cursor for preview file cleanup
+                c = conn.cursor()
+                
+                for preview_file in preview_files:
+                    try:
+                        # Extract task ID from filename
+                        filename = os.path.basename(preview_file)
+                        if filename.startswith('preview_task_') and filename.endswith('.mp4'):
+                            task_id_str = filename[13:-4]  # Remove 'preview_task_' and '.mp4'
+                            try:
+                                task_id = int(task_id_str)
+                                # Check if task exists and is not in previewing state
+                                c.execute("SELECT status FROM tasks WHERE id = %s", (task_id,))
+                                result = c.fetchone()
+                                if not result or result[0] != 'previewing':
+                                    # Safe to remove orphaned preview file
+                                    os.remove(preview_file)
+                                    cleaned_files += 1
+                                    app_logger.debug(f"Removed orphaned preview file: {preview_file}")
+                            except (ValueError, TypeError):
+                                # Invalid task ID in filename, remove it
+                                os.remove(preview_file)
+                                cleaned_files += 1
+                                app_logger.debug(f"Removed invalid preview file: {preview_file}")
+                    except Exception as file_error:
+                        app_logger.warning(f"Failed to clean up preview file {preview_file}: {str(file_error)}")
+                
+                if cleaned_files > 0:
+                    app_logger.info(f"Cleaned up {cleaned_files} orphaned preview files")
+                    
+            except Exception as preview_cleanup_error:
+                app_logger.warning(f"Error during preview file cleanup: {str(preview_cleanup_error)}")
+            
         except Exception as e:
             logger.error(f"Failed to initialize main database: {str(e)}")
             raise

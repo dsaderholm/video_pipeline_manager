@@ -159,10 +159,28 @@ def get_tasks():
     with db.get_connection() as conn:
         tasks = []
         with conn.cursor() as c:
+            # First, clean up any obviously stuck tasks
             c.execute("""
-                SELECT t.*, g.name as generator_name
+                UPDATE tasks 
+                SET status = 'pending', processing_status = 'pending'
+                WHERE status IN ('previewing', 'running') 
+                AND NOT EXISTS (
+                    SELECT 1 FROM task_lock 
+                    WHERE locked = 1 AND task_id = tasks.id
+                )
+            """)
+            
+            stuck_reset_count = c.rowcount
+            if stuck_reset_count > 0:
+                logger.info(f"Auto-reset {stuck_reset_count} stuck tasks during task list fetch")
+            
+            # Get tasks with lock information
+            c.execute("""
+                SELECT t.*, g.name as generator_name, 
+                       tl.locked, tl.task_id as lock_task_id
                 FROM tasks t
                 LEFT JOIN generators g ON t.generator_id = g.id
+                LEFT JOIN task_lock tl ON tl.id = 1
                 ORDER BY t.created_at DESC
             """)
             task_rows = c.fetchall()
@@ -170,8 +188,20 @@ def get_tasks():
             for task in task_rows:
                 task_detail = get_task_details(task[0], conn)
                 if task_detail:
+                    # Correct the status based on actual lock state
+                    locked = task[-2]  # second to last column
+                    lock_task_id = task[-1]  # last column
+                    
+                    if locked and lock_task_id == task[0]:  # task[0] is task ID
+                        task_detail['status'] = 'running'
+                        task_detail['processing_status'] = 'processing'
+                    elif task_detail['status'] == 'previewing' and (not locked or lock_task_id != task[0]):
+                        task_detail['status'] = 'pending'
+                        task_detail['processing_status'] = 'pending'
+                    
                     tasks.append(task_detail)
                     
+            conn.commit()
             return jsonify(tasks)
 
 @tasks_bp.route('/api/tasks/<int:id>/videos', methods=['GET'])
@@ -595,26 +625,32 @@ def preview_task(id):
         with db.get_connection() as conn:
             c = conn.cursor()
             
-            # Begin transaction
-            with conn.cursor() as cursor:
-                cursor.execute("BEGIN")
+            # First, check if task is stuck in previewing state and reset it
+            c.execute("""
+                UPDATE tasks 
+                SET status = 'pending', processing_status = 'pending'
+                WHERE id = %s AND status = 'previewing'
+            """, (id,))
+            reset_count = c.rowcount
             
-            # Now check this specific task - within transaction
+            if reset_count > 0:
+                logger.info(f"Reset stuck preview state for task {id}")
+            
+            # Now check this specific task
             c.execute("SELECT id, status, processing_status FROM tasks WHERE id = %s", (id,))
             task = c.fetchone()
             
             if not task:
-                conn.commit()
                 return jsonify({
                     'success': False,
                     'message': f'Task {id} not found'
                 }), 404
                 
-            if task[1] == 'previewing' or task[2] == 'processing':
-                conn.commit()
+            # Only block if task is actually running (not stuck in previewing)
+            if task[1] == 'running' or task[2] == 'processing':
                 return jsonify({
                     'success': False,
-                    'message': 'Preview or processing already in progress'
+                    'message': 'Task is currently running or processing'
                 }), 409
 
             # Clean up any existing preview files for this task
@@ -636,7 +672,7 @@ def preview_task(id):
                         raise
                     time.sleep(retry_delay)
 
-            # Update task status for preview within transaction
+            # Update task status for preview
             c.execute("""
                 UPDATE tasks 
                 SET status = 'previewing',
@@ -644,7 +680,6 @@ def preview_task(id):
                 WHERE id = %s
             """, (id,))
             
-            # Commit transaction
             conn.commit()
 
         # Start the pipeline in preview mode
@@ -692,20 +727,20 @@ def preview_task(id):
                 
     except Exception as e:
         logger.error(f"Error generating preview for task {id}: {str(e)}")
-        # Update task status on error
+        # Update task status on error - reset to pending instead of failed
         with db.get_connection() as conn:
             c = conn.cursor()
             c.execute("""
                 UPDATE tasks 
-                SET status = 'failed',
-                    processing_status = 'failed'
+                SET status = 'pending',
+                    processing_status = 'pending'
                 WHERE id = %s
             """, (id,))
             conn.commit()
             
         return jsonify({
             'success': False,
-            'message': f'Preview generation failed: {str(e)}'
+            'message': f'Preview generation failed: {str(e)}. Task status has been reset.'
         }), 500
 
 @tasks_bp.route('/api/tasks/<int:id>/preview/download', methods=['GET'])
@@ -984,6 +1019,178 @@ def upload_task(id):
             'success': False,
             'message': str(e)
         }), 500
+@tasks_bp.route('/api/tasks/<int:id>/status', methods=['GET'])
+def get_task_status(id):
+    """Get real-time status of a specific task with automatic cleanup"""
+    try:
+        with db.get_connection() as conn:
+            c = conn.cursor()
+            
+            # First check if task is stuck and reset if needed
+            c.execute("""
+                UPDATE tasks 
+                SET status = 'pending', processing_status = 'pending'
+                WHERE id = %s AND status = 'previewing' 
+                AND NOT EXISTS (
+                    SELECT 1 FROM task_lock 
+                    WHERE locked = 1 AND task_id = %s
+                )
+            """, (id, id))
+            
+            reset_count = c.rowcount
+            if reset_count > 0:
+                logger.info(f"Auto-reset stuck preview state for task {id}")
+            
+            # Get current status
+            c.execute("""
+                SELECT t.id, t.name, t.status, t.processing_status, 
+                       tl.locked, tl.task_id as lock_task_id
+                FROM tasks t
+                LEFT JOIN task_lock tl ON tl.id = 1
+                WHERE t.id = %s
+            """, (id,))
+            
+            result = c.fetchone()
+            if not result:
+                return jsonify({'error': 'Task not found'}), 404
+            
+            task_id, name, status, processing_status, locked, lock_task_id = result
+            
+            # Determine actual status
+            actual_status = status
+            if locked and lock_task_id == task_id:
+                actual_status = 'running'
+            elif status == 'previewing' and (not locked or lock_task_id != task_id):
+                # Task claims to be previewing but no lock - it's stuck
+                actual_status = 'pending'
+            
+            conn.commit()
+            
+            return jsonify({
+                'id': task_id,
+                'name': name,
+                'status': actual_status,
+                'processing_status': processing_status,
+                'locked': bool(locked),
+                'lock_task_id': lock_task_id,
+                'was_reset': reset_count > 0
+            })
+            
+    except Exception as e:
+        logger.error(f"Error getting task status for {id}: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+@tasks_bp.route('/api/tasks/cleanup-stuck', methods=['POST'])
+def cleanup_stuck_tasks_endpoint():
+    """Manual endpoint to clean up any stuck tasks"""
+    try:
+        with db.get_connection() as conn:
+            c = conn.cursor()
+            
+            # Reset any tasks stuck in 'previewing' status
+            c.execute("""
+                UPDATE tasks 
+                SET status = 'pending', 
+                    processing_status = 'pending'
+                WHERE status = 'previewing'
+            """)
+            preview_reset_count = c.rowcount
+            
+            # Reset any tasks stuck in 'running' status (from unexpected shutdown)
+            c.execute("""
+                UPDATE tasks 
+                SET status = 'pending', 
+                    processing_status = 'pending'
+                WHERE status = 'running'
+            """)
+            running_reset_count = c.rowcount
+            
+            # Force release any stuck locks
+            c.execute("""
+                UPDATE task_lock 
+                SET locked = 0, 
+                    task_id = NULL, 
+                    locked_at = NULL 
+                WHERE id = 1
+            """)
+            lock_reset_count = c.rowcount
+            
+            conn.commit()
+            
+            # Clean up orphaned preview files
+            from webapp.core_app.core.pipeline import get_preview_dir
+            import glob
+            preview_dir = get_preview_dir()
+            preview_files = glob.glob(os.path.join(preview_dir, 'preview_task_*.mp4'))
+            cleaned_files = 0
+            
+            for preview_file in preview_files:
+                try:
+                    # Extract task ID from filename
+                    filename = os.path.basename(preview_file)
+                    if filename.startswith('preview_task_') and filename.endswith('.mp4'):
+                        task_id_str = filename[13:-4]  # Remove 'preview_task_' and '.mp4'
+                        try:
+                            task_id = int(task_id_str)
+                            # Check if task exists and is not in previewing state
+                            c.execute("SELECT status FROM tasks WHERE id = %s", (task_id,))
+                            result = c.fetchone()
+                            if not result or result[0] != 'previewing':
+                                # Safe to remove orphaned preview file
+                                os.remove(preview_file)
+                                cleaned_files += 1
+                        except (ValueError, TypeError):
+                            # Invalid task ID in filename, remove it
+                            os.remove(preview_file)
+                            cleaned_files += 1
+                except Exception as file_error:
+                    logger.warning(f"Failed to clean up preview file {preview_file}: {str(file_error)}")
+            
+            return jsonify({
+                'success': True,
+                'message': 'Cleanup completed',
+                'details': {
+                    'preview_tasks_reset': preview_reset_count,
+                    'running_tasks_reset': running_reset_count,
+                    'locks_released': lock_reset_count,
+                    'preview_files_cleaned': cleaned_files
+                }
+            })
+            
+    except Exception as e:
+        logger.error(f"Error during manual cleanup: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'Cleanup failed: {str(e)}'
+        }), 500
+
+def auto_correct_task_statuses():
+    """Automatically correct task statuses - called by scheduler"""
+    try:
+        from webapp.core_app.core.database import db
+        
+        with db.get_connection() as conn:
+            c = conn.cursor()
+            
+            # Reset tasks that are stuck in previewing/running without locks
+            c.execute("""
+                UPDATE tasks 
+                SET status = 'pending', processing_status = 'pending'
+                WHERE status IN ('previewing', 'running') 
+                AND NOT EXISTS (
+                    SELECT 1 FROM task_lock 
+                    WHERE locked = 1 AND task_id = tasks.id
+                )
+            """)
+            
+            reset_count = c.rowcount
+            if reset_count > 0:
+                logger.info(f"Auto-corrected {reset_count} stuck task statuses")
+            
+            conn.commit()
+            
+    except Exception as e:
+        logger.error(f"Error in automatic status correction: {str(e)}")
+
 @tasks_bp.route('/api/tasks/night-status', methods=['GET'])
 def get_night_processing_status():
     """Get the status of night processing window and upcoming tasks"""
