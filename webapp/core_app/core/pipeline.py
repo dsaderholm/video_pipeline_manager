@@ -697,7 +697,7 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                     retry_delay=5, 
                     clean_before=True,  # Ensure clean state
                     validate_output=True, 
-                    timeout=600,  # 10 minute timeout
+                    timeout=900,  # 15 minute timeout
                     mode='generator'
                 )
                 
