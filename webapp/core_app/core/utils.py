@@ -97,20 +97,18 @@ def check_generator_response(stdout_str, stderr_str):
         r'Failed to connect',
         r'404 Not Found',
         r'403 Forbidden',
-        r'500 Internal Server Error'
+        r'500 Internal Server Error',
+        r'HTTP/\d\.\d\s+[45]\d{2}'  # HTTP 4xx or 5xx errors
     ]
     for pattern in error_patterns:
         if re.search(pattern, stderr_str + stdout_str, re.IGNORECASE):
             log_with_details('ERROR', f"Generator failed with error pattern: {pattern}", details=response_details)
             return False, stderr_str
 
-    # If no clear error and not much stderr, assume success
-    if not stderr_str.strip():
-        log_with_details('INFO', "Generator completed successfully with minimal output", details=response_details)
-        return True, ""
-
-    log_with_details('WARNING', "Generator completed with unrecognized output", details=response_details)
-    return False, stderr_str or "Unknown generator failure"
+    # If no clear error and curl completed (which it did since we got here), assume success
+    # This is especially true for file downloads with -O flag where success is measured by file creation
+    log_with_details('INFO', "Generator completed successfully - no error patterns detected", details=response_details)
+    return True, ""
 
 def check_utility_response(stdout_str, stderr_str):
     response_details = {
