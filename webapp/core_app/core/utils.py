@@ -467,30 +467,38 @@ def execute_curl(curl_command, retries=3, retry_delay=1, clean_before=False, val
                 'stderr_length': len(stderr_str)
             })
 
-            # Parse the Content-Disposition header for the filename when in generator mode
+            # For generator mode, get filename from the actual downloaded file
+            # since generators return videos with filenames as descriptions
             generated_filename = None
             if mode == 'generator':
-                # Try to extract filename from Content-Disposition
-                cd_match = re.search(r'Content-Disposition:.*filename="?([^";\n]+)', stdout_str + stderr_str, re.IGNORECASE)
-                if cd_match:
-                    generated_filename = cd_match.group(1)
-                    attempt_details['generated_filename'] = generated_filename
-                    log_with_details('INFO', f"Found filename in Content-Disposition header: {generated_filename}")
-                else:
-                    # Fallback: Search for .mp4 mention in stdout
-                    mp4_lines = [line.strip() for line in (stdout_str + stderr_str).splitlines() if '.mp4' in line.lower()]
-                    if mp4_lines:
-                        for line in mp4_lines:
-                            filename_match = re.search(r'([\w.-]+\.mp4)', line)
-                            if filename_match:
-                                generated_filename = filename_match.group(1)
-                                attempt_details['generated_filename'] = generated_filename
-                                log_with_details('INFO', f"Found filename from stdout fallback: {generated_filename}",
-                                    details={'line': line})
-                                break
+                # Wait a moment for file system to sync after curl download
+                time.sleep(2)
+                
+                # Find the most recently created MP4 file after the generator ran
+                try:
+                    cwd = os.getcwd()
+                    mp4_files = []
+                    for file in os.listdir(cwd):
+                        if file.lower().endswith('.mp4'):
+                            file_path = os.path.join(cwd, file)
+                            # Only include files that are at least 1KB (valid videos)
+                            if os.path.getsize(file_path) >= 1024:
+                                mp4_files.append((file_path, os.path.getctime(file_path)))
+                    
+                    if mp4_files:
+                        # Sort by creation time, newest first
+                        mp4_files.sort(key=lambda x: x[1], reverse=True)
+                        newest_file = mp4_files[0][0]
+                        generated_filename = os.path.basename(newest_file)
+                        attempt_details['generated_filename'] = generated_filename
+                        log_with_details('INFO', f"Found generated video file: {generated_filename}",
+                            details={'file_path': newest_file, 'file_count': len(mp4_files)})
                     else:
-                        log_with_details('WARNING', "No filename found in Content-Disposition header or output",
-                            details={'stdout_snippet': stdout_str[:300], 'stderr_snippet': stderr_str[:300]})
+                        log_with_details('WARNING', "No MP4 files found after generator execution",
+                            details={'current_dir': cwd})
+                except Exception as file_search_error:
+                    log_with_details('ERROR', f"Error searching for generated file: {str(file_search_error)}",
+                        details={'error': str(file_search_error)})
             
             # Use appropriate response checker based on mode
             if mode == 'generator':
