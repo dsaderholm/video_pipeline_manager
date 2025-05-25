@@ -37,13 +37,20 @@ def cleanup_files(files_to_cleanup):
     if not files_to_cleanup:
         return
         
+    removed_count = 0
+    failed_count = 0    
     for file_path in files_to_cleanup:
         if file_path and os.path.exists(file_path):
             try:
                 os.remove(file_path)
-                logger.debug(f"Cleaned up temporary file: {file_path}")
+                logger.info(f"Cleaned up video file: {file_path}")
+                removed_count += 1
             except Exception as e:
                 logger.warning(f"Failed to clean up temporary file {file_path}: {str(e)}")
+                failed_count += 1
+    
+    if removed_count > 0 or failed_count > 0:
+        logger.info(f"File cleanup completed: {removed_count} removed, {failed_count} failed")
 
 def check_connection_health(conn):
     """Verify if a database connection is healthy and active"""
@@ -1016,6 +1023,15 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                         log_with_task_details('WARNING', f"Transaction error in preview mode: {str(tx_error)}",
                             task_id=task_id,
                             details={'error': str(tx_error)})
+                    
+                    # CRITICAL FIX: Don't clean up the source file in preview mode
+                    # Remove the current video file from cleanup list since we need it for preview
+                    if current_video_file in files_to_cleanup:
+                        files_to_cleanup.remove(current_video_file)
+                        log_with_task_details('INFO', f"Preserved source video file for preview",
+                            task_id=task_id,
+                            details={'source_file': current_video_file, 'preview_file': preview_path})
+                    
                     return preview_path
                 except Exception as copy_error:
                     log_with_task_details('ERROR', f"Failed to create preview file: {str(copy_error)}",
@@ -1102,6 +1118,11 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                         task_id=task_id,
                         details={'error': str(force_e)})
         
+        # Enhanced cleanup logging for debugging
+        if files_to_cleanup:
+            log_with_task_details('INFO', f"Cleaning up {len(files_to_cleanup)} temporary files",
+                task_id=task_id,
+                details={'files_to_cleanup': list(files_to_cleanup)})
         cleanup_files(files_to_cleanup)
         
         # Only close the connection if we created it

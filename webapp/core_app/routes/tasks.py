@@ -750,13 +750,33 @@ def download_preview(id):
         preview_dir = get_preview_dir()
         preview_path = os.path.join(preview_dir, f'preview_task_{id}.mp4')
         
+        # Enhanced debugging for missing preview files
         if not os.path.exists(preview_path):
+            # List all files in the preview directory for debugging
+            try:
+                files_in_preview_dir = os.listdir(preview_dir)
+                logger.error(f"Preview file not found: {preview_path}")
+                logger.error(f"Files in preview directory: {files_in_preview_dir}")
+            except Exception as list_error:
+                logger.error(f"Could not list preview directory: {str(list_error)}")
+            
             return jsonify({
                 'success': False,
-                'message': 'Preview not found or still generating'
+                'message': f'Preview file not found: {preview_path}. Check if preview generation completed successfully.'
             }), 404
 
         try:
+            # Check file size before attempting to read
+            file_size = os.path.getsize(preview_path)
+            logger.info(f"Preview file size: {file_size} bytes for task {id}")
+            
+            if file_size == 0:
+                logger.error(f"Preview file is empty: {preview_path}")
+                return jsonify({
+                    'success': False,
+                    'message': 'Preview file is empty - generation may have failed'
+                }), 404
+            
             # Ensure file is ready for reading
             max_retries = 10
             retry_delay = 1  # second
