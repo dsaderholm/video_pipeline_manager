@@ -28,9 +28,16 @@ db_lock = threading.Lock()
 
 def get_preview_dir():
     """Get the path to the preview directory"""
+    # In Docker environment, we need to ensure we're using the correct path
+    # The Flask app runs from /app, so static/previews should be relative to that
     preview_dir = os.path.join('static', 'previews')
-    os.makedirs(preview_dir, exist_ok=True)
-    return preview_dir
+    abs_preview_dir = os.path.abspath(preview_dir)
+    os.makedirs(abs_preview_dir, exist_ok=True)
+    
+    # Log the paths for debugging
+    logger.info(f"Preview directory setup: relative='{preview_dir}', absolute='{abs_preview_dir}'")
+    
+    return preview_dir  # Return relative path for Flask compatibility
 
 def cleanup_files(files_to_cleanup):
     """Clean up temporary files used during video processing"""
@@ -1004,16 +1011,45 @@ def process_video_generation(task_id, schedule_time=None, preview_mode=False, co
                 preview_dir = get_preview_dir()
                 preview_path = os.path.join(preview_dir, f'preview_task_{task_id}.mp4')
                 
+                # Debug logging for preview paths
+                log_with_task_details('INFO', f"Preview mode: Setting up preview file",
+                    task_id=task_id,
+                    details={
+                        'preview_dir': preview_dir,
+                        'preview_path': preview_path,
+                        'source_file': current_video_file,
+                        'source_exists': os.path.exists(current_video_file)
+                    })
+                
                 if os.path.exists(preview_path):
                     try:
                         os.remove(preview_path)
+                        log_with_task_details('INFO', f"Removed existing preview file",
+                            task_id=task_id,
+                            details={'removed_file': preview_path})
                     except Exception as e:
                         log_with_task_details('WARNING', f"Could not remove existing preview file: {str(e)}",
                             task_id=task_id,
                             details={'error': str(e), 'path': preview_path})
                 
                 try:
+                    # Ensure the preview directory exists
+                    os.makedirs(preview_dir, exist_ok=True)
+                    log_with_task_details('INFO', f"Ensured preview directory exists",
+                        task_id=task_id,
+                        details={'preview_dir': preview_dir})
+                    
+                    # Copy the file
                     shutil.copy2(current_video_file, preview_path)
+                    log_with_task_details('INFO', f"Successfully copied preview file",
+                        task_id=task_id,
+                        details={
+                            'source': current_video_file,
+                            'destination': preview_path,
+                            'dest_exists': os.path.exists(preview_path),
+                            'dest_size': os.path.getsize(preview_path) if os.path.exists(preview_path) else 0
+                        })
+                    
                     # Update task status with transaction handling to prevent connection errors
                     update_task_status(task_id, 'completed', None, None, conn)
                     try:

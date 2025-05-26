@@ -750,20 +750,46 @@ def download_preview(id):
         preview_dir = get_preview_dir()
         preview_path = os.path.join(preview_dir, f'preview_task_{id}.mp4')
         
+        # Also try absolute path in case of path mismatch
+        abs_preview_path = os.path.abspath(preview_path)
+        
+        # Log the paths being checked
+        logger.info(f"Checking for preview file at: {preview_path}")
+        logger.info(f"Absolute path: {abs_preview_path}")
+        logger.info(f"Current working directory: {os.getcwd()}")
+        
         # Enhanced debugging for missing preview files
         if not os.path.exists(preview_path):
-            # List all files in the preview directory for debugging
-            try:
-                files_in_preview_dir = os.listdir(preview_dir)
-                logger.error(f"Preview file not found: {preview_path}")
-                logger.error(f"Files in preview directory: {files_in_preview_dir}")
-            except Exception as list_error:
-                logger.error(f"Could not list preview directory: {str(list_error)}")
-            
-            return jsonify({
-                'success': False,
-                'message': f'Preview file not found: {preview_path}. Check if preview generation completed successfully.'
-            }), 404
+            # Try absolute path
+            if os.path.exists(abs_preview_path):
+                preview_path = abs_preview_path
+                logger.info(f"Found preview file using absolute path: {preview_path}")
+            else:
+                # List all files in the preview directory for debugging
+                try:
+                    files_in_preview_dir = os.listdir(preview_dir)
+                    logger.error(f"Preview file not found: {preview_path}")
+                    logger.error(f"Files in preview directory: {files_in_preview_dir}")
+                    
+                    # Also check absolute directory
+                    abs_preview_dir = os.path.dirname(abs_preview_path)
+                    if os.path.exists(abs_preview_dir):
+                        abs_files = os.listdir(abs_preview_dir)
+                        logger.error(f"Files in absolute preview directory ({abs_preview_dir}): {abs_files}")
+                    
+                    # Search for any preview files with this task ID
+                    import glob
+                    search_pattern = f"**/preview_task_{id}.mp4"
+                    found_files = glob.glob(search_pattern, recursive=True)
+                    logger.error(f"Searching recursively for {search_pattern}: {found_files}")
+                    
+                except Exception as list_error:
+                    logger.error(f"Could not list preview directory: {str(list_error)}")
+                
+                return jsonify({
+                    'success': False,
+                    'message': f'Preview file not found: {preview_path}. Check if preview generation completed successfully.'
+                }), 404
 
         try:
             # Check file size before attempting to read
