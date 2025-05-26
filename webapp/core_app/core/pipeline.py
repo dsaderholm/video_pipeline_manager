@@ -28,16 +28,26 @@ db_lock = threading.Lock()
 
 def get_preview_dir():
     """Get the path to the preview directory"""
-    # In Docker environment, we need to ensure we're using the correct path
-    # The Flask app runs from /app, so static/previews should be relative to that
-    preview_dir = os.path.join('static', 'previews')
-    abs_preview_dir = os.path.abspath(preview_dir)
-    os.makedirs(abs_preview_dir, exist_ok=True)
+    # In Docker environment, we need to ensure we're using the correct absolute path
+    # The Flask app working directory can vary, so use absolute path from /app root
+    
+    # Get the absolute path to the app root (/app)
+    # This handles cases where the working directory might be /app or /app/webapp/core_app
+    current_dir = os.getcwd()
+    if '/webapp/core_app' in current_dir:
+        # We're in a subdirectory, go back to app root
+        app_root = current_dir.split('/webapp/core_app')[0]
+    else:
+        # We're already in app root
+        app_root = current_dir if current_dir.endswith('/app') else '/app'
+    
+    preview_dir = os.path.join(app_root, 'static', 'previews')
+    os.makedirs(preview_dir, exist_ok=True)
     
     # Log the paths for debugging
-    logger.info(f"Preview directory setup: relative='{preview_dir}', absolute='{abs_preview_dir}'")
+    logger.info(f"Preview directory setup: current_dir='{current_dir}', app_root='{app_root}', preview_dir='{preview_dir}'")
     
-    return preview_dir  # Return relative path for Flask compatibility
+    return preview_dir  # Return absolute path for consistency
 
 def cleanup_files(files_to_cleanup):
     """Clean up temporary files used during video processing"""
